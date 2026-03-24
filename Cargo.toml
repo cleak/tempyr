@@ -26,5 +26,7 @@ thiserror = "2"
 rusqlite = { version = "0.34", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
 async-trait = "0.1"
+fastembed = "5"
 tempfile = "3"

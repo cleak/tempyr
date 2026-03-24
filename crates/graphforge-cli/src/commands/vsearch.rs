@@ -1,4 +1,5 @@
 use crate::config::ProjectContext;
+use graphforge_index::embeddings::{self, EmbeddingConfig, InputType};
 use graphforge_index::indexer::Index;
 
 pub fn run(
@@ -19,27 +20,29 @@ pub fn run(
     let emb_count = index.embedding_count()?;
     if emb_count == 0 {
         anyhow::bail!(
-            "No embeddings found. Vector search requires embeddings to be generated.\n\
-             Embeddings are populated when Claude Code uses the MCP server's graph_context tool \
-             with an embedding API configured in .graphforge/config.toml."
+            "No embeddings found. Run `graphforge index rebuild` with an embedding \
+             API key set (VOYAGE_API_KEY or GEMINI_API_KEY)."
         );
     }
 
-    // For CLI without an embedding API, we can't embed the query.
-    // This command works when embeddings + query embedding are available via MCP.
-    // For now, fall back to FTS search with a note.
-    println!("Note: CLI vector search requires a query embedding. Falling back to FTS search.");
-    println!("Use the MCP server (graph_vsearch tool) for true semantic search.\n");
+    // Embed the query
+    let config = load_embedding_config(ctx);
+    let provider = embeddings::create_provider(&config)?;
 
-    let results = index.search_fts_filtered(query, node_type, max_results)?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let query_embeddings = rt.block_on(provider.embed(&[query.to_string()], InputType::Query))?;
+
+    if query_embeddings.is_empty() {
+        anyhow::bail!("Failed to embed query");
+    }
+
+    let results = index.vector_search(&query_embeddings[0], max_results, node_type)?;
 
     if json {
         let json_results: Vec<_> = results.iter().map(|r| {
             serde_json::json!({
                 "node_id": r.node_id,
-                "title": r.title,
-                "node_type": r.node_type,
-                "score": r.score,
+                "similarity": r.similarity,
             })
         }).collect();
         println!("{}", serde_json::to_string_pretty(&json_results)?);
@@ -49,9 +52,23 @@ pub fn run(
             return Ok(());
         }
         for result in &results {
-            println!("{} ({}) - {}", result.node_id, result.node_type, result.title);
+            println!("{} (similarity: {:.3})", result.node_id, result.similarity);
         }
     }
 
     Ok(())
+}
+
+fn load_embedding_config(ctx: &ProjectContext) -> EmbeddingConfig {
+    let config_path = ctx.graphforge_dir.join("config.toml");
+    if let Ok(content) = std::fs::read_to_string(&config_path) {
+        if let Ok(table) = content.parse::<toml::Table>() {
+            if let Some(emb) = table.get("embedding") {
+                if let Ok(config) = emb.clone().try_into::<EmbeddingConfig>() {
+                    return config;
+                }
+            }
+        }
+    }
+    EmbeddingConfig::default()
 }

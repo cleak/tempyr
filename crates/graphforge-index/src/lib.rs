@@ -1,3 +1,4 @@
+pub mod embeddings;
 pub mod fts;
 pub mod hybrid;
 pub mod incremental;

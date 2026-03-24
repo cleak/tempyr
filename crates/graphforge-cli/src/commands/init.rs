@@ -5,10 +5,10 @@ graph_dir = "graph"
 schema_path = ".graphforge/schema.toml"
 
 [embedding]
-provider = "anthropic"
-model = "voyage-3"
-dimensions = 1024
-batch_size = 50
+provider = "voyage"                    # voyage | gemini | local
+model = "voyage-4"                     # voyage-4, voyage-4-large, gemini-embedding-001, etc.
+dimensions = 1024                      # 1024 for voyage, 768 for gemini
+# API key: set VOYAGE_API_KEY or GEMINI_API_KEY environment variable
 
 [llm]
 provider = "anthropic"
