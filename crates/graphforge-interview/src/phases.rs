@@ -298,4 +298,60 @@ mod tests {
         assert!(summary.contains("Discovery"));
         assert!(summary.contains("1 nodes"));
     }
+
+    #[test]
+    fn test_discovery_fallback_after_two_answers() {
+        let mut session = InterviewSession::new(
+            "feature", "feat-a",
+            "# Feature\n\nA long enough problem statement for the body check.\n"
+        );
+        // No graph_context — simulates empty/new graph
+        assert!(session.graph_context.is_empty());
+
+        // Record 2 answers in Discovery phase (session starts in Discovery)
+        session.record_answer("What is the problem?", "Users can't debug sessions.", vec![]);
+        session.record_answer("Any prior art?", "Nothing in the graph yet.", vec![]);
+
+        // Fallback should trigger: 2 answers + empty graph_context → advance to Product
+        assert_eq!(check_phase_transition(&session), Some(InterviewPhase::Product));
+    }
+
+    #[test]
+    fn test_technical_fallback_after_three_answers() {
+        let mut session = InterviewSession::new(
+            "feature", "feat-a",
+            "# Feature\n\nA long enough problem statement for the body check.\n"
+        );
+        session.phase = InterviewPhase::Technical;
+
+        // No component or decision nodes — fallback path only
+        assert!(check_phase_transition(&session).is_none());
+
+        // Record 3 answers in the Technical phase
+        session.record_answer("What stack?", "Rust + SQLite.", vec![]);
+        session.record_answer("Any constraints?", "Must run offline.", vec![]);
+        session.record_answer("Performance needs?", "Sub-second queries.", vec![]);
+
+        // Fallback should trigger: 3 answers in Technical → advance to Decomposition
+        assert_eq!(check_phase_transition(&session), Some(InterviewPhase::Decomposition));
+    }
+
+    #[test]
+    fn test_decomposition_fallback_after_two_answers() {
+        let mut session = InterviewSession::new(
+            "feature", "feat-a",
+            "# Feature\n\nA long enough problem statement for the body check.\n"
+        );
+        session.phase = InterviewPhase::Decomposition;
+
+        // No task nodes — fallback path only
+        assert!(check_phase_transition(&session).is_none());
+
+        // Record 2 answers in the Decomposition phase
+        session.record_answer("What are the subtasks?", "Index rebuild and query engine.", vec![]);
+        session.record_answer("Any dependencies?", "Query depends on index.", vec![]);
+
+        // Fallback should trigger: 2 answers in Decomposition → advance to Review
+        assert_eq!(check_phase_transition(&session), Some(InterviewPhase::Review));
+    }
 }

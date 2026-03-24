@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
+use graphforge_core::graph::Graph;
 use graphforge_core::schema::Schema;
 use serde::Serialize;
 
-use crate::gaps::{detect_gaps, Gap};
+use crate::gaps::{detect_gaps, detect_gaps_with_graph, Gap};
 use crate::phases;
 use crate::session::{
     DuplicateCandidate, EdgeSource, ExistingNodeSummary, InterviewSession,
@@ -60,9 +61,10 @@ pub fn interview_start(
     // Try to advance from Discovery if we have context
     phases::try_advance_phase(&mut session);
 
-    // Detect gaps
+    // Detect gaps and initialize gap tracking
     let gaps = detect_gaps(&session, schema);
     let questions: Vec<Gap> = gaps.iter().take(3).cloned().collect();
+    session.total_gaps_seen = gaps.len();
     session.remaining_gaps = gaps;
 
     let progress = compute_progress(&session);
@@ -99,7 +101,9 @@ pub fn add_proposed_node(
         source_qa: vec![session.answered.len()],
     });
 
-    reanalyze(session, schema)
+    let mut result = reanalyze(session, schema);
+    result.new_nodes = vec![id.to_string()];
+    result
 }
 
 /// Add a tentative edge to a session and re-analyze gaps.
@@ -117,7 +121,9 @@ pub fn add_proposed_edge(
         source_type: EdgeSource::ExplicitFromAnswer,
     });
 
-    reanalyze(session, schema)
+    let mut result = reanalyze(session, schema);
+    result.new_edges = vec![format!("{source} --{edge_type}--> {target}")];
+    result
 }
 
 /// Record a question-answer exchange and re-analyze gaps.
@@ -138,10 +144,20 @@ pub fn record_answer(
 
 /// Re-run gap analysis and phase transition checks.
 /// Public so MCP tools can trigger reanalysis without recording a phantom QA pair.
+/// Pass a Graph for context-aware gap detection (populates existing_related, question_type).
 pub fn reanalyze(session: &mut InterviewSession, schema: &Schema) -> InterviewUpdateResult {
+    reanalyze_with_graph(session, schema, None)
+}
+
+/// Re-run gap analysis with optional graph context.
+pub fn reanalyze_with_graph(
+    session: &mut InterviewSession,
+    schema: &Schema,
+    graph: Option<&Graph>,
+) -> InterviewUpdateResult {
     let phase_changed = phases::try_advance_phase(session);
 
-    let gaps = detect_gaps(session, schema);
+    let gaps = detect_gaps_with_graph(session, schema, graph);
     let filled_gaps: Vec<String> = session
         .remaining_gaps
         .iter()
@@ -152,6 +168,17 @@ pub fn reanalyze(session: &mut InterviewSession, schema: &Schema) -> InterviewUp
         })
         .map(|g| format!("{}: {}", g.node_type_needed, g.context))
         .collect();
+
+    // Track gap counts for accurate progress
+    let newly_filled = filled_gaps.len();
+    session.gaps_filled += newly_filled;
+    // total_gaps_seen grows when new gaps appear (e.g., new phase introduces gaps)
+    let new_gap_count = gaps.len();
+    let prev_remaining = session.remaining_gaps.len();
+    if new_gap_count + newly_filled > prev_remaining {
+        // More gaps appeared than were filled — new gaps discovered
+        session.total_gaps_seen += (new_gap_count + newly_filled) - prev_remaining;
+    }
 
     let questions: Vec<Gap> = gaps.iter().take(3).cloned().collect();
     session.remaining_gaps = gaps;
@@ -169,16 +196,16 @@ pub fn reanalyze(session: &mut InterviewSession, schema: &Schema) -> InterviewUp
     }
 }
 
-/// Compute interview progress based on gaps filled vs total.
+/// Compute interview progress based on actual gap tracking.
 pub fn compute_progress(session: &InterviewSession) -> Progress {
-    let total = session.remaining_gaps.len()
-        + session.remaining_gaps.iter().filter(|g| g.filled).count()
-        + session.answered.len(); // rough proxy for filled gaps
-    let filled = session.answered.len();
+    let total = session.total_gaps_seen;
+    let filled = session.gaps_filled;
     let percentage = if total > 0 {
         (filled as f32 / total as f32) * 100.0
-    } else {
+    } else if session.remaining_gaps.is_empty() {
         100.0
+    } else {
+        0.0
     };
     Progress {
         filled,
@@ -430,5 +457,163 @@ mod tests {
         // Should now be in Technical phase (transition happened when metric was added)
         assert!(update.phase_changed);
         assert_eq!(session.phase, InterviewPhase::Technical);
+    }
+
+    #[test]
+    fn test_extract_title() {
+        assert_eq!(extract_title("# Hello\nWorld"), "Hello");
+        assert_eq!(extract_title("plain text"), "plain text");
+        assert_eq!(extract_title(""), "");
+    }
+
+    #[test]
+    fn test_check_duplicates_identical_title() {
+        let schema = make_schema();
+        let tmp = tempfile::tempdir().unwrap();
+        let graph_dir = tmp.path().join("graph");
+
+        // Create personas subdirectory matching schema.toml directory for persona type
+        let personas_dir = graph_dir.join("personas");
+        std::fs::create_dir_all(&personas_dir).unwrap();
+
+        // Write an existing persona node file
+        let node_content = "\
+---
+id: persona-platform-eng
+type: persona
+owner: test
+edges: []
+---
+
+# Platform Engineer
+
+A platform engineer.
+";
+        std::fs::write(
+            personas_dir.join("persona-platform-eng.md"),
+            node_content,
+        )
+        .unwrap();
+
+        let graph = Graph::load_from_directory(&graph_dir, schema).unwrap();
+
+        // Create a tentative node with matching title
+        let tentative = TentativeNode {
+            id: "persona-plat-eng".to_string(),
+            node_type: "persona".to_string(),
+            status: "".to_string(),
+            fields: HashMap::new(),
+            body: "# Platform Engineer\n".to_string(),
+            confidence: 0.9,
+            source_qa: vec![],
+        };
+
+        let duplicates = check_duplicates(&tentative, &graph);
+        assert!(!duplicates.is_empty(), "should find a duplicate");
+        assert_eq!(duplicates[0].existing_id, "persona-platform-eng");
+        assert!(
+            duplicates[0].similarity_reason.contains("Identical"),
+            "expected identical title match, got: {}",
+            duplicates[0].similarity_reason,
+        );
+    }
+
+    #[test]
+    fn test_check_duplicates_no_match() {
+        let schema = make_schema();
+        let tmp = tempfile::tempdir().unwrap();
+        let graph_dir = tmp.path().join("graph");
+
+        let personas_dir = graph_dir.join("personas");
+        std::fs::create_dir_all(&personas_dir).unwrap();
+
+        let node_content = "\
+---
+id: persona-platform-eng
+type: persona
+owner: test
+edges: []
+---
+
+# Platform Engineer
+
+A platform engineer.
+";
+        std::fs::write(
+            personas_dir.join("persona-platform-eng.md"),
+            node_content,
+        )
+        .unwrap();
+
+        let graph = Graph::load_from_directory(&graph_dir, schema).unwrap();
+
+        // Create a tentative node with a completely different title
+        let tentative = TentativeNode {
+            id: "persona-data-scientist".to_string(),
+            node_type: "persona".to_string(),
+            status: "".to_string(),
+            fields: HashMap::new(),
+            body: "# Data Scientist\n".to_string(),
+            confidence: 0.9,
+            source_qa: vec![],
+        };
+
+        let duplicates = check_duplicates(&tentative, &graph);
+        assert!(
+            duplicates.is_empty(),
+            "should not find duplicates for unrelated title, got: {:?}",
+            duplicates,
+        );
+    }
+
+    #[test]
+    fn test_compute_progress_initial() {
+        let schema = make_schema();
+        let result = interview_start(
+            "Session replay for debugging funnel drop-offs",
+            "feature",
+            &schema,
+            &[],
+        )
+        .unwrap();
+
+        let progress = compute_progress(&result.session);
+        assert!(progress.total > 0, "new interview should have gaps");
+        assert_eq!(progress.filled, 0, "no gaps should be filled yet");
+    }
+
+    #[test]
+    fn test_compute_progress_after_fill() {
+        let schema = make_schema();
+        let result = interview_start(
+            "Session replay for debugging funnel drop-offs",
+            "feature",
+            &schema,
+            &["existing-epic".to_string()],
+        )
+        .unwrap();
+        let mut session = result.session;
+        let initial_filled = compute_progress(&session).filled;
+
+        // Add a persona node + edge to fill the persona gap
+        let root_id = session.root_node.id.clone();
+        add_proposed_node(
+            &mut session,
+            "persona-eng",
+            "persona",
+            "",
+            "# Engineer\n",
+            0.9,
+            &schema,
+        );
+        add_proposed_edge(&mut session, &root_id, "persona-eng", "serves", &schema);
+
+        let after = compute_progress(&session);
+        assert!(
+            after.filled > initial_filled,
+            "filled should increase after adding persona; before={}, after={}",
+            initial_filled,
+            after.filled,
+        );
     }
 }

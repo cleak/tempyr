@@ -29,6 +29,12 @@ pub struct InterviewSession {
     /// Rich context with titles and summaries, for MCP responses.
     #[serde(default)]
     pub graph_context_rich: Vec<ExistingNodeSummary>,
+    /// Total unique gaps ever seen across all reanalysis passes.
+    #[serde(default)]
+    pub total_gaps_seen: usize,
+    /// Number of gaps that have been filled (disappeared between reanalysis passes).
+    #[serde(default)]
+    pub gaps_filled: usize,
     pub token_budget_used: usize,
 }
 
@@ -130,6 +136,8 @@ impl InterviewSession {
             remaining_gaps: Vec::new(),
             graph_context: Vec::new(),
             graph_context_rich: Vec::new(),
+            total_gaps_seen: 0,
+            gaps_filled: 0,
             token_budget_used: 0,
         }
     }
@@ -306,6 +314,8 @@ impl InterviewSession {
     ) -> Result<CommitResult> {
         let mut created_files = Vec::new();
         let mut modified_files = Vec::new();
+        let mut warnings = Vec::new();
+        let mut edges_written = 0usize;
 
         // Write root node
         let root_path = write_tentative_node(graph_dir, &self.root_node, schema)?;
@@ -323,26 +333,36 @@ impl InterviewSession {
             let source_exists = graphforge_core::ops::find_node_file(graph_dir, &edge.source).is_ok();
             let target_exists = graphforge_core::ops::find_node_file(graph_dir, &edge.target).is_ok();
 
-            if source_exists && target_exists {
-                match ops::add_edge(graph_dir, &edge.source, &edge.target, &edge.edge_type, schema) {
-                    Ok(()) => {
-                        // Track modified files
-                        if let Ok(p) = ops::find_node_file(graph_dir, &edge.source)
-                            && !created_files.contains(&p) {
-                                modified_files.push(p);
-                            }
-                        if let Ok(p) = ops::find_node_file(graph_dir, &edge.target)
-                            && !created_files.contains(&p) {
-                                modified_files.push(p);
-                            }
-                    }
-                    Err(graphforge_core::GraphForgeError::Edge(msg)) if msg.contains("already exists") => {
-                        // Edge already exists — skip silently
-                    }
-                    Err(e) => {
-                        eprintln!("Warning: could not add edge {} -> {} ({}): {e}",
-                            edge.source, edge.target, edge.edge_type);
-                    }
+            if !source_exists || !target_exists {
+                let missing = if !source_exists { &edge.source } else { &edge.target };
+                warnings.push(format!(
+                    "Skipped edge {} --{}--> {}: node '{}' not found on disk",
+                    edge.source, edge.edge_type, edge.target, missing
+                ));
+                continue;
+            }
+
+            match ops::add_edge(graph_dir, &edge.source, &edge.target, &edge.edge_type, schema) {
+                Ok(()) => {
+                    edges_written += 1;
+                    // Track modified files
+                    if let Ok(p) = ops::find_node_file(graph_dir, &edge.source)
+                        && !created_files.contains(&p) {
+                            modified_files.push(p);
+                        }
+                    if let Ok(p) = ops::find_node_file(graph_dir, &edge.target)
+                        && !created_files.contains(&p) {
+                            modified_files.push(p);
+                        }
+                }
+                Err(graphforge_core::GraphForgeError::Edge(msg)) if msg.contains("already exists") => {
+                    edges_written += 1; // Already exists counts as success
+                }
+                Err(e) => {
+                    warnings.push(format!(
+                        "Failed to add edge {} --{}--> {}: {e}",
+                        edge.source, edge.edge_type, edge.target
+                    ));
                 }
             }
         }
@@ -353,12 +373,12 @@ impl InterviewSession {
         modified_files.dedup();
 
         let node_count = created_files.len();
-        let edge_count = self.tentative_edges.len();
+        let edge_count = edges_written;
 
         Ok(CommitResult {
             created_files,
             modified_files,
-            warnings: Vec::new(),
+            warnings,
             node_count,
             edge_count,
         })

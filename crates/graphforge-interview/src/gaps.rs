@@ -518,4 +518,107 @@ mod tests {
 
         assert!(gaps.iter().all(|g| g.gap_type != GapType::UnclearProblemStatement));
     }
+
+    #[test]
+    fn test_detect_gaps_with_graph_populates_existing_related() {
+        let session = InterviewSession::new(
+            "feature",
+            "feat-test",
+            "# Test Feature\n\nA long enough problem statement that should pass the check.\n",
+        );
+        let schema = make_schema();
+
+        // Build a graph directory with one persona node
+        let tmp = tempfile::tempdir().unwrap();
+        let graph_dir = tmp.path().join("graph");
+        std::fs::create_dir_all(graph_dir.join("personas")).unwrap();
+        std::fs::write(
+            graph_dir.join("personas/persona-eng.md"),
+            "---\nid: persona-eng\ntype: persona\nstatus: active\nowner: test\nedges: []\n---\n\n# Engineer\n",
+        )
+        .unwrap();
+
+        let graph = Graph::load_from_directory(&graph_dir, schema.clone()).unwrap();
+        let gaps = detect_gaps_with_graph(&session, &schema, Some(&graph));
+
+        let persona_gap = gaps
+            .iter()
+            .find(|g| g.gap_type == GapType::MissingPersona)
+            .expect("Should have a MissingPersona gap");
+
+        assert!(
+            persona_gap.existing_related.contains(&"persona-eng".to_string()),
+            "existing_related should contain persona-eng, got: {:?}",
+            persona_gap.existing_related,
+        );
+        assert_eq!(
+            persona_gap.question_type,
+            QuestionType::Closed,
+            "1 candidate should yield Closed question type",
+        );
+    }
+
+    #[test]
+    fn test_detect_gaps_with_graph_forced_choice() {
+        let session = InterviewSession::new(
+            "feature",
+            "feat-test",
+            "# Test Feature\n\nA long enough problem statement that should pass the check.\n",
+        );
+        let schema = make_schema();
+
+        // Build a graph directory with two persona nodes
+        let tmp = tempfile::tempdir().unwrap();
+        let graph_dir = tmp.path().join("graph");
+        std::fs::create_dir_all(graph_dir.join("personas")).unwrap();
+        std::fs::write(
+            graph_dir.join("personas/persona-eng.md"),
+            "---\nid: persona-eng\ntype: persona\nstatus: active\nowner: test\nedges: []\n---\n\n# Engineer\n",
+        )
+        .unwrap();
+        std::fs::write(
+            graph_dir.join("personas/persona-pm.md"),
+            "---\nid: persona-pm\ntype: persona\nstatus: active\nowner: test\nedges: []\n---\n\n# Product Manager\n",
+        )
+        .unwrap();
+
+        let graph = Graph::load_from_directory(&graph_dir, schema.clone()).unwrap();
+        let gaps = detect_gaps_with_graph(&session, &schema, Some(&graph));
+
+        let persona_gap = gaps
+            .iter()
+            .find(|g| g.gap_type == GapType::MissingPersona)
+            .expect("Should have a MissingPersona gap");
+
+        assert_eq!(
+            persona_gap.existing_related.len(),
+            2,
+            "Should have 2 existing related personas",
+        );
+        assert_eq!(
+            persona_gap.question_type,
+            QuestionType::ForcedChoice,
+            "2 candidates should yield ForcedChoice question type",
+        );
+    }
+
+    #[test]
+    fn test_build_suggested_angle_data_keyword() {
+        let angle = build_suggested_angle(&GapType::MissingConstraint, "Store user data in S3");
+        let angle_lower = angle.to_lowercase();
+        assert!(
+            angle_lower.contains("data") || angle_lower.contains("volume"),
+            "Angle for body mentioning 'data' should reference data or volume, got: {angle}",
+        );
+    }
+
+    #[test]
+    fn test_build_suggested_angle_latency_keyword() {
+        let angle = build_suggested_angle(&GapType::MissingConstraint, "Need fast latency");
+        let angle_lower = angle.to_lowercase();
+        assert!(
+            angle_lower.contains("performance") || angle_lower.contains("p99"),
+            "Angle for body mentioning 'latency'/'fast' should reference performance or P99, got: {angle}",
+        );
+    }
 }

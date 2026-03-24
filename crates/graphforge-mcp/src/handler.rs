@@ -519,8 +519,11 @@ fn tool_interview_start(args: &Value) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .unwrap_or("feature");
 
-    let (_, gf_dir, schema) = find_project()?;
+    let (graph_dir, gf_dir, schema) = find_project()?;
     let sessions = sessions_dir(&gf_dir);
+
+    // Load graph for context-aware gap detection (degrade gracefully)
+    let graph = Graph::load_from_directory(&graph_dir, schema.clone()).ok();
 
     // Search existing graph for context (degrade gracefully if no index)
     let mut existing_ids = Vec::new();
@@ -549,6 +552,17 @@ fn tool_interview_start(args: &Value) -> Result<String, String> {
     // Populate rich context
     result.session.graph_context_rich = context_rich;
 
+    // Re-run gap detection with graph for context-aware existing_related + question_type
+    if let Some(ref g) = graph {
+        let gaps = graphforge_interview::gaps::detect_gaps_with_graph(
+            &result.session,
+            &schema,
+            Some(g),
+        );
+        result.questions = gaps.iter().take(3).cloned().collect();
+        result.session.remaining_gaps = gaps;
+    }
+
     // Save session
     result
         .session
@@ -569,8 +583,11 @@ fn tool_interview_answer(args: &Value) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing 'answer'")?;
 
-    let (_, gf_dir, schema) = find_project()?;
+    let (graph_dir, gf_dir, schema) = find_project()?;
     let sessions = sessions_dir(&gf_dir);
+
+    // Load graph for context-aware gap detection
+    let graph = Graph::load_from_directory(&graph_dir, schema.clone()).ok();
 
     let mut session =
         InterviewSession::load_by_id(&sessions, session_id).map_err(|e| e.to_string())?;
@@ -582,8 +599,10 @@ fn tool_interview_answer(args: &Value) -> Result<String, String> {
         .collect::<Vec<_>>()
         .join(" | ");
 
+    // Record answer, then reanalyze with graph context
+    session.record_answer(&question_context, answer, vec![]);
     let update =
-        proposer::record_answer(&mut session, &question_context, answer, vec![], &schema);
+        proposer::reanalyze_with_graph(&mut session, &schema, graph.as_ref());
 
     // Save session
     session.save(&sessions).map_err(|e| e.to_string())?;
@@ -639,16 +658,33 @@ fn tool_interview_commit(args: &Value) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
 
     // Run validation on the resulting graph
+    let mut all_warnings = result.warnings.clone();
     let validation_warnings = {
         let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
         let issues = validate_graph(&graph);
         issues.iter().map(|i| i.to_string()).collect::<Vec<_>>()
     };
+    all_warnings.extend(validation_warnings.clone());
+
+    // Attempt incremental index update (degrade gracefully)
+    let index_path = gf_dir.join("index.db");
+    if index_path.exists() {
+        if let Err(e) = (|| -> std::result::Result<(), String> {
+            let schema2 = Schema::load(&gf_dir.join("schema.toml")).map_err(|e| e.to_string())?;
+            let graph = Graph::load_from_directory(&graph_dir, schema2)
+                .map_err(|e| e.to_string())?;
+            let index = Index::open(&index_path).map_err(|e| e.to_string())?;
+            index.incremental_update(&graph).map_err(|e| e.to_string())?;
+            Ok(())
+        })() {
+            all_warnings.push(format!("Index update failed (run 'graphforge index rebuild'): {e}"));
+        }
+    }
 
     let response = json!({
         "files_created": result.created_files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "files_modified": result.modified_files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-        "validation_warnings": validation_warnings,
+        "warnings": all_warnings,
         "node_count": result.node_count,
         "edge_count": result.edge_count,
     });
