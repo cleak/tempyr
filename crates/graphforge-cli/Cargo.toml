@@ -1,0 +1,26 @@
+[package]
+name = "graphforge-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "graphforge"
+path = "src/main.rs"
+
+[dependencies]
+graphforge-core = { path = "../graphforge-core" }
+graphforge-index = { path = "../graphforge-index" }
+graphforge-interview = { path = "../graphforge-interview" }
+graphforge-render = { path = "../graphforge-render" }
+anyhow = "1"
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+assert_cmd = "2"
+predicates = "3"

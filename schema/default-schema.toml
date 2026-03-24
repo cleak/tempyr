@@ -1,0 +1,200 @@
+[meta]
+version = "1.0.0"
+description = "GraphForge schema for product + technical knowledge graphs"
+
+# ─── Node Types ──────────────────────────────────────────
+
+[node_types.epic]
+description = "A large body of work containing multiple features"
+directory = "epics"
+required_fields = ["status", "owner"]
+allowed_statuses = ["draft", "active", "completed", "archived"]
+allowed_edges = [
+  { type = "parent_of", target = "feature" },
+  { type = "serves", target = "persona" },
+  { type = "measured_by", target = "metric" },
+]
+
+[node_types.feature]
+description = "A user-facing capability or improvement"
+directory = "features"
+required_fields = ["status", "owner"]
+allowed_statuses = ["draft", "active", "completed", "superseded", "archived"]
+allowed_edges = [
+  { type = "child_of", target = "epic" },
+  { type = "serves", target = "persona" },
+  { type = "constrained_by", target = "constraint" },
+  { type = "depends_on", target = "decision" },
+  { type = "depends_on", target = "feature" },
+  { type = "measured_by", target = "metric" },
+  { type = "has_risk", target = "risk" },
+  { type = "decomposes_to", target = "task" },
+  { type = "has_question", target = "open_question" },
+  { type = "uses", target = "component" },
+  { type = "exposes", target = "api_surface" },
+  { type = "informed_by", target = "insight" },
+]
+
+[node_types.task]
+description = "An implementable unit of work"
+directory = "tasks"
+required_fields = ["status"]
+allowed_statuses = ["backlog", "in_progress", "done", "blocked", "cut"]
+allowed_edges = [
+  { type = "child_of", target = "feature" },
+  { type = "child_of", target = "task" },
+  { type = "blocked_by", target = "task" },
+  { type = "blocked_by", target = "decision" },
+  { type = "blocked_by", target = "open_question" },
+  { type = "uses", target = "component" },
+  { type = "has_question", target = "open_question" },
+]
+
+[node_types.decision]
+description = "A technical or product decision with rationale"
+directory = "decisions"
+required_fields = ["status"]
+allowed_statuses = ["proposed", "discussing", "decided", "superseded"]
+allowed_edges = [
+  { type = "decision_for", target = "feature" },
+  { type = "decision_for", target = "component" },
+  { type = "constrained_by", target = "constraint" },
+  { type = "supersedes", target = "decision" },
+  { type = "has_question", target = "open_question" },
+]
+
+[node_types.constraint]
+description = "A technical, business, or regulatory constraint"
+directory = "constraints"
+required_fields = ["status"]
+allowed_statuses = ["active", "relaxed", "removed"]
+allowed_edges = [
+  { type = "constrains", target = "feature" },
+  { type = "constrains", target = "decision" },
+  { type = "constrains", target = "component" },
+]
+
+[node_types.persona]
+description = "A user type or stakeholder archetype"
+directory = "personas"
+required_fields = []
+allowed_statuses = []
+allowed_edges = [
+  { type = "served_by", target = "feature" },
+  { type = "served_by", target = "epic" },
+]
+
+[node_types.metric]
+description = "A measurable success indicator"
+directory = "metrics"
+required_fields = ["status"]
+allowed_statuses = ["proposed", "tracking", "met", "missed", "retired"]
+allowed_edges = [
+  { type = "measures", target = "feature" },
+  { type = "measures", target = "epic" },
+]
+
+[node_types.risk]
+description = "An identified risk with potential mitigations"
+directory = "risks"
+required_fields = ["status"]
+allowed_statuses = ["identified", "mitigated", "accepted", "realized"]
+allowed_edges = [
+  { type = "risk_for", target = "feature" },
+  { type = "mitigated_by", target = "task" },
+]
+
+[node_types.open_question]
+description = "An unresolved question blocking or informing other work"
+directory = "questions"
+required_fields = ["status"]
+allowed_statuses = ["open", "answered", "deferred", "moot"]
+allowed_edges = [
+  { type = "question_for", target = "feature" },
+  { type = "question_for", target = "decision" },
+  { type = "blocks", target = "task" },
+  { type = "answered_by", target = "decision" },
+]
+
+[node_types.component]
+description = "A technical system, module, or architectural element"
+directory = "components"
+required_fields = ["status"]
+allowed_statuses = ["planned", "active", "deprecated"]
+allowed_edges = [
+  { type = "used_by", target = "feature" },
+  { type = "used_by", target = "task" },
+  { type = "depends_on", target = "component" },
+  { type = "has_decision", target = "decision" },
+  { type = "exposes", target = "api_surface" },
+  { type = "informed_by", target = "insight" },
+]
+
+[node_types.api_surface]
+description = "An API, interface, protocol, or contract between components"
+directory = "api_surfaces"
+required_fields = ["status"]
+allowed_statuses = ["draft", "stable", "deprecated"]
+allowed_edges = [
+  { type = "exposed_by", target = "component" },
+  { type = "exposed_by", target = "feature" },
+  { type = "constrained_by", target = "constraint" },
+]
+
+[node_types.insight]
+description = "A learned tip, trick, gotcha, or piece of reusable knowledge"
+directory = "insights"
+required_fields = []
+optional_fields = ["source"]
+allowed_statuses = []
+allowed_edges = [
+  { type = "relates_to", target = "component" },
+  { type = "relates_to", target = "feature" },
+  { type = "relates_to", target = "decision" },
+  { type = "relates_to", target = "insight" },
+]
+
+[node_types.note]
+description = "A freeform note, meeting summary, or brain dump"
+directory = "notes"
+required_fields = []
+allowed_statuses = []
+allowed_edges = [
+  { type = "relates_to", target = "*" },
+]
+
+# ─── Edge Type Definitions ───────────────────────────────
+
+[edge_types]
+child_of = { reverse = "parent_of", description = "Hierarchical containment" }
+parent_of = { reverse = "child_of" }
+serves = { reverse = "served_by", description = "Delivers value to a persona" }
+served_by = { reverse = "serves" }
+constrained_by = { reverse = "constrains" }
+constrains = { reverse = "constrained_by" }
+depends_on = { reverse = "depended_on_by" }
+depended_on_by = { reverse = "depends_on" }
+measured_by = { reverse = "measures" }
+measures = { reverse = "measured_by" }
+has_risk = { reverse = "risk_for" }
+risk_for = { reverse = "has_risk" }
+decomposes_to = { reverse = "child_of" }
+has_question = { reverse = "question_for" }
+question_for = { reverse = "has_question" }
+uses = { reverse = "used_by" }
+used_by = { reverse = "uses" }
+exposes = { reverse = "exposed_by" }
+exposed_by = { reverse = "exposes" }
+blocked_by = { reverse = "blocks" }
+blocks = { reverse = "blocked_by" }
+supersedes = { reverse = "superseded_by" }
+superseded_by = { reverse = "supersedes" }
+decision_for = { reverse = "has_decision" }
+has_decision = { reverse = "decision_for" }
+mitigated_by = { reverse = "mitigates" }
+mitigates = { reverse = "mitigated_by" }
+answered_by = { reverse = "answers" }
+answers = { reverse = "answered_by" }
+informed_by = { reverse = "informs" }
+informs = { reverse = "informed_by" }
+relates_to = { reverse = "relates_to", description = "Symmetric weak association" }

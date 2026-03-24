@@ -1,0 +1,15 @@
+[package]
+name = "graphforge-index"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+graphforge-core = { path = "../graphforge-core" }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_yml = { workspace = true }

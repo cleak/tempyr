@@ -1,0 +1,63 @@
+[meta]
+name = "Product Requirements Document"
+description = "Standard PRD rendering from a feature node"
+root_types = ["feature"]
+output_format = "markdown"
+
+[[sections]]
+heading = "Overview"
+source = "root"
+include_fields = ["status", "owner", "created", "updated"]
+
+[[sections]]
+heading = "Problem Statement"
+source = "root"
+body_section = "Problem"
+
+[[sections]]
+heading = "Target Users"
+traverse = "serves"
+target_type = "persona"
+include_body = true
+
+[[sections]]
+heading = "Success Metrics"
+traverse = "measured_by"
+target_type = "metric"
+include_body = true
+include_fields = ["status"]
+
+[[sections]]
+heading = "Constraints"
+traverse = "constrained_by"
+target_type = "constraint"
+include_body = true
+
+[[sections]]
+heading = "Key Decisions"
+traverse = "depends_on"
+target_type = "decision"
+include_body = true
+include_fields = ["status"]
+filter = { status = ["decided", "discussing"] }
+
+[[sections]]
+heading = "Risks"
+traverse = "has_risk"
+target_type = "risk"
+include_body = true
+include_fields = ["status"]
+
+[[sections]]
+heading = "Open Questions"
+traverse = "has_question"
+target_type = "open_question"
+filter = { status = ["open"] }
+include_body = true
+
+[[sections]]
+heading = "Task Decomposition"
+traverse = "decomposes_to"
+target_type = "task"
+include_fields = ["status"]
+include_body = false

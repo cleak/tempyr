@@ -1,0 +1,60 @@
+[meta]
+name = "Technical Design Document"
+description = "Standard TDD rendering from a feature node"
+root_types = ["feature"]
+output_format = "markdown"
+
+[[sections]]
+heading = "Overview"
+source = "root"
+
+[[sections]]
+heading = "Technical Constraints"
+traverse = "constrained_by"
+target_type = "constraint"
+include_body = true
+
+[[sections]]
+heading = "Architecture Decisions"
+traverse = "depends_on"
+target_type = "decision"
+include_body = true
+include_fields = ["status"]
+
+[[sections]]
+heading = "System Components"
+traverse = "uses"
+target_type = "component"
+include_body = true
+sub_traverse = "depends_on"
+sub_target_type = "component"
+
+[[sections]]
+heading = "API Surfaces"
+traverse = "exposes"
+target_type = "api_surface"
+include_body = true
+
+[[sections]]
+heading = "Implementation Tasks"
+traverse = "decomposes_to"
+target_type = "task"
+include_body = true
+include_fields = ["status"]
+show_internal_edges = true
+internal_edge_types = ["blocked_by"]
+
+[[sections]]
+heading = "Open Technical Questions"
+traverse = "has_question"
+target_type = "open_question"
+filter = { status = ["open"] }
+include_body = true
+
+[[sections]]
+heading = "Relevant Insights"
+source = "semantic_search"
+query_from = "root"
+target_type = "insight"
+max_results = 5
+min_similarity = 0.7
