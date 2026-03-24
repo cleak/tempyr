@@ -9,6 +9,9 @@
 # Rendered output (optional — some teams may want to commit these)
 /renders/
 
+# Environment (secrets)
+.env
+
 # OS
 .DS_Store
 Thumbs.db
