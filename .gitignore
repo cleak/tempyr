@@ -1,0 +1,20 @@
+# Rust
+/target
+
+# GraphForge derived files (rebuildable from source)
+.graphforge/index.db
+.graphforge/embed-cache.json
+.graphforge/sessions/
+
+# Rendered output (optional — some teams may want to commit these)
+/renders/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
