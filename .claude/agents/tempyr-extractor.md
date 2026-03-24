@@ -4,11 +4,9 @@ description: >
   Extracts structured graph nodes from natural language input.
   Used by the interview skill for processing brain dumps and answers.
 model: claude-sonnet-4-20250514
-skills:
-  - tempyr-extraction-schema
 allowed-tools:
-  - mcp__tempyr__graph_search
-  - mcp__tempyr__graph_vsearch
+  - mcp__graphforge__graph_search
+  - mcp__graphforge__graph_vsearch
 ---
 
 # Tempyr Extraction Agent

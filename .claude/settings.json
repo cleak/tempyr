@@ -2,7 +2,7 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "mcp__tempyr__graph_add_node|mcp__tempyr__graph_add_edge|mcp__tempyr__interview_commit",
+        "matcher": "mcp__graphforge__graph_add_node|mcp__graphforge__graph_add_edge|mcp__graphforge__interview_commit",
         "hooks": [
           {
             "type": "command",

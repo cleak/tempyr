@@ -137,7 +137,8 @@ pub fn record_answer(
 }
 
 /// Re-run gap analysis and phase transition checks.
-fn reanalyze(session: &mut InterviewSession, schema: &Schema) -> InterviewUpdateResult {
+/// Public so MCP tools can trigger reanalysis without recording a phantom QA pair.
+pub fn reanalyze(session: &mut InterviewSession, schema: &Schema) -> InterviewUpdateResult {
     let phase_changed = phases::try_advance_phase(session);
 
     let gaps = detect_gaps(session, schema);

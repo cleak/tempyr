@@ -6,16 +6,16 @@ description: >
   project, capture requirements, do a brain dump, or create a PRD/TDD.
   Keywords: interview, new feature, brain dump, PRD, TDD, requirements.
 allowed-tools:
-  - mcp__tempyr__interview_start
-  - mcp__tempyr__interview_answer
-  - mcp__tempyr__interview_show
-  - mcp__tempyr__interview_commit
-  - mcp__tempyr__interview_adjust
-  - mcp__tempyr__interview_resume
-  - mcp__tempyr__graph_search
-  - mcp__tempyr__graph_context
-  - mcp__tempyr__graph_traverse
-  - mcp__tempyr__graph_get_node
+  - mcp__graphforge__interview_start
+  - mcp__graphforge__interview_answer
+  - mcp__graphforge__interview_show
+  - mcp__graphforge__interview_commit
+  - mcp__graphforge__interview_adjust
+  - mcp__graphforge__interview_resume
+  - mcp__graphforge__graph_search
+  - mcp__graphforge__graph_context
+  - mcp__graphforge__graph_traverse
+  - mcp__graphforge__graph_get_node
 ---
 
 # Tempyr Interview Skill

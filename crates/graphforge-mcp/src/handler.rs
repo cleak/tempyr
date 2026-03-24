@@ -672,8 +672,10 @@ fn tool_interview_adjust(args: &Value) -> Result<String, String> {
     let mut session =
         InterviewSession::load_by_id(&sessions, session_id).map_err(|e| e.to_string())?;
 
+    let new_id = args.get("new_id").and_then(|v| v.as_str()).map(String::from);
+
     let patch = NodePatch {
-        id: args.get("new_id").and_then(|v| v.as_str()).map(String::from),
+        id: new_id.clone(),
         body: args.get("body").and_then(|v| v.as_str()).map(String::from),
         status: args
             .get("status")
@@ -686,14 +688,20 @@ fn tool_interview_adjust(args: &Value) -> Result<String, String> {
         .adjust_node(node_id, patch)
         .map_err(|e| e.to_string())?;
 
-    // Reanalyze gaps after adjustment
-    let _update = proposer::record_answer(
-        &mut session,
-        &format!("Adjusted node {node_id}"),
-        "",
-        vec![],
-        &schema,
-    );
+    // If the node was renamed, update all edge references
+    if let Some(ref new_id) = new_id {
+        for edge in &mut session.tentative_edges {
+            if edge.source == node_id {
+                edge.source = new_id.clone();
+            }
+            if edge.target == node_id {
+                edge.target = new_id.clone();
+            }
+        }
+    }
+
+    // Reanalyze gaps after adjustment (without recording a phantom QA pair)
+    let _update = proposer::reanalyze(&mut session, &schema);
 
     session.save(&sessions).map_err(|e| e.to_string())?;
 
