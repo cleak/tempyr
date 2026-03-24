@@ -1052,6 +1052,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yml",
+ "strsim",
  "tempfile",
  "thiserror",
  "uuid",

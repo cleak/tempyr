@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use graphforge_core::graph::Graph;
 use graphforge_core::schema::Schema;
 
 use crate::phases::InterviewPhase;
@@ -8,12 +9,47 @@ use crate::session::InterviewSession;
 /// A gap in the interview — something missing that drives the next question.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gap {
+    /// Unique gap identifier (e.g., "gap-missing-persona-persona").
+    #[serde(default)]
+    pub id: String,
     pub gap_type: GapType,
     pub priority: GapPriority,
     pub node_type_needed: String,
+    /// The edge type that would fill this gap, if applicable.
+    #[serde(default)]
+    pub edge_type_needed: Option<String>,
     pub context: String,
     pub suggested_question: String,
+    /// Hint for Claude on how to approach the question — deterministic, context-aware.
+    #[serde(default)]
+    pub suggested_angle: String,
+    /// IDs of existing nodes that might fill this gap.
+    #[serde(default)]
+    pub existing_related: Vec<String>,
+    /// How the question should be phrased.
+    #[serde(default)]
+    pub question_type: QuestionType,
     pub phase: InterviewPhase,
+    /// Whether this gap has been filled.
+    #[serde(default)]
+    pub filled: bool,
+    /// The QAPair index or node ID that filled this gap.
+    #[serde(default)]
+    pub filled_by: Option<String>,
+}
+
+/// How a gap's question should be phrased by Claude.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum QuestionType {
+    /// Yes/no confirmation (1 candidate exists).
+    Closed,
+    /// Free-form answer needed (no candidates).
+    #[default]
+    Open,
+    /// Pick from 2-3 concrete options (multiple candidates).
+    ForcedChoice,
+    /// Surface something the user hasn't considered.
+    Implication,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,6 +65,28 @@ pub enum GapType {
     NoTaskDecomposition,
     UnresolvedQuestion,
     MissingApiSurface,
+    MissingOwner,
+    InsufficientDetail,
+}
+
+impl std::fmt::Display for GapType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingPersona => write!(f, "missing_persona"),
+            Self::MissingSuccessMetric => write!(f, "missing_success_metric"),
+            Self::MissingConstraint => write!(f, "missing_constraint"),
+            Self::MissingRisk => write!(f, "missing_risk"),
+            Self::UnclearProblemStatement => write!(f, "unclear_problem"),
+            Self::NoTechnicalDecision => write!(f, "no_technical_decision"),
+            Self::MissingComponent => write!(f, "missing_component"),
+            Self::MissingDependency => write!(f, "missing_dependency"),
+            Self::NoTaskDecomposition => write!(f, "no_task_decomposition"),
+            Self::UnresolvedQuestion => write!(f, "unresolved_question"),
+            Self::MissingApiSurface => write!(f, "missing_api_surface"),
+            Self::MissingOwner => write!(f, "missing_owner"),
+            Self::InsufficientDetail => write!(f, "insufficient_detail"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -49,7 +107,18 @@ impl std::fmt::Display for GapPriority {
 }
 
 /// Analyze the current session state and return gaps sorted by phase then priority.
+/// If a graph is provided, populates `existing_related` and adjusts `question_type`
+/// based on existing nodes that could fill each gap.
 pub fn detect_gaps(session: &InterviewSession, schema: &Schema) -> Vec<Gap> {
+    detect_gaps_with_graph(session, schema, None)
+}
+
+/// Context-aware gap detection with optional graph for richer results.
+pub fn detect_gaps_with_graph(
+    session: &InterviewSession,
+    schema: &Schema,
+    graph: Option<&Graph>,
+) -> Vec<Gap> {
     let mut gaps = Vec::new();
 
     let root_type = &session.root_type;
@@ -59,16 +128,24 @@ pub fn detect_gaps(session: &InterviewSession, schema: &Schema) -> Vec<Gap> {
     if session.root_node.body.trim().is_empty()
         || session.root_node.body.len() < 30
     {
+        let gap_type = GapType::UnclearProblemStatement;
         gaps.push(Gap {
-            gap_type: GapType::UnclearProblemStatement,
+            id: format!("gap-{}-{}", gap_type, root_type),
+            gap_type,
             priority: GapPriority::Required,
             node_type_needed: root_type.clone(),
+            edge_type_needed: None,
             context: format!("The {root_type} '{root_title}' needs a clear problem statement."),
             suggested_question: format!(
                 "What problem does '{root_title}' solve? Who experiences this problem and what \
                  happens if it's not addressed?"
             ),
+            suggested_angle: "Ask what problem this solves and what happens if it's not addressed.".to_string(),
+            existing_related: vec![],
+            question_type: QuestionType::Open,
             phase: InterviewPhase::Discovery,
+            filled: false,
+            filled_by: None,
         });
     }
 
@@ -88,18 +165,42 @@ pub fn detect_gaps(session: &InterviewSession, schema: &Schema) -> Vec<Gap> {
             }
 
             let (gap_type, priority, phase) = classify_edge_gap(edge_type, target_type);
-
             let question = generate_question(edge_type, target_type, root_title);
+            let angle = build_suggested_angle(&gap_type, &session.root_node.body);
+
+            // Find existing nodes that could fill this gap
+            let (existing_related, question_type) = if let Some(g) = graph {
+                let candidates: Vec<String> = g
+                    .nodes_of_type(target_type)
+                    .iter()
+                    .map(|n| n.id().to_string())
+                    .collect();
+                let qt = match candidates.len() {
+                    0 => classify_question_type(priority),
+                    1 => QuestionType::Closed,
+                    _ => QuestionType::ForcedChoice,
+                };
+                (candidates, qt)
+            } else {
+                (vec![], classify_question_type(priority))
+            };
 
             gaps.push(Gap {
+                id: format!("gap-{}-{}", gap_type, target_type),
                 gap_type,
                 priority,
                 node_type_needed: target_type.clone(),
+                edge_type_needed: Some(edge_type.clone()),
                 context: format!(
                     "'{root_title}' has no {edge_type} relationship to any {target_type}."
                 ),
                 suggested_question: question,
+                suggested_angle: angle,
+                existing_related,
+                question_type,
                 phase,
+                filled: false,
+                filled_by: None,
             });
         }
     }
@@ -169,6 +270,76 @@ fn classify_edge_gap(edge_type: &str, target_type: &str) -> (GapType, GapPriorit
             GapPriority::NiceToHave,
             InterviewPhase::Technical,
         ),
+    }
+}
+
+/// Classify question type based on gap priority.
+/// When graph context is available (Stage 4), this also considers candidate count.
+fn classify_question_type(priority: GapPriority) -> QuestionType {
+    match priority {
+        GapPriority::Recommended => QuestionType::Implication,
+        _ => QuestionType::Open,
+    }
+}
+
+/// Build a deterministic suggested angle based on gap type and root body content.
+/// This tells Claude *how* to approach the question, not *what* to ask.
+fn build_suggested_angle(gap_type: &GapType, root_body: &str) -> String {
+    let body_lower = root_body.to_lowercase();
+    match gap_type {
+        GapType::MissingPersona => {
+            "Ask who will use this and what their primary goal is.".to_string()
+        }
+        GapType::MissingSuccessMetric => {
+            "Ask what success looks like — quantitative if possible.".to_string()
+        }
+        GapType::MissingConstraint => {
+            if body_lower.contains("data") || body_lower.contains("storage") {
+                "User mentioned data. Ask about volume, cost, or retention constraints.".to_string()
+            } else if body_lower.contains("latency") || body_lower.contains("performance") || body_lower.contains("fast") {
+                "User mentioned performance. Ask for specific P99/throughput targets.".to_string()
+            } else if body_lower.contains("compliance") || body_lower.contains("gdpr") || body_lower.contains("pii") {
+                "User mentioned compliance. Ask about specific regulatory requirements.".to_string()
+            } else {
+                "Ask about technical, business, or regulatory constraints.".to_string()
+            }
+        }
+        GapType::MissingRisk => {
+            if body_lower.contains("migration") || body_lower.contains("legacy") {
+                "User mentioned migration/legacy. Ask about backward-compatibility risks.".to_string()
+            } else if body_lower.contains("scale") || body_lower.contains("volume") {
+                "User mentioned scale. Ask about capacity and failure-mode risks.".to_string()
+            } else {
+                "Ask what could go wrong and what the biggest unknowns are.".to_string()
+            }
+        }
+        GapType::NoTechnicalDecision => {
+            "Present 2-3 architectural options and ask which direction to go.".to_string()
+        }
+        GapType::MissingComponent => {
+            "Ask what existing systems or modules this interacts with.".to_string()
+        }
+        GapType::MissingApiSurface => {
+            "Ask if this exposes any APIs or interfaces for other systems.".to_string()
+        }
+        GapType::NoTaskDecomposition => {
+            "Ask the user to break this into concrete implementation tasks.".to_string()
+        }
+        GapType::UnresolvedQuestion => {
+            "Ask if there are open questions that need answers before implementation.".to_string()
+        }
+        GapType::UnclearProblemStatement => {
+            "Ask what problem this solves and what happens if it's not addressed.".to_string()
+        }
+        GapType::MissingDependency => {
+            "Ask about external dependencies or prerequisites.".to_string()
+        }
+        GapType::MissingOwner => {
+            "Ask who owns or is responsible for this.".to_string()
+        }
+        GapType::InsufficientDetail => {
+            "Ask the user to elaborate — the description is too brief.".to_string()
+        }
     }
 }
 

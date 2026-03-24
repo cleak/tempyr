@@ -1,27 +1,36 @@
 use std::collections::HashMap;
 
 use graphforge_core::schema::Schema;
+use serde::Serialize;
 
 use crate::gaps::{detect_gaps, Gap};
 use crate::phases;
 use crate::session::{
-    EdgeSource, InterviewSession, TentativeEdge, TentativeNode,
+    DuplicateCandidate, EdgeSource, ExistingNodeSummary, InterviewSession,
+    Progress, TentativeEdge, TentativeNode,
 };
 use crate::Result;
 
 /// The result of starting an interview.
+#[derive(Debug, Serialize)]
 pub struct InterviewStartResult {
     pub session: InterviewSession,
     pub questions: Vec<Gap>,
-    pub progress: String,
+    pub graph_context: Vec<ExistingNodeSummary>,
+    pub potential_duplicates: Vec<DuplicateCandidate>,
+    pub progress: Progress,
 }
 
 /// The result of processing an answer / re-analyzing gaps.
+#[derive(Debug, Serialize)]
 pub struct InterviewUpdateResult {
     pub filled_gaps: Vec<String>,
     pub questions: Vec<Gap>,
     pub phase_changed: bool,
-    pub progress: String,
+    pub new_nodes: Vec<String>,
+    pub new_edges: Vec<String>,
+    pub potential_duplicates: Vec<DuplicateCandidate>,
+    pub progress: Progress,
 }
 
 /// Start a new interview from a brain dump.
@@ -56,11 +65,14 @@ pub fn interview_start(
     let questions: Vec<Gap> = gaps.iter().take(3).cloned().collect();
     session.remaining_gaps = gaps;
 
-    let progress = phases::progress_summary(&session);
+    let progress = compute_progress(&session);
+    let graph_context = session.graph_context_rich.clone();
 
     Ok(InterviewStartResult {
         session,
         questions,
+        graph_context,
+        potential_duplicates: vec![],
         progress,
     })
 }
@@ -143,14 +155,87 @@ fn reanalyze(session: &mut InterviewSession, schema: &Schema) -> InterviewUpdate
     let questions: Vec<Gap> = gaps.iter().take(3).cloned().collect();
     session.remaining_gaps = gaps;
 
-    let progress = phases::progress_summary(session);
+    let progress = compute_progress(session);
 
     InterviewUpdateResult {
         filled_gaps,
         questions,
         phase_changed,
+        new_nodes: vec![],
+        new_edges: vec![],
+        potential_duplicates: vec![],
         progress,
     }
+}
+
+/// Compute interview progress based on gaps filled vs total.
+pub fn compute_progress(session: &InterviewSession) -> Progress {
+    let total = session.remaining_gaps.len()
+        + session.remaining_gaps.iter().filter(|g| g.filled).count()
+        + session.answered.len(); // rough proxy for filled gaps
+    let filled = session.answered.len();
+    let percentage = if total > 0 {
+        (filled as f32 / total as f32) * 100.0
+    } else {
+        100.0
+    };
+    Progress {
+        filled,
+        total,
+        percentage,
+    }
+}
+
+/// Check if a tentative node is a potential duplicate of existing graph nodes.
+/// Uses Levenshtein distance on lowercased titles (threshold < 3).
+pub fn check_duplicates(
+    node: &TentativeNode,
+    graph: &graphforge_core::graph::Graph,
+) -> Vec<DuplicateCandidate> {
+    let mut candidates = Vec::new();
+    let proposed_title = extract_title(&node.body).to_lowercase();
+
+    if proposed_title.is_empty() {
+        return candidates;
+    }
+
+    for existing in graph.nodes_of_type(&node.node_type) {
+        let existing_title = existing.title().to_lowercase();
+        let distance = strsim::levenshtein(&proposed_title, &existing_title);
+        if distance < 3 {
+            candidates.push(DuplicateCandidate {
+                proposed_id: node.id.clone(),
+                existing_id: existing.id().to_string(),
+                similarity_reason: if distance == 0 {
+                    "Identical title".to_string()
+                } else {
+                    format!("Similar title (edit distance {distance})")
+                },
+            });
+        }
+    }
+
+    // Also check ID exact match
+    if let Some(existing) = graph.get_node(&node.id)
+        && !candidates.iter().any(|c| c.existing_id == node.id)
+    {
+        candidates.push(DuplicateCandidate {
+            proposed_id: node.id.clone(),
+            existing_id: existing.id().to_string(),
+            similarity_reason: "Exact ID match — node already exists in graph".to_string(),
+        });
+    }
+
+    candidates
+}
+
+/// Extract the title from a node body (first line, strip "# " prefix).
+fn extract_title(body: &str) -> &str {
+    body.lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .map(|l| l.strip_prefix("# ").unwrap_or(l))
+        .unwrap_or("")
 }
 
 /// Convert text to a kebab-case slug.
@@ -224,7 +309,7 @@ mod tests {
         assert_eq!(result.session.root_type, "feature");
         assert!(!result.session.root_node.id.is_empty());
         assert!(!result.questions.is_empty());
-        assert!(!result.progress.is_empty());
+        assert!(result.progress.total > 0);
     }
 
     #[test]
@@ -314,7 +399,7 @@ mod tests {
         );
 
         assert_eq!(session.answered.len(), 1);
-        assert!(!update.progress.is_empty());
+        assert!(update.progress.total > 0);
     }
 
     #[test]

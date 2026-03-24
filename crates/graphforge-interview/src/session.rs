@@ -26,6 +26,9 @@ pub struct InterviewSession {
     pub answered: Vec<QAPair>,
     pub remaining_gaps: Vec<Gap>,
     pub graph_context: Vec<String>,
+    /// Rich context with titles and summaries, for MCP responses.
+    #[serde(default)]
+    pub graph_context_rich: Vec<ExistingNodeSummary>,
     pub token_budget_used: usize,
 }
 
@@ -67,6 +70,37 @@ pub struct QAPair {
     pub nodes_proposed: Vec<String>,
 }
 
+/// Summary of an existing graph node, used for interview context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExistingNodeSummary {
+    pub id: String,
+    pub title: String,
+    pub node_type: String,
+    pub summary: String,
+}
+
+/// A potential duplicate between a proposed and existing node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateCandidate {
+    pub proposed_id: String,
+    pub existing_id: String,
+    pub similarity_reason: String,
+}
+
+/// Interview progress tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Progress {
+    pub filled: usize,
+    pub total: usize,
+    pub percentage: f32,
+}
+
+impl std::fmt::Display for Progress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{} ({:.0}%)", self.filled, self.total, self.percentage)
+    }
+}
+
 impl InterviewSession {
     /// Create a new session for a given root type.
     pub fn new(root_type: &str, root_id: &str, root_body: &str) -> Self {
@@ -95,6 +129,7 @@ impl InterviewSession {
             answered: Vec::new(),
             remaining_gaps: Vec::new(),
             graph_context: Vec::new(),
+            graph_context_rich: Vec::new(),
             token_budget_used: 0,
         }
     }
@@ -317,10 +352,15 @@ impl InterviewSession {
 
         modified_files.dedup();
 
+        let node_count = created_files.len();
+        let edge_count = self.tentative_edges.len();
+
         Ok(CommitResult {
             created_files,
             modified_files,
             warnings: Vec::new(),
+            node_count,
+            edge_count,
         })
     }
 }
@@ -348,11 +388,13 @@ pub struct SessionSummary {
 }
 
 /// Result of committing an interview session.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CommitResult {
     pub created_files: Vec<PathBuf>,
     pub modified_files: Vec<PathBuf>,
     pub warnings: Vec<String>,
+    pub node_count: usize,
+    pub edge_count: usize,
 }
 
 /// Write a tentative node to disk as a markdown file.

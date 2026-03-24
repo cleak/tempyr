@@ -54,6 +54,10 @@ impl InterviewPhase {
 /// Check if the session is ready to transition to the next phase.
 /// Returns the next phase if a transition should happen, None otherwise.
 pub fn check_phase_transition(session: &InterviewSession) -> Option<InterviewPhase> {
+    let answers_in_phase = |phase: InterviewPhase| -> usize {
+        session.answered.iter().filter(|qa| qa.phase == phase).count()
+    };
+
     match session.phase {
         InterviewPhase::Discovery => {
             // Discovery → Product: root has a body (problem statement) and at least
@@ -63,7 +67,11 @@ pub fn check_phase_transition(session: &InterviewSession) -> Option<InterviewPha
             let has_context = !session.graph_context.is_empty()
                 || !session.answered.is_empty(); // at least one interaction
 
-            if has_body && has_context {
+            // Fallback: if no existing context found after 2 turns, advance anyway
+            // (the graph is probably empty / this is a new domain)
+            let fallback = session.answered.len() >= 2 && session.graph_context.is_empty();
+
+            if (has_body && has_context) || fallback {
                 Some(InterviewPhase::Product)
             } else {
                 None
@@ -93,7 +101,11 @@ pub fn check_phase_transition(session: &InterviewSession) -> Option<InterviewPha
             let has_decision = session.has_node_of_type("decision")
                 || session.has_edge_type_from_root("depends_on");
 
-            if has_component || has_decision {
+            // Fallback: if user answers 3+ technical questions, advance
+            // (some features don't have complex architecture)
+            let fallback = answers_in_phase(InterviewPhase::Technical) >= 3;
+
+            if has_component || has_decision || fallback {
                 Some(InterviewPhase::Decomposition)
             } else {
                 None
@@ -105,7 +117,11 @@ pub fn check_phase_transition(session: &InterviewSession) -> Option<InterviewPha
             let has_task = session.has_node_of_type("task")
                 || session.has_edge_type_from_root("decomposes_to");
 
-            if has_task {
+            // Fallback: auto-advance after 2 turns in this phase
+            // (task decomposition can always be refined later)
+            let fallback = answers_in_phase(InterviewPhase::Decomposition) >= 2;
+
+            if has_task || fallback {
                 Some(InterviewPhase::Review)
             } else {
                 None
