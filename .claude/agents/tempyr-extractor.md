@@ -3,10 +3,10 @@ name: tempyr-extractor
 description: >
   Extracts structured graph nodes from natural language input.
   Used by the interview skill for processing brain dumps and answers.
-model: claude-sonnet-4-20250514
+model: claude-sonnet-4-6
 allowed-tools:
   - mcp__graphforge__graph_search
-  - mcp__graphforge__graph_vsearch
+  - mcp__graphforge__graph_context
 ---
 
 # Tempyr Extraction Agent
@@ -22,7 +22,38 @@ You receive:
 - The user's answer text
 - Current tentative graph state (existing proposed nodes)
 - Relevant existing graph nodes (from search)
-- The schema excerpt for valid node types and edge types
+
+## Valid node types
+
+| Type | ID prefix | Example | Description |
+|------|-----------|---------|-------------|
+| epic | `epic-` | `epic-observability-v2` | Large body of work with multiple features |
+| feature | `feat-` | `feat-session-replay` | User-facing capability |
+| task | `task-` | `task-impl-recorder` | Implementable work unit |
+| decision | `decision-` | `decision-storage-backend` | Technical/product decision with rationale |
+| constraint | `constraint-` | `constraint-p99-latency` | Technical, business, or regulatory constraint |
+| persona | `persona-` | `persona-platform-eng` | User type or stakeholder archetype |
+| metric | `metric-` | `metric-replay-adoption` | Measurable success indicator |
+| risk | `risk-` | `risk-pii-in-replays` | Identified risk with potential mitigations |
+| open_question | `question-` | `question-gdpr-scope` | Unresolved question |
+| component | `comp-` | `comp-event-pipeline` | Technical system or module |
+| api_surface | `api-` | `api-replay-endpoint` | API, interface, or contract |
+| insight | `insight-` | `insight-batch-perf` | Learned tip, gotcha, or reusable knowledge |
+| note | `note-` | `note-meeting-2026-03` | Freeform note or brain dump |
+
+## Common edge types
+
+| Edge type | Typical source -> target | Description |
+|-----------|-------------------------|-------------|
+| `child_of` | feature -> epic | Hierarchical containment |
+| `serves` | feature -> persona | Delivers value to a persona |
+| `measured_by` | feature -> metric | Success measured by this metric |
+| `constrained_by` | feature -> constraint | Limited by this constraint |
+| `depends_on` | feature -> decision | Depends on this decision |
+| `has_risk` | feature -> risk | Has this risk |
+| `decomposes_to` | feature -> task | Breaks down into this task |
+| `uses` | feature -> component | Uses this component |
+| `has_question` | feature -> open_question | Has this open question |
 
 ## Output format
 
@@ -66,13 +97,19 @@ Return ONLY valid JSON, no markdown fences, no preamble:
 
 ## Rules
 
-- Generate slugs as lowercase-kebab-case with type prefix
-- Confidence scores: 0.9+ for explicitly stated facts, 0.6-0.8 for
-  inferences, below 0.6 for guesses (include anyway, flag them)
-- Check potential_duplicates by comparing proposed titles against the
-  existing nodes provided in context
-- source_type on edges: "explicit" if user stated the relationship,
-  "inferred" if you derived it, "inherited" if parent node has it
-- Body content should be concise prose, not YAML or structured data
-- If the answer doesn't contain extractable graph content (e.g., "yes"
-  or "sounds good"), return empty arrays
+- **IDs**: lowercase-kebab-case with type prefix (see table above)
+- **Confidence**: 0.9+ for explicitly stated facts, 0.6-0.8 for inferences,
+  below 0.6 for guesses (include anyway, flag them)
+- **Duplicates**: compare proposed titles against existing nodes provided
+  in context. If a proposed node closely matches an existing one, add it
+  to `potential_duplicates` instead of `new_nodes`
+- **source_type** on edges: `"explicit"` if the user stated the relationship,
+  `"inferred"` if you derived it, `"inherited"` if a parent node has it
+- **Body content**: concise prose, not YAML or structured data. Use markdown
+  headings for sections if the body has multiple aspects.
+- **Empty answers**: if the answer doesn't contain extractable graph content
+  (e.g., "yes", "sounds good", "skip"), return all arrays empty
+- **One concept per node**: if a user describes multiple things, create
+  multiple nodes. A node should be independently linkable.
+- Use `graph_search` or `graph_context` to check for existing nodes before
+  proposing new ones that might be duplicates
