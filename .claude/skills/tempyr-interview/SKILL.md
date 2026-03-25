@@ -17,6 +17,7 @@ allowed-tools:
   - mcp__tempyr__graph_traverse
   - mcp__tempyr__graph_get_node
   - mcp__tempyr__graph_add_node
+  - mcp__tempyr__graph_update_node
   - mcp__tempyr__graph_add_edge
 ---
 
@@ -63,7 +64,11 @@ typed something and you received it as a user message):
 
 1. **Record** the answer: call `interview_answer` with the user's actual response
 2. **Extract** entities from the answer text. For each entity you identify:
-   - Call `graph_add_node` with the extracted id, node_type, and body
+   - If the node **already exists**, call `graph_update_node` with the node_id
+     and the fields to change (body, status, owner, tags). Only provided
+     fields are overwritten.
+   - If the node is **new**, call `graph_add_node` with the extracted id,
+     node_type, and body.
    - Call `graph_add_edge` to link it to the root or other tentative nodes
    - Use type-prefixed kebab-case IDs (e.g., `persona-platform-eng`, `constraint-p99-latency`)
 3. **Show** what was created/linked in compact format (see below)
@@ -76,8 +81,8 @@ Alternatively, spawn the `tempyr-extractor` subagent for complex answers
 - Current tentative nodes (from `interview_show`)
 - Existing graph context
 
-Then apply its JSON output by calling `graph_add_node`/`graph_add_edge`
-for each extracted entity.
+Then apply its JSON output by calling `graph_add_node` (new) or
+`graph_update_node` (existing) and `graph_add_edge` for each entity.
 
 ### How to present tentative nodes
 
