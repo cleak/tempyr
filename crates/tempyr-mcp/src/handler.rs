@@ -113,11 +113,11 @@ pub fn handle_tools_list(id: Value) -> JsonRpcResponse {
                 },
                 {
                     "name": "graph_add_node",
-                    "description": "Create a new node in the graph",
+                    "description": "Create a new node in the graph. Fails if node already exists — use graph_update_node to modify existing nodes.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "id": {"type": "string"},
+                            "id": {"type": "string", "description": "Bare kebab-case slug (e.g. 'vs-flip-back'), NOT a path like 'features/vs-flip-back'"},
                             "node_type": {"type": "string"},
                             "status": {"type": "string"},
                             "body": {"type": "string"},
@@ -133,7 +133,7 @@ pub fn handle_tools_list(id: Value) -> JsonRpcResponse {
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "node_id": {"type": "string", "description": "ID of the node to update"},
+                            "node_id": {"type": "string", "description": "Bare node ID slug (e.g. 'vs-flip-back'), not a path"},
                             "body": {"type": "string", "description": "New markdown body (replaces entire body)"},
                             "status": {"type": "string", "description": "New status value"},
                             "owner": {"type": "string", "description": "New owner"},
@@ -144,13 +144,13 @@ pub fn handle_tools_list(id: Value) -> JsonRpcResponse {
                 },
                 {
                     "name": "graph_add_edge",
-                    "description": "Add an edge between two existing nodes",
+                    "description": "Add a directed edge between two existing nodes. The reverse edge is written automatically. Valid source→target edge types: epic→feature(parent_of), epic→persona(serves), epic→metric(measured_by); feature→epic(child_of), feature→persona(serves), feature→constraint(constrained_by), feature→decision(depends_on), feature→feature(depends_on), feature→metric(measured_by), feature→risk(has_risk), feature→task(decomposes_to), feature→open_question(has_question), feature→component(uses), feature→api_surface(exposes), feature→insight(informed_by); task→feature(child_of), task→task(child_of/blocked_by), task→decision(blocked_by), task→open_question(blocked_by/has_question), task→component(uses); decision→feature(decision_for), decision→component(decision_for), decision→constraint(constrained_by), decision→decision(supersedes), decision→open_question(has_question); risk→feature(risk_for), risk→task(mitigated_by); note→*(relates_to); insight→component/feature/decision/insight(relates_to).",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "source": {"type": "string"},
-                            "target": {"type": "string"},
-                            "edge_type": {"type": "string"}
+                            "source": {"type": "string", "description": "Bare node ID slug of the source node"},
+                            "target": {"type": "string", "description": "Bare node ID slug of the target node"},
+                            "edge_type": {"type": "string", "description": "Edge type from source's perspective (e.g. 'child_of', 'has_risk'). See tool description for valid combinations."}
                         },
                         "required": ["source", "target", "edge_type"]
                     }

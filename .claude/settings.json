@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "tempyr validate --json --quiet"
+            "command": "tempyr validate --json"
           },
           {
             "type": "command",
