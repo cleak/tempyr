@@ -1,12 +1,13 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/graphforge-core",
-    "crates/graphforge-index",
-    "crates/graphforge-interview",
-    "crates/graphforge-render",
-    "crates/graphforge-cli",
-    "crates/graphforge-mcp",
+    "crates/tempyr-core",
+    "crates/tempyr-index",
+    "crates/tempyr-interview",
+    "crates/tempyr-render",
+    "crates/tempyr-linear",
+    "crates/tempyr-cli",
+    "crates/tempyr-mcp",
 ]
 
 [workspace.package]

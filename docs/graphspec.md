@@ -1,4 +1,4 @@
-# GraphForge: Knowledge Graph for AI-Assisted Product & Technical Design
+# Tempyr: Knowledge Graph for AI-Assisted Product & Technical Design
 
 ## Document Metadata
 
@@ -12,7 +12,7 @@
 
 ## 1. Executive Summary
 
-GraphForge is a file-based knowledge graph system with hybrid retrieval (structural traversal + vector search + BM25 full-text search) that serves as both a personal/team knowledge base and a project management substrate. Documents like PRDs and TDDs are not stored artifacts — they are rendered views (queries) over the graph. The system's primary interaction model is an AI-assisted interview flow that decomposes brain dumps, conversations, and raw ideas into typed graph nodes and edges.
+Tempyr is a file-based knowledge graph system with hybrid retrieval (structural traversal + vector search + BM25 full-text search) that serves as both a personal/team knowledge base and a project management substrate. Documents like PRDs and TDDs are not stored artifacts — they are rendered views (queries) over the graph. The system's primary interaction model is an AI-assisted interview flow that decomposes brain dumps, conversations, and raw ideas into typed graph nodes and edges.
 
 ### Core Design Principles
 
@@ -20,7 +20,7 @@ GraphForge is a file-based knowledge graph system with hybrid retrieval (structu
 2. **Documents are views, not artifacts.** A PRD is a traversal query that collects feature, persona, constraint, metric, decision, and risk nodes and assembles them using a rendering template. A TDD follows different edges from the same root.
 3. **Hybrid retrieval.** Structured graph traversal for known relationships, vector similarity for semantic discovery, BM25 for exact keyword matching. All three indices live in a single derived SQLite database.
 4. **The interview is the product.** The AI doesn't generate documents — it interviews the user, proposes graph nodes and edges in real time, and commits them on approval. Every answer enriches the graph.
-5. **Zero infrastructure.** No servers, no Docker, no Java. `git clone` + `graphforge index rebuild` and you're running on any machine. The only external dependency at runtime is an LLM API for embeddings and the interview flow.
+5. **Zero infrastructure.** No servers, no Docker, no Java. `git clone` + `tempyr index rebuild` and you're running on any machine. The only external dependency at runtime is an LLM API for embeddings and the interview flow.
 
 ### Key Architectural Decisions Already Made
 
@@ -32,7 +32,7 @@ GraphForge is a file-based knowledge graph system with hybrid retrieval (structu
 | Primary frontend | Claude Code via MCP server | Conversation IS the UI, no custom frontend to maintain |
 | Secondary frontend | CLI (same Rust binary) | Standalone queries, scripting, CI validation |
 | Edge storage | Bidirectional (both sides of edge stored in both files) | Human-readability when opening files in any editor |
-| ID scheme | Human-readable slugs, CLI-managed renames | Grep-friendly; `graphforge rename` updates all references atomically |
+| ID scheme | Human-readable slugs, CLI-managed renames | Grep-friendly; `tempyr rename` updates all references atomically |
 | Embedding model | API-based (Anthropic/OpenAI) with content-hash caching | High quality; re-embed only when body content changes |
 | Temporal model | `valid_from`/`valid_until` on edges, `status` lifecycle on nodes | Stolen from Graphiti; decisions get superseded, not deleted |
 
@@ -101,10 +101,10 @@ GraphForge is a file-based knowledge graph system with hybrid retrieval (structu
 ### 3.1 Project Structure
 
 ```
-graphforge/                          # Rust workspace root
+tempyr/                              # Rust workspace root
 ├── Cargo.toml                       # Workspace manifest
 ├── crates/
-│   ├── graphforge-core/             # Graph data model, parsing, validation
+│   ├── tempyr-core/             # Graph data model, parsing, validation
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── node.rs              # Node struct, YAML parsing
@@ -114,7 +114,7 @@ graphforge/                          # Rust workspace root
 │   │   │   ├── traverse.rs          # Graph traversal algorithms
 │   │   │   └── temporal.rs          # Temporal edge filtering
 │   │   └── Cargo.toml
-│   ├── graphforge-index/            # SQLite indexing (structural + FTS5 + vectors)
+│   ├── tempyr-index/            # SQLite indexing (structural + FTS5 + vectors)
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── indexer.rs           # Full rebuild from files
@@ -124,7 +124,7 @@ graphforge/                          # Rust workspace root
 │   │   │   ├── hybrid.rs           # Combined retrieval + ranking
 │   │   │   └── embeddings.rs       # Embedding API client + cache
 │   │   └── Cargo.toml
-│   ├── graphforge-interview/        # Interview state machine
+│   ├── tempyr-interview/        # Interview state machine
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── session.rs          # InterviewSession struct
@@ -133,18 +133,18 @@ graphforge/                          # Rust workspace root
 │   │   │   ├── proposer.rs         # Node/edge proposal from answers
 │   │   │   └── brain_dump.rs       # Initial input parsing
 │   │   └── Cargo.toml
-│   ├── graphforge-render/           # Document rendering engine
+│   ├── tempyr-render/           # Document rendering engine
 │   │   ├── src/
 │   │   │   ├── lib.rs
 │   │   │   ├── template.rs         # Render template parsing
 │   │   │   ├── collector.rs        # Graph traversal for rendering
 │   │   │   └── formatter.rs        # Markdown output generation
 │   │   └── Cargo.toml
-│   ├── graphforge-cli/              # CLI binary
+│   ├── tempyr-cli/              # CLI binary
 │   │   ├── src/
 │   │   │   └── main.rs
 │   │   └── Cargo.toml
-│   └── graphforge-mcp/             # MCP server binary
+│   └── tempyr-mcp/             # MCP server binary
 │       ├── src/
 │       │   └── main.rs
 │       └── Cargo.toml
@@ -160,7 +160,7 @@ graphforge/                          # Rust workspace root
 
 ```
 my-project/
-├── .graphforge/
+├── .tempyr/
 │   ├── config.toml                  # Project-level config (embedding model, API endpoint)
 │   ├── schema.toml                  # Node types, edge types, validation rules
 │   ├── render/
@@ -267,14 +267,14 @@ edges:
     annotation: "Superseded by new storage decision"  # optional: human note
 ```
 
-**Bidirectional edge rule:** When an edge `A → B` of type `child_of` exists in A's frontmatter, node B must also contain a reverse edge `B → A` of type `parent_of`. The CLI writes both atomically. `graphforge validate` catches any inconsistency. Edge lists in YAML are sorted alphabetically by `target` to minimize merge conflicts.
+**Bidirectional edge rule:** When an edge `A → B` of type `child_of` exists in A's frontmatter, node B must also contain a reverse edge `B → A` of type `parent_of`. The CLI writes both atomically. `tempyr validate` catches any inconsistency. Edge lists in YAML are sorted alphabetically by `target` to minimize merge conflicts.
 
 ### 3.4 Schema Definition (`schema.toml`)
 
 ```toml
 [meta]
 version = "1.0.0"
-description = "GraphForge schema for product + technical knowledge graphs"
+description = "Tempyr schema for product + technical knowledge graphs"
 
 # ─── Node Types ──────────────────────────────────────────
 
@@ -476,7 +476,7 @@ relates_to = { reverse = "relates_to", description = "Symmetric weak association
 
 ### 3.5 SQLite Index Schema
 
-A single file `.graphforge/index.db` contains all derived indices. It is gitignored and can be fully rebuilt from source files at any time via `graphforge index rebuild`.
+A single file `.tempyr/index.db` contains all derived indices. It is gitignored and can be fully rebuilt from source files at any time via `tempyr index rebuild`.
 
 ```sql
 -- Structural index
@@ -537,7 +537,7 @@ CREATE TABLE embedding_cache (
 
 ### 3.6 Hybrid Retrieval Pipeline
 
-The `graphforge context` command and the `graph_context` MCP tool execute this pipeline:
+The `tempyr context` command and the `graph_context` MCP tool execute this pipeline:
 
 ```
 Input: query string + optional root node ID + token budget
@@ -585,11 +585,11 @@ Step 6: Output
 
 | Command | Behavior |
 |---------|----------|
-| `graphforge search <query>` | BM25 only (fast, keyword-exact) |
-| `graphforge vsearch <query>` | Vector only (semantic similarity) |
-| `graphforge context <query> [--root <id>]` | Full hybrid pipeline |
-| `graphforge traverse <id> [--depth N]` | Structural only, no ranking |
-| `graphforge ask <question>` | Full hybrid → feed to LLM → answer |
+| `tempyr search <query>` | BM25 only (fast, keyword-exact) |
+| `tempyr vsearch <query>` | Vector only (semantic similarity) |
+| `tempyr context <query> [--root <id>]` | Full hybrid pipeline |
+| `tempyr traverse <id> [--depth N]` | Structural only, no ranking |
+| `tempyr ask <question>` | Full hybrid → feed to LLM → answer |
 
 ### 3.7 Interview Engine
 
@@ -754,7 +754,7 @@ Returns the full set of tentative nodes and edges in a readable format, organize
 
 1. For each tentative node: write `.md` file with YAML frontmatter + body to the appropriate `graph/<type>/` directory
 2. For each tentative edge: ensure both source and target files contain the edge (bidirectional writes)
-3. Run `graphforge validate` on the affected subgraph
+3. Run `tempyr validate` on the affected subgraph
 4. Update the SQLite index incrementally (don't full rebuild)
 5. Delete the session file
 6. Return: list of files created/modified, any validation warnings
@@ -765,7 +765,7 @@ Allows the user (via Claude Code) to modify a tentative node before commit — c
 
 **`interview_resume(session_id: String)`**
 
-Loads a persisted session from `.graphforge/sessions/` and returns the current state: where we left off, what's been answered, what gaps remain, what the tentative graph looks like.
+Loads a persisted session from `.tempyr/sessions/` and returns the current state: where we left off, what's been answered, what gaps remain, what the tentative graph looks like.
 
 #### 3.7.3 LLM Interaction in the Interview
 
@@ -831,7 +831,7 @@ Rendering templates are TOML files that define how to traverse the graph from a 
 #### 3.8.1 Template Format
 
 ```toml
-# .graphforge/render/prd.toml
+# .tempyr/render/prd.toml
 
 [meta]
 name = "Product Requirements Document"
@@ -899,7 +899,7 @@ include_body = false                    # just list tasks with status
 ```
 
 ```toml
-# .graphforge/render/tdd.toml
+# .tempyr/render/tdd.toml
 
 [meta]
 name = "Technical Design Document"
@@ -969,24 +969,24 @@ min_similarity = 0.7
 
 ```bash
 # Current state (default)
-graphforge render prd feat-session-replay
+tempyr render prd feat-session-replay
 
 # State as of a specific date
-graphforge render prd feat-session-replay --as-of 2026-03-01
+tempyr render prd feat-session-replay --as-of 2026-03-01
 
 # Include historical/superseded edges annotated with validity periods
-graphforge render prd feat-session-replay --include-history
+tempyr render prd feat-session-replay --include-history
 ```
 
 When `--as-of` is provided, the renderer filters edges: include only edges where `valid_from <= as_of` AND (`valid_until IS NULL` OR `valid_until > as_of`). Superseded nodes (status = "superseded" with their `updated_at` before the as-of date) are excluded.
 
 ### 3.9 CLI Specification
 
-Binary name: `graphforge`
+Binary name: `tempyr`
 
 ```
 USAGE:
-    graphforge <COMMAND> [OPTIONS]
+    tempyr <COMMAND> [OPTIONS]
 
 COMMANDS:
     # ─── Graph Operations ────────────────────
@@ -1041,7 +1041,7 @@ COMMANDS:
 
 OPTIONS:
     --graph-dir <path>      Path to graph directory (default: ./graph)
-    --config <path>         Path to config file (default: ./.graphforge/config.toml)
+    --config <path>         Path to config file (default: ./.tempyr/config.toml)
     --verbose               Verbose output
     --json                  JSON output (for scripting / MCP)
 ```
@@ -1208,11 +1208,11 @@ The MCP server exposes the following tools to Claude Code and other MCP clients:
 ### 3.11 Configuration
 
 ```toml
-# .graphforge/config.toml
+# .tempyr/config.toml
 
 [general]
 graph_dir = "graph"                     # relative to project root
-schema_path = ".graphforge/schema.toml"
+schema_path = ".tempyr/schema.toml"
 
 [embedding]
 provider = "anthropic"                  # anthropic | openai | local
@@ -1266,8 +1266,8 @@ transport = "stdio"                     # stdio | tcp
 **Goal**: Working MCP server that Claude Code can use for basic graph operations and simple interviews.
 
 **Deliverables**:
-- `graphforge-core`: Node/edge parsing, schema validation, in-memory graph construction
-- `graphforge-mcp`: MCP server with tools: `graph_get_node`, `graph_add_node`, `graph_add_edge`, `graph_search` (basic grep-based before FTS5), `graph_validate`, `graph_traverse`
+- `tempyr-core`: Node/edge parsing, schema validation, in-memory graph construction
+- `tempyr-mcp`: MCP server with tools: `graph_get_node`, `graph_add_node`, `graph_add_edge`, `graph_search` (basic grep-based before FTS5), `graph_validate`, `graph_traverse`
 - Basic `interview_start` and `interview_answer` (gap detection against schema, LLM calls for extraction)
 - `interview_commit` writes files
 - Session persistence to JSON files
@@ -1292,7 +1292,7 @@ transport = "stdio"                     # stdio | tcp
 **Goal**: Full hybrid retrieval pipeline with SQLite, FTS5, and vector search.
 
 **Deliverables**:
-- `graphforge-index`: SQLite schema creation, full rebuild from files, incremental updates
+- `tempyr-index`: SQLite schema creation, full rebuild from files, incremental updates
 - FTS5 integration for keyword search
 - `sqlite-vec` integration for vector similarity
 - Embedding API client with content-hash caching
@@ -1300,7 +1300,7 @@ transport = "stdio"                     # stdio | tcp
 - `graph_context` and `graph_vsearch` MCP tools
 - `graph_ask` tool (retrieval + LLM answer generation)
 - `graph_suggest_connections` tool (vector similarity for unlinked nodes)
-- `graphforge-cli`: All search and traverse commands
+- `tempyr-cli`: All search and traverse commands
 
 **Rust dependencies (additional)**:
 - `rusqlite` with `bundled` feature — SQLite
@@ -1312,13 +1312,13 @@ transport = "stdio"                     # stdio | tcp
 **Goal**: Document rendering, graph maintenance tools, and production polish.
 
 **Deliverables**:
-- `graphforge-render`: Template parser, graph collector, markdown formatter
+- `tempyr-render`: Template parser, graph collector, markdown formatter
 - Default templates for PRD, TDD, epic summary
 - Temporal filtering (`--as-of`, `--include-history`)
-- `graphforge rename` with atomic reference updates
-- `graphforge dedupe` with fuzzy matching + vector similarity
-- `graphforge migrate` for schema changes
-- `graphforge import` for unstructured text ingestion
+- `tempyr rename` with atomic reference updates
+- `tempyr dedupe` with fuzzy matching + vector similarity
+- `tempyr migrate` for schema changes
+- `tempyr import` for unstructured text ingestion
 - Improved interview gap detection using vector search (find related insights, existing decisions)
 - `graph_render` MCP tool
 
@@ -1339,7 +1339,7 @@ These are documented so the implementer doesn't have to re-derive them.
 ### 5.1 Granularity Problem
 **Problem**: When does something deserve its own node vs. being a section in an existing node?
 **Rule**: A node represents one decision, one fact, or one concept that might be independently linked. If you can't imagine referencing it from another node without its surrounding context, it's a paragraph, not a node.
-**Mitigation**: Support `contains` edge type for hierarchical nesting. Build `graphforge merge` early for when two nodes should have been one.
+**Mitigation**: Support `contains` edge type for hierarchical nesting. Build `tempyr merge` early for when two nodes should have been one.
 
 ### 5.2 Stale Embeddings
 **Problem**: Editing a node's body invalidates its embedding, but editing frontmatter doesn't.
@@ -1347,11 +1347,11 @@ These are documented so the implementer doesn't have to re-derive them.
 
 ### 5.3 ID Stability
 **Problem**: Renaming a node requires updating every file that references it.
-**Solution**: `graphforge rename old-id new-id` greps all YAML frontmatter, updates edge targets, and commits as one atomic change. Forbid manual renames — always use the CLI command.
+**Solution**: `tempyr rename old-id new-id` greps all YAML frontmatter, updates edge targets, and commits as one atomic change. Forbid manual renames — always use the CLI command.
 
 ### 5.4 Bidirectional Edge Sync
 **Problem**: Edges stored on both sides can drift if someone manually edits one file.
-**Solution**: `graphforge validate` checks that every edge has a matching reverse edge. Edge lists are sorted alphabetically by target to minimize merge conflicts. `graphforge add-edge` always writes both files.
+**Solution**: `tempyr validate` checks that every edge has a matching reverse edge. Edge lists are sorted alphabetically by target to minimize merge conflicts. `tempyr add-edge` always writes both files.
 
 ### 5.5 Temporal Semantics
 **Problem**: When rendering, should superseded decisions be shown?
@@ -1363,19 +1363,19 @@ These are documented so the implementer doesn't have to re-derive them.
 
 ### 5.7 AI Proposal Quality
 **Problem**: LLM-proposed nodes during interviews may be wrong, duplicative, or low quality.
-**Solution**: All proposals are tentative until committed. Duplicate detection via fuzzy title match + vector similarity (threshold 0.85). `confidence` score on tentative nodes. `graphforge dedupe` as a periodic maintenance tool. The interview engine uses structured JSON extraction with low temperature (0.1) to minimize hallucination.
+**Solution**: All proposals are tentative until committed. Duplicate detection via fuzzy title match + vector similarity (threshold 0.85). `confidence` score on tentative nodes. `tempyr dedupe` as a periodic maintenance tool. The interview engine uses structured JSON extraction with low temperature (0.1) to minimize hallucination.
 
 ### 5.8 Schema Migration
 **Problem**: Adding/renaming node types or fields requires updating existing files.
-**Solution**: `graphforge migrate` command from day one. Migrations are scripts: "rename all nodes of type X to type Y", "add required field Z with default value W". Migrations modify files in place and commit.
+**Solution**: `tempyr migrate` command from day one. Migrations are scripts: "rename all nodes of type X to type Y", "add required field Z with default value W". Migrations modify files in place and commit.
 
 ### 5.9 Merge Conflicts
 **Problem**: Two concurrent editors (or two Claude Code sessions) adding edges to the same node cause YAML merge conflicts.
-**Solution**: Sort edge lists alphabetically by target. This means independent additions append to different positions in the sorted order. For remaining conflicts, `graphforge resolve` understands YAML edge list structure and can three-way merge intelligently. Not a day-one feature — address when the problem actually occurs.
+**Solution**: Sort edge lists alphabetically by target. This means independent additions append to different positions in the sorted order. For remaining conflicts, `tempyr resolve` understands YAML edge list structure and can three-way merge intelligently. Not a day-one feature — address when the problem actually occurs.
 
 ### 5.10 Bootstrapping / Cold Start
 **Problem**: An empty graph provides no value, and the activation energy to populate it is high.
-**Solution**: `graphforge import` accepts raw text (meeting notes, Slack threads, brain dumps) and proposes a batch of nodes and edges. The interview flow itself is designed to be the primary bootstrapping mechanism — start with a brain dump, end with 10-15 nodes. Also provide a `graphforge init --seed` that creates example nodes demonstrating the schema.
+**Solution**: `tempyr import` accepts raw text (meeting notes, Slack threads, brain dumps) and proposes a batch of nodes and edges. The interview flow itself is designed to be the primary bootstrapping mechanism — start with a brain dump, end with 10-15 nodes. Also provide a `tempyr init --seed` that creates example nodes demonstrating the schema.
 
 ---
 
@@ -1384,18 +1384,18 @@ These are documented so the implementer doesn't have to re-derive them.
 The following should be placed in the project's `CLAUDE.md` to instruct Claude Code on working with the graph:
 
 ```markdown
-# GraphForge Knowledge Graph
+# Tempyr Knowledge Graph
 
-This project uses GraphForge, a file-based knowledge graph system.
+This project uses Tempyr, a file-based knowledge graph system.
 
 ## Graph Location
 - Graph nodes: `graph/` directory, organized by type subdirectory
-- Schema: `.graphforge/schema.toml`
-- Config: `.graphforge/config.toml`
-- Render templates: `.graphforge/render/`
+- Schema: `.tempyr/schema.toml`
+- Config: `.tempyr/config.toml`
+- Render templates: `.tempyr/render/`
 
 ## MCP Tools Available
-When the GraphForge MCP server is running, use these tools instead of
+When the Tempyr MCP server is running, use these tools instead of
 directly reading/writing files:
 
 - `graph_search` / `graph_vsearch` / `graph_context` — find relevant nodes
@@ -1414,9 +1414,9 @@ types, statuses, and edge types. Edges are bidirectional — when adding
 an edge, both source and target files must be updated.
 
 ## Key Rules
-1. NEVER manually edit node IDs — use `graphforge rename`
+1. NEVER manually edit node IDs — use `tempyr rename`
 2. Always sort edge lists alphabetically by target in YAML
-3. Run `graphforge validate` after manual edits
+3. Run `tempyr validate` after manual edits
 4. Use the interview flow for creating new features — it ensures
    completeness and discovers relevant existing context
 5. When in doubt about node granularity: one decision, one fact, or
@@ -1435,8 +1435,8 @@ These are decisions that should be made during implementation, not before:
 
 3. **Interview LLM model**: Should extraction use the same model as the user's Claude Code session (likely Opus) or a cheaper model (Sonnet)? Sonnet at temperature 0.1 is probably sufficient for structured extraction and significantly cheaper.
 
-4. **Session persistence format**: JSON files in `.graphforge/sessions/` is the simple answer. Could also use SQLite. JSON is more debuggable during early development.
+4. **Session persistence format**: JSON files in `.tempyr/sessions/` is the simple answer. Could also use SQLite. JSON is more debuggable during early development.
 
-5. **Rendering output**: Should `graphforge render` write to `renders/` directory by default, or stdout? Stdout is more unix-y but less convenient. Default to file, support `--stdout`.
+5. **Rendering output**: Should `tempyr render` write to `renders/` directory by default, or stdout? Stdout is more unix-y but less convenient. Default to file, support `--stdout`.
 
 6. **Graph visualization**: Defer this entirely. If/when needed, a small HTML page that reads the SQLite index and renders with cytoscape.js is the minimal approach. Don't build until you know what you need to see.

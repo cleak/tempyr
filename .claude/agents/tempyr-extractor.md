@@ -5,8 +5,8 @@ description: >
   Used by the interview skill for processing brain dumps and answers.
 model: claude-sonnet-4-6
 allowed-tools:
-  - mcp__graphforge__graph_search
-  - mcp__graphforge__graph_context
+  - mcp__tempyr__graph_search
+  - mcp__tempyr__graph_context
 ---
 
 # Tempyr Extraction Agent

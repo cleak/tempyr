@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-GraphForge (package name: `tempyr`) is a file-based knowledge graph system for AI-assisted product and technical design. It sits between a PRD helper, a project management system, and an AI-centric task system. The primary interaction model is an AI-assisted interview flow that decomposes brain dumps into typed graph nodes and edges.
+Tempyr is a file-based knowledge graph system for AI-assisted product and technical design. It sits between a PRD helper, a project management system, and an AI-centric task system. The primary interaction model is an AI-assisted interview flow that decomposes brain dumps into typed graph nodes and edges.
 
 The full specification lives in `docs/graphspec.md`. Read the relevant sections before implementing any component.
 
@@ -13,7 +13,7 @@ The full specification lives in `docs/graphspec.md`. Read the relevant sections 
 - Documents (PRDs, TDDs) are rendered views (queries) over the graph, not stored artifacts
 - Hybrid retrieval: structural traversal + BM25 full-text + vector similarity, all from a derived SQLite index
 - The interview is the product: AI interviews the user, proposes nodes/edges, commits on approval
-- Zero infrastructure: single binary, no servers, `git clone` + `graphforge index rebuild`
+- Zero infrastructure: single binary, no servers, `git clone` + `tempyr index rebuild`
 
 ## Build & Test Commands
 
@@ -31,25 +31,26 @@ Rust edition is 2024. Target toolchain is stable.
 
 ## Architecture
 
-The project is a **Rust workspace** with six crates:
+The project is a **Rust workspace** with seven crates:
 
 | Crate | Purpose |
 |-------|---------|
-| `graphforge-core` | Graph data model: node/edge parsing, schema validation, in-memory graph, traversal, temporal filtering |
-| `graphforge-index` | SQLite indexing: FTS5 full-text, sqlite-vec embeddings, hybrid retrieval pipeline, incremental updates |
-| `graphforge-interview` | Interview state machine: session management, phase transitions, gap detection, LLM-based extraction |
-| `graphforge-render` | Document rendering: TOML template parsing, graph collection, markdown output |
-| `graphforge-cli` | CLI binary (`graphforge`): clap-based, all user-facing commands |
-| `graphforge-mcp` | MCP server binary: exposes graph operations as tools for Claude Code |
+| `tempyr-core` | Graph data model: node/edge parsing, schema validation, in-memory graph, traversal, temporal filtering |
+| `tempyr-index` | SQLite indexing: FTS5 full-text, sqlite-vec embeddings, hybrid retrieval pipeline, incremental updates |
+| `tempyr-interview` | Interview state machine: session management, phase transitions, gap detection, LLM-based extraction |
+| `tempyr-render` | Document rendering: TOML template parsing, graph collection, markdown output |
+| `tempyr-linear` | Linear integration: push/pull sync, status mapping, context generation |
+| `tempyr-cli` | CLI binary (`tempyr`): clap-based, all user-facing commands |
+| `tempyr-mcp` | MCP server binary: exposes graph operations as tools for Claude Code |
 
-Crate dependency order: `core` ← `index` ← `interview`/`render` ← `cli`/`mcp`.
+Crate dependency order: `core` ← `index` ← `interview`/`render`/`linear` ← `cli`/`mcp`.
 
 ### Data Model
 
 - **Nodes** are `.md` files with YAML frontmatter in `graph/<type>/` directories (e.g., `graph/features/feat-session-replay.md`)
 - **Edges** are stored bidirectionally in YAML frontmatter — both source and target files contain the edge. Edge lists are sorted alphabetically by target.
 - **Schema** (`schema.toml`) defines node types, required fields, allowed statuses, and valid edge types with reverse mappings
-- **Index** (`.graphforge/index.db`) is a derived SQLite database (gitignored, rebuildable) containing structural data, FTS5, and vector embeddings
+- **Index** (`.tempyr/index.db`) is a derived SQLite database (gitignored, rebuildable) containing structural data, FTS5, and vector embeddings
 
 ### Key Design Patterns
 
@@ -77,7 +78,7 @@ The interview is a 5-phase state machine: Discovery → Product → Technical �
 ## Conventions
 
 - Node IDs are human-readable kebab-case slugs (e.g., `feat-session-replay`, `decision-storage-backend`)
-- Never manually rename node IDs — use `graphforge rename` which updates all references atomically
+- Never manually rename node IDs — use `tempyr rename` which updates all references atomically
 - Node granularity rule: one decision, one fact, or one concept per node. If it can't be independently linked, it's a paragraph, not a node.
 - Interview extraction prompts use temperature 0.1 for structured JSON output
-- The binary name is `graphforge`, not `tempyr` (tempyr is the package/repo name)
+- The binary name is `tempyr`

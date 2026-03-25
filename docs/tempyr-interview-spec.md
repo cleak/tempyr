@@ -73,7 +73,7 @@ Keep this minimal. Only rules that apply to ALL sessions, not just interviews.
 ## Project
 Tempyr is a file-based knowledge graph with hybrid retrieval.
 Graph nodes: `graph/` directory, organized by type subdirectory.
-Schema: `.graphforge/schema.toml` — defines valid node types, edges, fields.
+Schema: `.tempyr/schema.toml` — defines valid node types, edges, fields.
 
 ## MCP Server
 The Tempyr MCP server provides graph operations. Always prefer MCP tools
@@ -396,7 +396,7 @@ root_type: string      # "feature" (default), "epic", "component"
    d. For missing recommended relationships, create lower-priority Gaps
    e. Assign each Gap to the appropriate interview phase
 
-7. PERSIST session to .graphforge/sessions/<session_id>.json
+7. PERSIST session to .tempyr/sessions/<session_id>.json
 
 8. RETURN to Claude Code:
    {
@@ -426,7 +426,7 @@ answer: string
 **Internal flow**:
 
 ```
-1. LOAD session from .graphforge/sessions/<session_id>.json
+1. LOAD session from .tempyr/sessions/<session_id>.json
 
 2. EXTRACT structured content from answer
    a. Call extraction subagent with:
@@ -515,7 +515,7 @@ session_id: string
       (create reverse edge entry, re-sort target's edge list, rewrite)
 3. Run graph_validate on all affected files
 4. Update SQLite index incrementally (if index exists)
-5. Delete session file from .graphforge/sessions/
+5. Delete session file from .tempyr/sessions/
 6. RETURN:
    {
      files_created: string[],    // paths relative to graph/

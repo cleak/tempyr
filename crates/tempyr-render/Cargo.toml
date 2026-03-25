@@ -1,0 +1,15 @@
+[package]
+name = "tempyr-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tempyr-core = { path = "../tempyr-core" }
+toml = { workspace = true }
+serde = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_yml = { workspace = true }

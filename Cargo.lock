@@ -989,104 +989,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "graphforge-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "chrono",
- "clap",
- "graphforge-core",
- "graphforge-index",
- "graphforge-interview",
- "graphforge-render",
- "predicates",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
- "walkdir",
-]
-
-[[package]]
-name = "graphforge-core"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "chrono",
- "serde",
- "serde_json",
- "serde_yml",
- "tempfile",
- "thiserror",
- "toml",
- "walkdir",
-]
-
-[[package]]
-name = "graphforge-index"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "fastembed",
- "graphforge-core",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yml",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "graphforge-interview"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "graphforge-core",
- "graphforge-index",
- "serde",
- "serde_json",
- "serde_yml",
- "strsim",
- "tempfile",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "graphforge-mcp"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "graphforge-core",
- "graphforge-index",
- "graphforge-interview",
- "graphforge-render",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "graphforge-render"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "graphforge-core",
- "serde",
- "serde_yml",
- "tempfile",
- "thiserror",
- "toml",
-]
-
-[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2850,6 +2752,122 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tempyr-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "chrono",
+ "clap",
+ "predicates",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tempyr-core",
+ "tempyr-index",
+ "tempyr-interview",
+ "tempyr-linear",
+ "tempyr-render",
+ "tokio",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
+name = "tempyr-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
+name = "tempyr-index"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fastembed",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "tempfile",
+ "tempyr-core",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "tempyr-interview"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "strsim",
+ "tempfile",
+ "tempyr-core",
+ "tempyr-index",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "tempyr-linear"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tempyr-core",
+ "tempyr-index",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "tempyr-mcp"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempyr-core",
+ "tempyr-index",
+ "tempyr-interview",
+ "tempyr-linear",
+ "tempyr-render",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "tempyr-render"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_yml",
+ "tempfile",
+ "tempyr-core",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 [meta]
 version = "1.0.0"
-description = "GraphForge schema for product + technical knowledge graphs"
+description = "Tempyr schema for product + technical knowledge graphs"
 
 # ─── Node Types ──────────────────────────────────────────
 

@@ -6,18 +6,18 @@ description: >
   project, capture requirements, do a brain dump, or create a PRD/TDD.
   Keywords: interview, new feature, brain dump, PRD, TDD, requirements.
 allowed-tools:
-  - mcp__graphforge__interview_start
-  - mcp__graphforge__interview_answer
-  - mcp__graphforge__interview_show
-  - mcp__graphforge__interview_commit
-  - mcp__graphforge__interview_adjust
-  - mcp__graphforge__interview_resume
-  - mcp__graphforge__graph_search
-  - mcp__graphforge__graph_context
-  - mcp__graphforge__graph_traverse
-  - mcp__graphforge__graph_get_node
-  - mcp__graphforge__graph_add_node
-  - mcp__graphforge__graph_add_edge
+  - mcp__tempyr__interview_start
+  - mcp__tempyr__interview_answer
+  - mcp__tempyr__interview_show
+  - mcp__tempyr__interview_commit
+  - mcp__tempyr__interview_adjust
+  - mcp__tempyr__interview_resume
+  - mcp__tempyr__graph_search
+  - mcp__tempyr__graph_context
+  - mcp__tempyr__graph_traverse
+  - mcp__tempyr__graph_get_node
+  - mcp__tempyr__graph_add_node
+  - mcp__tempyr__graph_add_edge
 ---
 
 # Tempyr Interview Skill
@@ -26,6 +26,24 @@ You are conducting a structured interview to create knowledge graph nodes.
 The MCP server handles state, gap detection, and phase transitions. Your job
 is the CONVERSATION — phrasing questions naturally, extracting structured
 entities from answers, and presenting proposals clearly.
+
+## CRITICAL: You are the interviewer, NOT the interviewee
+
+**NEVER answer your own questions.** You ask questions, then STOP and WAIT
+for the user to respond. Every call to `interview_answer` MUST contain text
+that the user actually typed — never your own fabricated answers, inferences,
+or "obvious" gap-fills. If you think you know the answer from context, you
+still ask — the user may disagree, clarify, or have context you lack.
+
+Concretely:
+- After calling `interview_start`, present the gaps/questions and **stop**.
+- After each user reply, call `interview_answer` with **their words**, then
+  present the next questions and **stop**.
+- Do NOT batch-answer gaps. Do NOT pre-fill answers from existing graph
+  context. Do NOT call `interview_answer` multiple times in a row without
+  user input between each call.
+- The only valid argument to `interview_answer` is a quote or close
+  paraphrase of what the user just said.
 
 ## Core workflow
 
@@ -40,9 +58,10 @@ When the user describes something they want to build/plan/capture:
 
 ### Processing answers — the extraction loop
 
-When the user answers a question (or gives additional context):
+When the user answers a question (or gives additional context — meaning they
+typed something and you received it as a user message):
 
-1. **Record** the answer: call `interview_answer` with their response
+1. **Record** the answer: call `interview_answer` with the user's actual response
 2. **Extract** entities from the answer text. For each entity you identify:
    - Call `graph_add_node` with the extracted id, node_type, and body
    - Call `graph_add_edge` to link it to the root or other tentative nodes
@@ -145,7 +164,7 @@ When the server returns `"phase": "Review"`:
 4. Ask: "Anything to add, change, or remove before I commit?"
 5. On approval, call `interview_commit`
 6. Report the files created and any validation warnings
-7. Mention: `graphforge render prd <id>` or `graphforge render tdd <id>`
+7. Mention: `tempyr render prd <id>` or `tempyr render tdd <id>`
 
 ### Resuming an interrupted interview
 
@@ -156,7 +175,7 @@ If the user mentions a previous interview or wants to continue:
 4. Continue asking questions from `next_questions`
 
 If the user doesn't know the session_id, they can run
-`graphforge interview list` in the terminal to see active sessions.
+`tempyr interview list` in the terminal to see active sessions.
 
 ### When NOT to interview
 

@@ -1,0 +1,28 @@
+[package]
+name = "tempyr-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tempyr"
+path = "src/main.rs"
+
+[dependencies]
+tempyr-core = { path = "../tempyr-core" }
+tempyr-index = { path = "../tempyr-index" }
+tempyr-interview = { path = "../tempyr-interview" }
+tempyr-render = { path = "../tempyr-render" }
+tempyr-linear = { path = "../tempyr-linear" }
+anyhow = "1"
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+assert_cmd = "2"
+predicates = "3"

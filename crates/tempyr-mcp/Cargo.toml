@@ -1,0 +1,20 @@
+[package]
+name = "tempyr-mcp"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tempyr-mcp"
+path = "src/main.rs"
+
+[dependencies]
+tempyr-core = { path = "../tempyr-core" }
+tempyr-index = { path = "../tempyr-index" }
+tempyr-interview = { path = "../tempyr-interview" }
+tempyr-render = { path = "../tempyr-render" }
+tempyr-linear = { path = "../tempyr-linear" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }

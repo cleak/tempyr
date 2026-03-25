@@ -1,10 +1,11 @@
 # Rust
 /target
 
-# GraphForge derived files (rebuildable from source)
-.graphforge/index.db
-.graphforge/embed-cache.json
-.graphforge/sessions/
+# Tempyr derived files (rebuildable from source)
+.tempyr/index.db
+.tempyr/embed-cache.json
+.tempyr/sessions/
+.tempyr/linear-sync.json
 
 # Rendered output (optional — some teams may want to commit these)
 /renders/

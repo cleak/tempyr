@@ -1,0 +1,27 @@
+[package]
+name = "tempyr-index"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tempyr-core = { path = "../tempyr-core" }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+
+[features]
+default = []
+local-embeddings = ["dep:fastembed"]
+
+[dependencies.fastembed]
+workspace = true
+optional = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_yml = { workspace = true }
