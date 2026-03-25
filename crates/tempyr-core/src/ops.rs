@@ -4,6 +4,7 @@ use chrono::Utc;
 use walkdir::WalkDir;
 
 use crate::edge::EdgeEntry;
+use crate::id;
 use crate::node::{Node, NodeFrontmatter, parse_node, serialize_node};
 use crate::schema::Schema;
 use crate::{TempyrError, Result};
@@ -53,6 +54,102 @@ pub fn create_node_file(
 
     atomic_write(&file_path, &serialized)?;
     Ok(file_path)
+}
+
+/// Create a new node file with an auto-generated hybrid ID.
+///
+/// Takes a human-readable `slug` (e.g. "session-replay"), generates a 6-char
+/// Crockford Base32 suffix, and creates the node with full ID `{slug}-{suffix}`.
+///
+/// Returns `(generated_id, file_path)`.
+pub fn create_node_file_auto_id(
+    graph_dir: &Path,
+    slug: &str,
+    node_type: &str,
+    status: Option<&str>,
+    owner: Option<&str>,
+    tags: Option<&[String]>,
+    body: &str,
+) -> Result<(String, PathBuf)> {
+    let existing = id::collect_existing_suffixes(graph_dir);
+    let full_id = id::make_node_id(slug, &existing);
+    let path = create_node_file(graph_dir, &full_id, node_type, status, owner, tags, body)?;
+    Ok((full_id, path))
+}
+
+/// Rename a node's slug while preserving its suffix.
+///
+/// `old_id` must be a hybrid ID. The suffix is extracted and appended to
+/// `new_slug` to form the new ID. All edge references are updated atomically.
+pub fn rename_node_slug(
+    graph_dir: &Path,
+    old_id: &str,
+    new_slug: &str,
+) -> Result<Vec<PathBuf>> {
+    let parsed = id::parse_node_id(old_id).ok_or_else(|| {
+        TempyrError::Node(format!(
+            "Cannot slug-rename a non-hybrid ID: '{old_id}'. Use full rename instead."
+        ))
+    })?;
+    let new_id = format!("{new_slug}-{}", parsed.suffix);
+    rename_node(graph_dir, old_id, &new_id)
+}
+
+/// Resolve a node query to a full node ID.
+///
+/// Accepts:
+/// - Full hybrid ID: `session-replay-a1b2c3` (exact filename match)
+/// - Legacy ID: `feat-session-replay` (exact filename match)
+/// - 6-char suffix only: `a1b2c3` (scans filenames for `-{suffix}.md`)
+///
+/// Returns an error if no match or multiple matches found.
+pub fn resolve_node_id(graph_dir: &Path, query: &str) -> Result<String> {
+    // Try exact match first (fastest path)
+    let exact_filename = format!("{query}.md");
+    for entry in WalkDir::new(graph_dir)
+        .min_depth(2)
+        .max_depth(2)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_name().to_string_lossy() == exact_filename {
+            return Ok(query.to_string());
+        }
+    }
+
+    // Try suffix-only match if query looks like a valid 6-char suffix
+    if id::is_valid_suffix(query) {
+        let suffix_pattern = format!("-{query}.md");
+        let mut matches = Vec::new();
+
+        for entry in WalkDir::new(graph_dir)
+            .min_depth(2)
+            .max_depth(2)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let name = entry.file_name().to_string_lossy();
+            if name.ends_with(&suffix_pattern) {
+                let stem = name.strip_suffix(".md").unwrap();
+                matches.push(stem.to_string());
+            }
+        }
+
+        match matches.len() {
+            0 => {}
+            1 => return Ok(matches.into_iter().next().unwrap()),
+            _ => {
+                return Err(TempyrError::Node(format!(
+                    "Ambiguous suffix '{query}' matches multiple nodes: {}",
+                    matches.join(", ")
+                )));
+            }
+        }
+    }
+
+    Err(TempyrError::NotFound(format!(
+        "Node not found: '{query}'"
+    )))
 }
 
 /// Add an edge between two nodes, writing both files (bidirectional).
@@ -607,5 +704,124 @@ mod tests {
         let node = parse_node(&content, PathBuf::from("test")).unwrap();
         assert!(node.body.contains("Updated."));
         assert!(node.edges().iter().any(|e| e.target == "epic-a" && e.edge_type == "child_of"));
+    }
+
+    #[test]
+    fn test_create_node_file_auto_id() {
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        let (generated_id, path) = create_node_file_auto_id(
+            &graph_dir, "session-replay", "feature", Some("draft"), Some("caleb"), None,
+            "# Session Replay\n\nA feature.\n",
+        ).unwrap();
+
+        assert!(path.exists());
+        assert!(id::is_hybrid_id(&generated_id));
+        let parsed = id::parse_node_id(&generated_id).unwrap();
+        assert_eq!(parsed.slug, "session-replay");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let node = parse_node(&content, path).unwrap();
+        assert_eq!(node.id(), generated_id);
+    }
+
+    #[test]
+    fn test_create_node_file_auto_id_unique_suffixes() {
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        let (id1, _) = create_node_file_auto_id(
+            &graph_dir, "thing-one", "feature", Some("draft"), None, None, "# One\n",
+        ).unwrap();
+        let (id2, _) = create_node_file_auto_id(
+            &graph_dir, "thing-two", "feature", Some("draft"), None, None, "# Two\n",
+        ).unwrap();
+
+        let s1 = id::parse_node_id(&id1).unwrap().suffix;
+        let s2 = id::parse_node_id(&id2).unwrap().suffix;
+        assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn test_rename_node_slug() {
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        let (generated_id, _) = create_node_file_auto_id(
+            &graph_dir, "old-name", "feature", Some("draft"), None, None, "# Old\n",
+        ).unwrap();
+
+        let suffix = id::parse_node_id(&generated_id).unwrap().suffix.clone();
+        let modified = rename_node_slug(&graph_dir, &generated_id, "new-name").unwrap();
+        assert!(!modified.is_empty());
+
+        let expected_new_id = format!("new-name-{suffix}");
+        let new_path = graph_dir.join("features").join(format!("{expected_new_id}.md"));
+        assert!(new_path.exists());
+
+        let content = std::fs::read_to_string(&new_path).unwrap();
+        let node = parse_node(&content, new_path).unwrap();
+        assert_eq!(node.id(), expected_new_id);
+    }
+
+    #[test]
+    fn test_rename_node_slug_rejects_legacy_id() {
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        write_node(&graph_dir, "features", "feat-old",
+            "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Old\n");
+
+        let result = rename_node_slug(&graph_dir, "feat-old", "new-name");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_node_id_exact() {
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        let (generated_id, _) = create_node_file_auto_id(
+            &graph_dir, "my-feature", "feature", Some("draft"), None, None, "# F\n",
+        ).unwrap();
+
+        let resolved = resolve_node_id(&graph_dir, &generated_id).unwrap();
+        assert_eq!(resolved, generated_id);
+    }
+
+    #[test]
+    fn test_resolve_node_id_by_suffix() {
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        let (generated_id, _) = create_node_file_auto_id(
+            &graph_dir, "my-feature", "feature", Some("draft"), None, None, "# F\n",
+        ).unwrap();
+
+        let suffix = id::parse_node_id(&generated_id).unwrap().suffix;
+        let resolved = resolve_node_id(&graph_dir, &suffix).unwrap();
+        assert_eq!(resolved, generated_id);
+    }
+
+    #[test]
+    fn test_resolve_node_id_legacy_exact() {
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        write_node(&graph_dir, "features", "feat-legacy",
+            "---\nid: feat-legacy\ntype: feature\nstatus: draft\n---\n# Legacy\n");
+
+        let resolved = resolve_node_id(&graph_dir, "feat-legacy").unwrap();
+        assert_eq!(resolved, "feat-legacy");
+    }
+
+    #[test]
+    fn test_resolve_node_id_not_found() {
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        let result = resolve_node_id(&graph_dir, "nonexistent");
+        assert!(result.is_err());
     }
 }

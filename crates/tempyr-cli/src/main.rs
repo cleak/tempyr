@@ -41,9 +41,13 @@ pub enum Commands {
         #[arg(name = "type")]
         node_type: String,
 
-        /// Node ID (slug)
-        #[arg(long)]
-        id: String,
+        /// Human-readable slug (system appends 6-char suffix)
+        #[arg(long, group = "identifier")]
+        slug: Option<String>,
+
+        /// Full node ID (bypass auto-suffix, for migration/compat)
+        #[arg(long, group = "identifier")]
+        id: Option<String>,
 
         /// Node status
         #[arg(long)]
@@ -76,8 +80,13 @@ pub enum Commands {
 
     /// Rename a node, updating all references
     Rename {
+        /// Current node ID
         old_id: String,
-        new_id: String,
+        /// New full ID (changes everything)
+        new_id: Option<String>,
+        /// New slug only (preserves the 6-char suffix)
+        #[arg(long)]
+        slug: Option<String>,
     },
 
     /// Change a node's status
@@ -287,9 +296,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::validate::run(&ctx, cli.json)
         }
-        Commands::Add { node_type, id, status, owner, body } => {
+        Commands::Add { node_type, slug, id, status, owner, body } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
-            commands::add::run(&ctx, &node_type, &id, status.as_deref(), owner.as_deref(), body.as_deref())
+            commands::add::run(&ctx, &node_type, slug.as_deref(), id.as_deref(), status.as_deref(), owner.as_deref(), body.as_deref())
         }
         Commands::AddEdge { source, target, edge_type } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
@@ -299,9 +308,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::edge::run_remove(&ctx, &source, &target, &edge_type)
         }
-        Commands::Rename { old_id, new_id } => {
+        Commands::Rename { old_id, new_id, slug } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
-            commands::rename::run(&ctx, &old_id, &new_id)
+            commands::rename::run(&ctx, &old_id, new_id.as_deref(), slug.as_deref())
         }
         Commands::Status { id, new_status } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;

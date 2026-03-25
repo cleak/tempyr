@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tempyr_core::graph::Graph;
+use tempyr_core::id;
 use tempyr_core::schema::Schema;
 use serde::Serialize;
 
@@ -45,13 +46,15 @@ pub fn interview_start(
     root_type: &str,
     schema: &Schema,
     existing_node_ids: &[String],
+    existing_suffixes: &HashSet<String>,
 ) -> Result<InterviewStartResult> {
     let slug = slugify(brain_dump);
     let title = first_line(brain_dump);
+    let full_id = id::make_node_id(&slug, existing_suffixes);
 
     let body = format!("# {title}\n\n## Problem\n\n{brain_dump}\n");
 
-    let mut session = InterviewSession::new(root_type, &slug, &body);
+    let mut session = InterviewSession::new(root_type, &full_id, &body);
 
     // Record existing nodes as graph context
     for id in existing_node_ids {
@@ -91,8 +94,18 @@ pub fn add_proposed_node(
     confidence: f32,
     schema: &Schema,
 ) -> InterviewUpdateResult {
+    // Auto-generate suffix if the provided ID isn't already hybrid
+    let actual_id = if id::is_hybrid_id(id) {
+        id.to_string()
+    } else {
+        let existing: HashSet<String> = session.tentative_nodes
+            .iter()
+            .filter_map(|n| id::parse_node_id(&n.id).map(|p| p.suffix))
+            .collect();
+        id::make_node_id(id, &existing)
+    };
     session.add_tentative_node(TentativeNode {
-        id: id.to_string(),
+        id: actual_id.to_string(),
         node_type: node_type.to_string(),
         status: status.to_string(),
         fields: HashMap::new(),
@@ -102,7 +115,7 @@ pub fn add_proposed_node(
     });
 
     let mut result = reanalyze(session, schema);
-    result.new_nodes = vec![id.to_string()];
+    result.new_nodes = vec![actual_id];
     result
 }
 
@@ -331,6 +344,7 @@ mod tests {
             "feature",
             &schema,
             &[],
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -349,6 +363,7 @@ mod tests {
             "feature",
             &schema,
             &existing,
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -365,6 +380,7 @@ mod tests {
             "feature",
             &schema,
             &["existing-epic".to_string()],
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -387,35 +403,29 @@ mod tests {
         assert!(session.has_node_of_type("persona"));
         // Persona gap should be resolved after adding edge too
         let root_id = session.root_node.id.clone();
-        add_proposed_edge(&mut session, &root_id, "persona-eng", "serves", &schema);
+        let persona_id = update.new_nodes[0].clone();
+        add_proposed_edge(&mut session, &root_id, &persona_id, "serves", &schema);
         assert!(!session.remaining_gaps.iter().any(|g| g.node_type_needed == "persona"));
     }
 
     #[test]
     fn test_add_proposed_edge() {
         let schema = make_schema();
-        let result = interview_start("A feature idea", "feature", &schema, &["ctx".to_string()]).unwrap();
+        let result = interview_start("A feature idea", "feature", &schema, &["ctx".to_string()], &HashSet::new()).unwrap();
         let mut session = result.session;
 
         let root_id = session.root_node.id.clone();
-        session.add_tentative_node(TentativeNode {
-            id: "persona-x".to_string(),
-            node_type: "persona".to_string(),
-            status: "".to_string(),
-            fields: HashMap::new(),
-            body: "# X\n".to_string(),
-            confidence: 0.8,
-            source_qa: vec![],
-        });
+        let update = add_proposed_node(&mut session, "persona-x", "persona", "", "# X\n", 0.8, &schema);
+        let persona_id = update.new_nodes[0].clone();
 
-        let update = add_proposed_edge(&mut session, &root_id, "persona-x", "serves", &schema);
+        let update = add_proposed_edge(&mut session, &root_id, &persona_id, "serves", &schema);
         assert!(session.has_edge_type_from_root("serves"));
     }
 
     #[test]
     fn test_record_answer_and_reanalyze() {
         let schema = make_schema();
-        let result = interview_start("A feature", "feature", &schema, &["ctx".to_string()]).unwrap();
+        let result = interview_start("A feature", "feature", &schema, &["ctx".to_string()], &HashSet::new()).unwrap();
         let mut session = result.session;
 
         let update = record_answer(
@@ -438,6 +448,7 @@ mod tests {
             "feature",
             &schema,
             &["ctx".to_string()],
+            &HashSet::new(),
         ).unwrap();
         let mut session = result.session;
 
@@ -446,13 +457,15 @@ mod tests {
 
         // Add persona + edge
         let root_id = session.root_node.id.clone();
-        add_proposed_node(&mut session, "persona-eng", "persona", "", "# Eng\n", 0.9, &schema);
-        add_proposed_edge(&mut session, &root_id, "persona-eng", "serves", &schema);
+        let persona_update = add_proposed_node(&mut session, "persona-eng", "persona", "", "# Eng\n", 0.9, &schema);
+        let persona_id = persona_update.new_nodes[0].clone();
+        add_proposed_edge(&mut session, &root_id, &persona_id, "serves", &schema);
 
         // Add metric — this should trigger Product → Technical since we now have
         // persona + metric + substantive body
         let update = add_proposed_node(&mut session, "metric-mttr", "metric", "proposed", "# Reduce MTTR\n", 0.8, &schema);
-        add_proposed_edge(&mut session, &root_id, "metric-mttr", "measured_by", &schema);
+        let metric_id = update.new_nodes[0].clone();
+        add_proposed_edge(&mut session, &root_id, &metric_id, "measured_by", &schema);
 
         // Should now be in Technical phase (transition happened when metric was added)
         assert!(update.phase_changed);
@@ -574,6 +587,7 @@ A platform engineer.
             "feature",
             &schema,
             &[],
+            &HashSet::new(),
         )
         .unwrap();
 
@@ -590,6 +604,7 @@ A platform engineer.
             "feature",
             &schema,
             &["existing-epic".to_string()],
+            &HashSet::new(),
         )
         .unwrap();
         let mut session = result.session;
@@ -597,7 +612,7 @@ A platform engineer.
 
         // Add a persona node + edge to fill the persona gap
         let root_id = session.root_node.id.clone();
-        add_proposed_node(
+        let persona_update = add_proposed_node(
             &mut session,
             "persona-eng",
             "persona",
@@ -606,7 +621,8 @@ A platform engineer.
             0.9,
             &schema,
         );
-        add_proposed_edge(&mut session, &root_id, "persona-eng", "serves", &schema);
+        let persona_id = persona_update.new_nodes[0].clone();
+        add_proposed_edge(&mut session, &root_id, &persona_id, "serves", &schema);
 
         let after = compute_progress(&session);
         assert!(

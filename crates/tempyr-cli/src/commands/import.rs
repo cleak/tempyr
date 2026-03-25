@@ -19,7 +19,8 @@ pub fn run(ctx: &ProjectContext, file: &Path) -> anyhow::Result<()> {
     let existing_ids: Vec<String> = graph.nodes.keys().cloned().collect();
 
     // Start an interview session from the imported text
-    let result = proposer::interview_start(&content, "feature", &ctx.schema, &existing_ids)?;
+    let existing_suffixes = tempyr_core::id::collect_existing_suffixes(&ctx.graph_dir);
+    let result = proposer::interview_start(&content, "feature", &ctx.schema, &existing_ids, &existing_suffixes)?;
 
     let sessions_dir = ctx.tempyr_dir.join("sessions");
     let session = result.session;

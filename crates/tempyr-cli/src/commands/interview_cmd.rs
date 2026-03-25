@@ -11,7 +11,8 @@ pub fn run_start(ctx: &ProjectContext, brain_dump: &str, root_type: &str, json: 
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
     let existing_ids: Vec<String> = graph.nodes.keys().cloned().collect();
 
-    let result = proposer::interview_start(brain_dump, root_type, &ctx.schema, &existing_ids)?;
+    let existing_suffixes = tempyr_core::id::collect_existing_suffixes(&ctx.graph_dir);
+    let result = proposer::interview_start(brain_dump, root_type, &ctx.schema, &existing_ids, &existing_suffixes)?;
 
     let session = result.session;
     session.save(&sessions_dir)?;

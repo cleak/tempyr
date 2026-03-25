@@ -113,18 +113,18 @@ pub fn handle_tools_list(id: Value) -> JsonRpcResponse {
                 },
                 {
                     "name": "graph_add_node",
-                    "description": "Create a new node in the graph. Fails if node already exists — use graph_update_node to modify existing nodes.",
+                    "description": "Create a new node in the graph. Provide a human-readable slug; the system generates a 6-char suffix to form the full ID (e.g. slug 'session-replay' → ID 'session-replay-a1b2c3'). The generated full ID is returned. Use graph_update_node to modify existing nodes.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "id": {"type": "string", "description": "Bare kebab-case slug (e.g. 'vs-flip-back'), NOT a path like 'features/vs-flip-back'"},
+                            "slug": {"type": "string", "description": "Human-readable kebab-case slug (e.g. 'session-replay', 'ore-bucket'). Do NOT include type prefixes like 'feat-' — the node_type field handles that."},
                             "node_type": {"type": "string"},
                             "status": {"type": "string"},
                             "body": {"type": "string"},
                             "owner": {"type": "string"},
                             "tags": {"type": "array", "items": {"type": "string"}}
                         },
-                        "required": ["id", "node_type", "body"]
+                        "required": ["slug", "node_type", "body"]
                     }
                 },
                 {
@@ -133,7 +133,7 @@ pub fn handle_tools_list(id: Value) -> JsonRpcResponse {
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "node_id": {"type": "string", "description": "Bare node ID slug (e.g. 'vs-flip-back'), not a path"},
+                            "node_id": {"type": "string", "description": "Full node ID (e.g. 'session-replay-a1b2c3') or 6-char suffix (e.g. 'a1b2c3')"},
                             "body": {"type": "string", "description": "New markdown body (replaces entire body)"},
                             "status": {"type": "string", "description": "New status value"},
                             "owner": {"type": "string", "description": "New owner"},
@@ -148,8 +148,8 @@ pub fn handle_tools_list(id: Value) -> JsonRpcResponse {
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "source": {"type": "string", "description": "Bare node ID slug of the source node"},
-                            "target": {"type": "string", "description": "Bare node ID slug of the target node"},
+                            "source": {"type": "string", "description": "Full node ID (e.g. 'session-replay-a1b2c3') or 6-char suffix (e.g. 'a1b2c3')"},
+                            "target": {"type": "string", "description": "Full node ID (e.g. 'session-replay-a1b2c3') or 6-char suffix (e.g. 'a1b2c3')"},
                             "edge_type": {"type": "string", "description": "Edge type from source's perspective (e.g. 'child_of', 'has_risk'). See tool description for valid combinations."}
                         },
                         "required": ["source", "target", "edge_type"]
@@ -368,6 +368,9 @@ fn tool_graph_context(args: &Value) -> Result<String, String> {
     let budget = args.get("token_budget").and_then(|v| v.as_u64()).unwrap_or(8000) as usize;
 
     let (graph_dir, gf_dir, schema) = find_project()?;
+    let resolved_root = root
+        .map(|r| ops::resolve_node_id(&graph_dir, r).map_err(|e| e.to_string()))
+        .transpose()?;
     let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
     let index_path = gf_dir.join("index.db");
     let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
@@ -376,7 +379,7 @@ fn tool_graph_context(args: &Value) -> Result<String, String> {
         token_budget: budget,
         ..RetrievalConfig::standard()
     };
-    let results = hybrid_retrieve(&index, &graph, query, root, &config).map_err(|e| e.to_string())?;
+    let results = hybrid_retrieve(&index, &graph, query, resolved_root.as_deref(), &config).map_err(|e| e.to_string())?;
 
     let mut output = String::new();
     for r in &results {
@@ -394,9 +397,10 @@ fn tool_graph_traverse(args: &Value) -> Result<String, String> {
     let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
 
     let (graph_dir, _, schema) = find_project()?;
+    let resolved = ops::resolve_node_id(&graph_dir, node_id).map_err(|e| e.to_string())?;
     let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
 
-    let results = bfs(&graph, node_id, depth, None);
+    let results = bfs(&graph, &resolved, depth, None);
     let output: Vec<Value> = results.iter().map(|r| {
         let node = graph.get_node(&r.node_id);
         json!({
@@ -414,24 +418,31 @@ fn tool_graph_get_node(args: &Value) -> Result<String, String> {
     let node_id = args.get("node_id").and_then(|v| v.as_str()).ok_or("Missing 'node_id'")?;
 
     let (graph_dir, _, _) = find_project()?;
-    let path = ops::find_node_file(&graph_dir, node_id).map_err(|e| e.to_string())?;
+    let resolved = ops::resolve_node_id(&graph_dir, node_id).map_err(|e| e.to_string())?;
+    let path = ops::find_node_file(&graph_dir, &resolved).map_err(|e| e.to_string())?;
     let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
 
     Ok(content)
 }
 
 fn tool_graph_add_node(args: &Value) -> Result<String, String> {
-    let id = args.get("id").and_then(|v| v.as_str()).ok_or("Missing 'id'")?;
+    let slug = args.get("slug").and_then(|v| v.as_str()).ok_or("Missing 'slug'")?;
     let node_type = args.get("node_type").and_then(|v| v.as_str()).ok_or("Missing 'node_type'")?;
     let body = args.get("body").and_then(|v| v.as_str()).ok_or("Missing 'body'")?;
     let status = args.get("status").and_then(|v| v.as_str());
     let owner = args.get("owner").and_then(|v| v.as_str());
+    let tags: Option<Vec<String>> = args.get("tags").and_then(|v| {
+        v.as_array().map(|arr| {
+            arr.iter().filter_map(|t| t.as_str().map(String::from)).collect()
+        })
+    });
 
     let (graph_dir, _, _) = find_project()?;
-    let path = ops::create_node_file(&graph_dir, id, node_type, status, owner, None, body)
-        .map_err(|e| e.to_string())?;
+    let (generated_id, path) = ops::create_node_file_auto_id(
+        &graph_dir, slug, node_type, status, owner, tags.as_deref(), body,
+    ).map_err(|e| e.to_string())?;
 
-    Ok(format!("Created node '{id}' at {}", path.display()))
+    Ok(format!("Created node '{generated_id}' at {}", path.display()))
 }
 
 fn tool_graph_update_node(args: &Value) -> Result<String, String> {
@@ -446,9 +457,10 @@ fn tool_graph_update_node(args: &Value) -> Result<String, String> {
     });
 
     let (graph_dir, _, schema) = find_project()?;
+    let resolved = ops::resolve_node_id(&graph_dir, node_id).map_err(|e| e.to_string())?;
     let path = ops::update_node(
         &graph_dir,
-        node_id,
+        &resolved,
         body,
         status,
         owner,
@@ -462,7 +474,7 @@ fn tool_graph_update_node(args: &Value) -> Result<String, String> {
     if owner.is_some() { changed.push("owner"); }
     if tags.is_some() { changed.push("tags"); }
 
-    Ok(format!("Updated node '{node_id}' ({}) at {}", changed.join(", "), path.display()))
+    Ok(format!("Updated node '{resolved}' ({}) at {}", changed.join(", "), path.display()))
 }
 
 fn tool_graph_add_edge(args: &Value) -> Result<String, String> {
@@ -471,10 +483,13 @@ fn tool_graph_add_edge(args: &Value) -> Result<String, String> {
     let edge_type = args.get("edge_type").and_then(|v| v.as_str()).ok_or("Missing 'edge_type'")?;
 
     let (graph_dir, _, schema) = find_project()?;
-    ops::add_edge(&graph_dir, source, target, edge_type, &schema).map_err(|e| e.to_string())?;
+    let resolved_source = ops::resolve_node_id(&graph_dir, source).map_err(|e| e.to_string())?;
+    let resolved_target = ops::resolve_node_id(&graph_dir, target).map_err(|e| e.to_string())?;
+    ops::add_edge(&graph_dir, &resolved_source, &resolved_target, edge_type, &schema)
+        .map_err(|e| e.to_string())?;
 
     let reverse = schema.reverse_edge_type(edge_type).unwrap_or("?");
-    Ok(format!("Added edge: {source} --{edge_type}--> {target} (reverse: {reverse})"))
+    Ok(format!("Added edge: {resolved_source} --{edge_type}--> {resolved_target} (reverse: {reverse})"))
 }
 
 fn tool_graph_validate(_args: &Value) -> Result<String, String> {
@@ -492,10 +507,11 @@ fn tool_graph_validate(_args: &Value) -> Result<String, String> {
 
 fn tool_graph_render(args: &Value) -> Result<String, String> {
     let template = args.get("template").and_then(|v| v.as_str()).ok_or("Missing 'template'")?;
-    let root_id = args.get("root_node").and_then(|v| v.as_str()).ok_or("Missing 'root_node'")?;
+    let root_raw = args.get("root_node").and_then(|v| v.as_str()).ok_or("Missing 'root_node'")?;
     let include_history = args.get("include_history").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let (graph_dir, gf_dir, schema) = find_project()?;
+    let root_id = ops::resolve_node_id(&graph_dir, root_raw).map_err(|e| e.to_string())?;
     let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
 
     let filter = if include_history {
@@ -507,14 +523,14 @@ fn tool_graph_render(args: &Value) -> Result<String, String> {
     // Try project-local template first, then built-in
     let local_path = gf_dir.join("render").join(format!("{template}.toml"));
     if local_path.exists() {
-        tempyr_render::render(&graph, &local_path, root_id, &filter).map_err(|e| e.to_string())
+        tempyr_render::render(&graph, &local_path, &root_id, &filter).map_err(|e| e.to_string())
     } else {
         let template_toml = match template {
             "prd" => include_str!("../../../templates/prd.toml"),
             "tdd" => include_str!("../../../templates/tdd.toml"),
             _ => return Err(format!("Unknown template: '{template}'")),
         };
-        tempyr_render::render_from_str(&graph, template_toml, root_id, &filter).map_err(|e| e.to_string())
+        tempyr_render::render_from_str(&graph, template_toml, &root_id, &filter).map_err(|e| e.to_string())
     }
 }
 
@@ -641,7 +657,8 @@ fn tool_interview_start(args: &Value) -> Result<String, String> {
         }
     }
 
-    let mut result = proposer::interview_start(brain_dump, root_type, &schema, &existing_ids)
+    let existing_suffixes = tempyr_core::id::collect_existing_suffixes(&graph_dir);
+    let mut result = proposer::interview_start(brain_dump, root_type, &schema, &existing_ids, &existing_suffixes)
         .map_err(|e| e.to_string())?;
 
     // Populate rich context
@@ -879,10 +896,14 @@ fn build_status_mapper_from_config(config: &LinearConfig) -> StatusMapper {
 }
 
 fn tool_linear_push(args: &Value) -> Result<String, String> {
-    let node_id = args.get("node_id").and_then(|v| v.as_str());
+    let node_id_raw = args.get("node_id").and_then(|v| v.as_str());
     let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let (client, config, gf_dir, graph_dir, schema) = build_linear_deps()?;
+    let resolved_node_id = node_id_raw
+        .map(|r| ops::resolve_node_id(&graph_dir, r).map_err(|e| e.to_string()))
+        .transpose()?;
+    let node_id = resolved_node_id.as_deref();
     let graph = Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
     let index = Index::open(&gf_dir.join("index.db")).ok();
     let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;

@@ -25,21 +25,25 @@ You receive:
 
 ## Valid node types
 
-| Type | ID prefix | Example | Description |
-|------|-----------|---------|-------------|
-| epic | `epic-` | `epic-observability-v2` | Large body of work with multiple features |
-| feature | `feat-` | `feat-session-replay` | User-facing capability |
-| task | `task-` | `task-impl-recorder` | Implementable work unit |
-| decision | `decision-` | `decision-storage-backend` | Technical/product decision with rationale |
-| constraint | `constraint-` | `constraint-p99-latency` | Technical, business, or regulatory constraint |
-| persona | `persona-` | `persona-platform-eng` | User type or stakeholder archetype |
-| metric | `metric-` | `metric-replay-adoption` | Measurable success indicator |
-| risk | `risk-` | `risk-pii-in-replays` | Identified risk with potential mitigations |
-| open_question | `question-` | `question-gdpr-scope` | Unresolved question |
-| component | `comp-` | `comp-event-pipeline` | Technical system or module |
-| api_surface | `api-` | `api-replay-endpoint` | API, interface, or contract |
-| insight | `insight-` | `insight-batch-perf` | Learned tip, gotcha, or reusable knowledge |
-| note | `note-` | `note-meeting-2026-03` | Freeform note or brain dump |
+Provide a human-readable `slug` (no type prefix). The system appends a
+6-char suffix automatically. Example: slug `session-replay` → ID
+`session-replay-a1b2c3`.
+
+| Type | Slug example | Description |
+|------|-------------|-------------|
+| epic | `observability-v2` | Large body of work with multiple features |
+| feature | `session-replay` | User-facing capability |
+| task | `impl-recorder` | Implementable work unit |
+| decision | `storage-backend` | Technical/product decision with rationale |
+| constraint | `p99-latency` | Technical, business, or regulatory constraint |
+| persona | `platform-eng` | User type or stakeholder archetype |
+| metric | `replay-adoption` | Measurable success indicator |
+| risk | `pii-in-replays` | Identified risk with potential mitigations |
+| open_question | `gdpr-scope` | Unresolved question |
+| component | `event-pipeline` | Technical system or module |
+| api_surface | `replay-endpoint` | API, interface, or contract |
+| insight | `batch-perf` | Learned tip, gotcha, or reusable knowledge |
+| note | `meeting-2026-03` | Freeform note or brain dump |
 
 ## Common edge types
 
@@ -63,7 +67,7 @@ Return ONLY valid JSON, no markdown fences, no preamble:
 {
   "new_nodes": [
     {
-      "id": "constraint-p99-latency",
+      "slug": "p99-latency",
       "node_type": "constraint",
       "status": "active",
       "title": "P99 Replay Latency Under 2 Seconds",
@@ -73,22 +77,22 @@ Return ONLY valid JSON, no markdown fences, no preamble:
   ],
   "new_edges": [
     {
-      "source": "feat-session-replay",
-      "target": "constraint-p99-latency",
+      "source": "<full-id-or-6-char-suffix>",
+      "target": "<full-id-or-6-char-suffix>",
       "edge_type": "constrained_by",
       "source_type": "explicit"
     }
   ],
   "modified_nodes": [
     {
-      "id": "feat-session-replay",
+      "node_id": "<full-id-or-6-char-suffix>",
       "body_append": "\n## Latency Requirements\nPlayback must be under 2s at P99."
     }
   ],
   "potential_duplicates": [
     {
-      "proposed_id": "persona-sre",
-      "existing_id": "persona-platform-eng",
+      "proposed_slug": "sre",
+      "existing_id": "platform-eng-a1b2c3",
       "similarity_reason": "Both describe on-call engineers focused on reliability"
     }
   ]
@@ -97,7 +101,7 @@ Return ONLY valid JSON, no markdown fences, no preamble:
 
 ## Rules
 
-- **IDs**: lowercase-kebab-case with type prefix (see table above)
+- **Slugs**: lowercase-kebab-case without type prefix. System appends a 6-char suffix automatically.
 - **Confidence**: 0.9+ for explicitly stated facts, 0.6-0.8 for inferences,
   below 0.6 for guesses (include anyway, flag them)
 - **Duplicates**: compare proposed titles against existing nodes provided

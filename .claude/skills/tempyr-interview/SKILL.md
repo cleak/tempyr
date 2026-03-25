@@ -67,10 +67,13 @@ typed something and you received it as a user message):
    - If the node **already exists**, call `graph_update_node` with the node_id
      and the fields to change (body, status, owner, tags). Only provided
      fields are overwritten.
-   - If the node is **new**, call `graph_add_node` with the extracted id,
-     node_type, and body.
-   - Call `graph_add_edge` to link it to the root or other tentative nodes
-   - Use type-prefixed kebab-case IDs (e.g., `persona-platform-eng`, `constraint-p99-latency`)
+   - If the node is **new**, call `graph_add_node` with a human-readable
+     `slug` (e.g. `session-replay`, `p99-latency`) and `node_type`. The system
+     generates a 6-char suffix automatically and returns the full ID.
+   - Call `graph_add_edge` using the full ID returned by `graph_add_node`.
+     You can also use the 6-char suffix alone for existing nodes.
+   - Do NOT include type prefixes in slugs — use `session-replay` not
+     `feat-session-replay`. The `node_type` field handles typing.
 3. **Show** what was created/linked in compact format (see below)
 4. **Ask** the next 2-3 questions from the server's gap list
 
