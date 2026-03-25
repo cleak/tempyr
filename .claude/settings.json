@@ -7,6 +7,19 @@
           {
             "type": "command",
             "command": "tempyr validate --json --quiet"
+          },
+          {
+            "type": "command",
+            "command": "tempyr index update --json"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'INPUT=$(cat); if echo \"$INPUT\" | grep -q \"graph/\"; then tempyr index update --json; fi'"
           }
         ]
       }
