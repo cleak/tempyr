@@ -13,6 +13,9 @@
 # Environment (secrets)
 .env
 
+# Local-only config (per-user settings, permissions)
+*.local.json
+
 # OS
 .DS_Store
 Thumbs.db
