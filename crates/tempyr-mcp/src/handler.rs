@@ -528,6 +528,7 @@ fn tool_graph_render(args: &Value) -> Result<String, String> {
         let template_toml = match template {
             "prd" => include_str!("../../../templates/prd.toml"),
             "tdd" => include_str!("../../../templates/tdd.toml"),
+            "task-prompt" => include_str!("../../../templates/task-prompt.toml"),
             _ => return Err(format!("Unknown template: '{template}'")),
         };
         tempyr_render::render_from_str(&graph, template_toml, &root_id, &filter).map_err(|e| e.to_string())

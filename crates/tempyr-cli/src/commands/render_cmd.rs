@@ -8,6 +8,7 @@ use tempyr_core::temporal::TemporalFilter;
 
 const BUILTIN_PRD: &str = include_str!("../../../../templates/prd.toml");
 const BUILTIN_TDD: &str = include_str!("../../../../templates/tdd.toml");
+const BUILTIN_TASK_PROMPT: &str = include_str!("../../../../templates/task-prompt.toml");
 
 pub fn run(
     ctx: &ProjectContext,
@@ -38,8 +39,9 @@ pub fn run(
         let template_toml = match template_name {
             "prd" => BUILTIN_PRD,
             "tdd" => BUILTIN_TDD,
+            "task-prompt" => BUILTIN_TASK_PROMPT,
             _ => anyhow::bail!(
-                "Unknown template: '{template_name}'. Available: prd, tdd (or place a custom template in .tempyr/render/)"
+                "Unknown template: '{template_name}'. Available: prd, tdd, task-prompt (or place a custom template in .tempyr/render/)"
             ),
         };
         tempyr_render::render_from_str(&graph, template_toml, root_id, &temporal_filter)?

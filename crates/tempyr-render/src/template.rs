@@ -84,6 +84,22 @@ mod tests {
     }
 
     #[test]
+    fn test_template_load_task_prompt() {
+        let template = RenderTemplate::load(&templates_dir().join("task-prompt.toml")).unwrap();
+        assert_eq!(template.meta.name, "Task Prompt");
+        assert_eq!(template.meta.root_types, vec!["task"]);
+        assert!(!template.sections.is_empty());
+
+        let headings: Vec<_> = template.sections.iter().map(|s| s.heading.as_str()).collect();
+        assert!(headings.contains(&"Objective"));
+        assert!(headings.contains(&"Feature Context"));
+        assert!(headings.contains(&"Blocked By"));
+        assert!(headings.contains(&"Relevant Decisions"));
+        assert!(headings.contains(&"Open Questions"));
+        assert!(headings.contains(&"Related Tasks"));
+    }
+
+    #[test]
     fn test_template_load_tdd() {
         let template = RenderTemplate::load(&templates_dir().join("tdd.toml")).unwrap();
         assert_eq!(template.meta.name, "Technical Design Document");

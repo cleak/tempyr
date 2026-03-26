@@ -1,0 +1,76 @@
+[meta]
+name = "Task Prompt"
+description = "Agent-ready implementation prompt from a task node"
+root_types = ["task"]
+output_format = "markdown"
+
+# ── What to build ─────────────────────────────────────────
+
+[[sections]]
+heading = "Objective"
+source = "root"
+include_fields = ["status", "owner"]
+
+# ── Why — parent feature context ──────────────────────────
+
+[[sections]]
+heading = "Feature Context"
+traverse = "child_of"
+target_type = "feature"
+include_body = true
+include_fields = ["status"]
+sub_traverse = "child_of"
+sub_target_type = "epic"
+
+# ── Blocking dependencies ─────────────────────────────────
+
+[[sections]]
+heading = "Blocked By"
+traverse = "blocked_by"
+include_body = true
+include_fields = ["status"]
+
+# ── Technical decisions that constrain this work ──────────
+
+[[sections]]
+heading = "Relevant Decisions"
+traverse = "child_of"
+target_type = "feature"
+sub_traverse = "depends_on"
+sub_target_type = "decision"
+
+# ── Components involved ───────────────────────────────────
+
+[[sections]]
+heading = "Components"
+traverse = "uses"
+target_type = "component"
+include_body = true
+
+# ── Known risks ───────────────────────────────────────────
+
+[[sections]]
+heading = "Risks"
+traverse = "child_of"
+target_type = "feature"
+sub_traverse = "has_risk"
+sub_target_type = "risk"
+
+# ── Open questions that may block or inform ───────────────
+
+[[sections]]
+heading = "Open Questions"
+traverse = "has_question"
+target_type = "open_question"
+filter = { status = ["open"] }
+include_body = true
+
+# ── Sibling tasks for work breakdown awareness ────────────
+
+[[sections]]
+heading = "Related Tasks"
+traverse = "child_of"
+target_type = "feature"
+include_body = false
+sub_traverse = "decomposes_to"
+sub_target_type = "task"

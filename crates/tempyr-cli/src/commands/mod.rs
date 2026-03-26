@@ -2,6 +2,7 @@ pub mod add;
 pub mod ask;
 pub mod context;
 pub mod dedupe;
+pub mod dispatch;
 pub mod edge;
 pub mod import;
 pub mod index_cmd;

@@ -128,6 +128,15 @@ pub enum Commands {
         budget: usize,
     },
 
+    /// Generate an agent-ready implementation prompt from a task node
+    Dispatch {
+        /// Task node ID
+        task_id: String,
+        /// Target agent: claude (with MCP access) or codex (all context inline)
+        #[arg(long, default_value = "claude")]
+        target: String,
+    },
+
     /// Render a document from a root node
     Render {
         /// Template name (prd, tdd, etc.)
@@ -337,6 +346,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Context { query, root, budget } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::context::run(&ctx, &query.join(" "), root.as_deref(), budget, cli.json)
+        }
+        Commands::Dispatch { task_id, target } => {
+            let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
+            let target = commands::dispatch::DispatchTarget::from_str(&target)?;
+            commands::dispatch::run(&ctx, &task_id, target, cli.json)
         }
         Commands::Render { template, root_id, as_of, include_history, output } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
