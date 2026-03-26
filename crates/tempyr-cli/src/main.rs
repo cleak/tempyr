@@ -200,6 +200,16 @@ pub enum Commands {
         #[command(subcommand)]
         action: LinearAction,
     },
+
+    /// Update managed .claude/ artifacts to match current tempyr version
+    Update {
+        /// Only check staleness, don't write (exit code 1 if stale)
+        #[arg(long)]
+        check: bool,
+        /// Overwrite even user-modified files
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -405,5 +415,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::Update { check, force } => commands::update::run(check, force),
     }
 }

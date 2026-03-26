@@ -58,10 +58,21 @@ pub fn run() -> anyhow::Result<()> {
         std::fs::create_dir_all(graph_dir.join(&node_type.directory))?;
     }
 
+    // Install .claude/ artifacts (hooks, skills, agents)
+    let results = super::managed::install_all(&cwd, false)?;
+
     println!("Initialized tempyr project in {}", cwd.display());
     println!("  .tempyr/schema.toml  - node and edge type definitions");
     println!("  .tempyr/config.toml  - project configuration");
-    println!("  graph/                   - node files organized by type");
+    println!("  graph/               - node files organized by type");
+    for r in &results {
+        if matches!(
+            r.outcome,
+            super::managed::WriteOutcome::Created | super::managed::WriteOutcome::Merged
+        ) {
+            println!("  {:<23}- {}", r.path, r.description);
+        }
+    }
 
     Ok(())
 }

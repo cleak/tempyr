@@ -14,6 +14,7 @@ tempyr-interview = { path = "../tempyr-interview" }
 tempyr-render = { path = "../tempyr-render" }
 tempyr-linear = { path = "../tempyr-linear" }
 anyhow = "1"
+blake3 = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
