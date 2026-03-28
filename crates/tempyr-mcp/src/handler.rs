@@ -8,6 +8,7 @@ use tempyr_core::schema::Schema;
 use tempyr_core::temporal::TemporalFilter;
 use tempyr_core::traverse::bfs;
 use tempyr_core::validate::validate_graph;
+use tempyr_index::fts::MetadataFilter;
 use tempyr_index::hybrid::{hybrid_retrieve, RetrievalConfig};
 use tempyr_index::indexer::Index;
 use tempyr_interview::gaps::next_questions;
@@ -57,15 +58,30 @@ pub fn handle_tools_list(id: Value) -> JsonRpcResponse {
             "tools": [
                 {
                     "name": "graph_search",
-                    "description": "Full-text keyword search across all graph nodes",
+                    "description": "Full-text keyword search across all graph nodes. Searches body text, titles, and tags. Optionally filter results by metadata (type, status, owner).",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "query": {"type": "string"},
+                            "query": {"type": "string", "description": "Search terms (matched against body text, titles, tags)"},
                             "max_results": {"type": "integer", "default": 10},
-                            "node_type": {"type": "string"}
+                            "node_type": {"type": "string", "description": "Filter by node type (e.g. task, feature, decision)"},
+                            "status": {"type": "string", "description": "Filter by status (e.g. backlog, in_progress, done, draft, active)"},
+                            "owner": {"type": "string", "description": "Filter by owner"}
                         },
                         "required": ["query"]
+                    }
+                },
+                {
+                    "name": "graph_list",
+                    "description": "List graph nodes by metadata filters. Unlike graph_search, no search query is needed — filters on type, status, and owner directly. Use this to find tasks by status (e.g. all backlog tasks), nodes by owner, etc.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "node_type": {"type": "string", "description": "Filter by node type (e.g. task, feature, decision, epic)"},
+                            "status": {"type": "string", "description": "Filter by status (e.g. backlog, in_progress, done, draft, active, blocked)"},
+                            "owner": {"type": "string", "description": "Filter by owner"},
+                            "max_results": {"type": "integer", "default": 50}
+                        }
                     }
                 },
                 {
@@ -295,6 +311,7 @@ pub fn handle_tool_call(id: Value, params: Value) -> JsonRpcResponse {
 
     let result = match tool_name {
         "graph_search" => tool_graph_search(&arguments),
+        "graph_list" => tool_graph_list(&arguments),
         "graph_context" => tool_graph_context(&arguments),
         "graph_traverse" => tool_graph_traverse(&arguments),
         "graph_get_node" => tool_graph_get_node(&arguments),
@@ -338,18 +355,49 @@ fn tool_graph_search(args: &Value) -> Result<String, String> {
     let query = args.get("query").and_then(|v| v.as_str()).ok_or("Missing 'query'")?;
     let max_results = args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     let node_type = args.get("node_type").and_then(|v| v.as_str());
+    let status = args.get("status").and_then(|v| v.as_str());
+    let owner = args.get("owner").and_then(|v| v.as_str());
 
     let (_, gf_dir, _) = find_project()?;
     let index_path = gf_dir.join("index.db");
     let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
-    let results = index.search_fts_filtered(query, node_type, max_results).map_err(|e| e.to_string())?;
+
+    let filter = MetadataFilter { node_type, status, owner };
+    let results = index.search_fts_with_metadata(query, &filter, max_results).map_err(|e| e.to_string())?;
 
     let output: Vec<Value> = results.iter().map(|r| {
         json!({
             "node_id": r.node_id,
             "title": r.title,
             "node_type": r.node_type,
+            "status": r.status,
             "snippet": r.snippet
+        })
+    }).collect();
+
+    serde_json::to_string_pretty(&output).map_err(|e| e.to_string())
+}
+
+fn tool_graph_list(args: &Value) -> Result<String, String> {
+    let node_type = args.get("node_type").and_then(|v| v.as_str());
+    let status = args.get("status").and_then(|v| v.as_str());
+    let owner = args.get("owner").and_then(|v| v.as_str());
+    let max_results = args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+
+    let (_, gf_dir, _) = find_project()?;
+    let index_path = gf_dir.join("index.db");
+    let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
+
+    let filter = MetadataFilter { node_type, status, owner };
+    let results = index.query_by_metadata(&filter, max_results).map_err(|e| e.to_string())?;
+
+    let output: Vec<Value> = results.iter().map(|r| {
+        json!({
+            "node_id": r.node_id,
+            "title": r.title,
+            "node_type": r.node_type,
+            "status": r.status,
+            "owner": r.owner
         })
     }).collect();
 

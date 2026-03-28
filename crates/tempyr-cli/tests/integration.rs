@@ -313,6 +313,107 @@ fn test_index_stats() {
 }
 
 #[test]
+fn test_list_by_status() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    write_node(&tmp, "tasks", "task-a",
+        "---\nid: task-a\ntype: task\nstatus: backlog\nowner: caleb\n---\n# Task A\n\nDo stuff.\n");
+    write_node(&tmp, "tasks", "task-b",
+        "---\nid: task-b\ntype: task\nstatus: in_progress\nowner: alice\n---\n# Task B\n\nDo other stuff.\n");
+    write_node(&tmp, "features", "feat-x",
+        "---\nid: feat-x\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feature X\n\nA feature.\n");
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["index", "rebuild"])
+        .assert()
+        .success();
+
+    // List all tasks
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["list", "--type", "task"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("task-a"))
+        .stdout(predicate::str::contains("task-b"));
+
+    // List by status
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["list", "--status", "backlog"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("task-a"))
+        .stdout(predicate::str::contains("task-b").not());
+
+    // List by owner
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["list", "--owner", "caleb"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("task-a"))
+        .stdout(predicate::str::contains("feat-x"))
+        .stdout(predicate::str::contains("task-b").not());
+
+    // Combined: type + status
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["list", "--type", "task", "--status", "in_progress"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("task-b"))
+        .stdout(predicate::str::contains("task-a").not());
+
+    // No filters lists everything
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("task-a"))
+        .stdout(predicate::str::contains("task-b"))
+        .stdout(predicate::str::contains("feat-x"));
+}
+
+#[test]
+fn test_search_with_status_filter() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    write_node(&tmp, "tasks", "task-a",
+        "---\nid: task-a\ntype: task\nstatus: backlog\n---\n# Build Pipeline\n\nBuild the data pipeline.\n");
+    write_node(&tmp, "tasks", "task-b",
+        "---\nid: task-b\ntype: task\nstatus: done\n---\n# Test Pipeline\n\nTest the data pipeline.\n");
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["index", "rebuild"])
+        .assert()
+        .success();
+
+    // Search "pipeline" with no filter finds both
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["search", "pipeline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("task-a"))
+        .stdout(predicate::str::contains("task-b"));
+
+    // Search "pipeline" with --status backlog finds only task-a
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["search", "pipeline", "--status", "backlog"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("task-a"))
+        .stdout(predicate::str::contains("task-b").not());
+}
+
+#[test]
 fn test_interview_start_and_list() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);

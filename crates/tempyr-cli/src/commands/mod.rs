@@ -9,6 +9,7 @@ pub mod index_cmd;
 pub mod init;
 pub mod interview_cmd;
 pub mod linear_cmd;
+pub mod list;
 pub mod managed;
 pub mod migrate;
 pub mod rename;

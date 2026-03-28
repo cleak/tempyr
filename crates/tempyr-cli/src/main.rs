@@ -106,7 +106,7 @@ pub enum Commands {
         #[arg(long, default_value = "2")]
         depth: usize,
         /// Filter by edge type
-        #[arg(long, name = "type")]
+        #[arg(long = "type")]
         edge_type: Option<String>,
     },
 
@@ -117,8 +117,30 @@ pub enum Commands {
         #[arg(long, default_value = "10")]
         max_results: usize,
         /// Filter by node type
-        #[arg(long, name = "type")]
+        #[arg(long = "type")]
         node_type: Option<String>,
+        /// Filter by status (e.g. backlog, in_progress, done, draft)
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by owner
+        #[arg(long)]
+        owner: Option<String>,
+    },
+
+    /// List nodes by metadata (type, status, owner) — no search query needed
+    List {
+        /// Filter by node type
+        #[arg(long = "type")]
+        node_type: Option<String>,
+        /// Filter by status (e.g. backlog, in_progress, done, draft)
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by owner
+        #[arg(long)]
+        owner: Option<String>,
+        /// Max results
+        #[arg(long, default_value = "50")]
+        max_results: usize,
     },
 
     /// Hybrid retrieval (structural + BM25)
@@ -165,7 +187,7 @@ pub enum Commands {
         #[arg(long, default_value = "10")]
         max_results: usize,
         /// Filter by node type
-        #[arg(long, name = "type")]
+        #[arg(long = "type")]
         node_type: Option<String>,
     },
 
@@ -343,9 +365,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::traverse::run(&ctx, &id, depth, edge_type.as_deref(), cli.json)
         }
-        Commands::Search { query, max_results, node_type } => {
+        Commands::Search { query, max_results, node_type, status, owner } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
-            commands::search::run(&ctx, &query.join(" "), max_results, node_type.as_deref(), cli.json)
+            commands::search::run(&ctx, &query.join(" "), max_results, node_type.as_deref(), status.as_deref(), owner.as_deref(), cli.json)
+        }
+        Commands::List { node_type, status, owner, max_results } => {
+            let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
+            commands::list::run(&ctx, node_type.as_deref(), status.as_deref(), owner.as_deref(), max_results, cli.json)
         }
         Commands::Context { query, root, budget } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;

@@ -4,11 +4,10 @@ use tempyr_index::indexer::Index;
 
 pub fn run(
     ctx: &ProjectContext,
-    query: &str,
-    max_results: usize,
     node_type: Option<&str>,
     status: Option<&str>,
     owner: Option<&str>,
+    max_results: usize,
     json: bool,
 ) -> anyhow::Result<()> {
     let index_path = ctx.index_path();
@@ -22,7 +21,7 @@ pub fn run(
         status,
         owner,
     };
-    let results = index.search_fts_with_metadata(query, &filter, max_results)?;
+    let results = index.query_by_metadata(&filter, max_results)?;
 
     if json {
         let json_results: Vec<_> = results
@@ -33,8 +32,7 @@ pub fn run(
                     "title": r.title,
                     "node_type": r.node_type,
                     "status": r.status,
-                    "score": r.score,
-                    "snippet": r.snippet,
+                    "owner": r.owner,
                 })
             })
             .collect();
@@ -43,19 +41,17 @@ pub fn run(
     }
 
     if results.is_empty() {
-        println!("No results for: {query}");
+        println!("No nodes match the given filters.");
         return Ok(());
     }
 
     for result in &results {
         let status_str = result.status.as_deref().unwrap_or("-");
+        let owner_str = result.owner.as_deref().unwrap_or("-");
         println!(
-            "{} ({}, {}) - {}",
-            result.node_id, result.node_type, status_str, result.title
+            "{} ({}, {}, owner: {}) - {}",
+            result.node_id, result.node_type, status_str, owner_str, result.title
         );
-        if !result.snippet.is_empty() {
-            println!("  {}", result.snippet);
-        }
     }
 
     Ok(())
