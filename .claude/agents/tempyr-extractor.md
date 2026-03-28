@@ -6,6 +6,7 @@ description: >
 model: claude-sonnet-4-6
 allowed-tools:
   - mcp__tempyr__graph_search
+  - mcp__tempyr__graph_list
   - mcp__tempyr__graph_context
 ---
 

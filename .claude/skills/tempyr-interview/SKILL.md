@@ -13,6 +13,7 @@ allowed-tools:
   - mcp__tempyr__interview_adjust
   - mcp__tempyr__interview_resume
   - mcp__tempyr__graph_search
+  - mcp__tempyr__graph_list
   - mcp__tempyr__graph_context
   - mcp__tempyr__graph_traverse
   - mcp__tempyr__graph_get_node
