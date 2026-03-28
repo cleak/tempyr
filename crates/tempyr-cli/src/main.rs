@@ -33,7 +33,11 @@ pub enum Commands {
     Init,
 
     /// Check graph consistency
-    Validate,
+    Validate {
+        /// Automatically add missing reverse edges
+        #[arg(long)]
+        fix: bool,
+    },
 
     /// Create a new node
     Add {
@@ -311,9 +315,9 @@ fn main() {
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init => commands::init::run(),
-        Commands::Validate => {
+        Commands::Validate { fix } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
-            commands::validate::run(&ctx, cli.json)
+            commands::validate::run(&ctx, cli.json, fix)
         }
         Commands::Add { node_type, slug, id, status, owner, body } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;

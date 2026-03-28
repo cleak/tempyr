@@ -13,6 +13,7 @@ allowed_edges = [
   { type = "parent_of", target = "feature" },
   { type = "serves", target = "persona" },
   { type = "measured_by", target = "metric" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.feature]
@@ -33,6 +34,11 @@ allowed_edges = [
   { type = "uses", target = "component" },
   { type = "exposes", target = "api_surface" },
   { type = "informed_by", target = "insight" },
+  { type = "parent_of", target = "task" },
+  { type = "has_decision", target = "decision" },
+  { type = "depended_on_by", target = "feature" },
+  { type = "relates_to", target = "insight" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.task]
@@ -48,6 +54,10 @@ allowed_edges = [
   { type = "blocked_by", target = "open_question" },
   { type = "uses", target = "component" },
   { type = "has_question", target = "open_question" },
+  { type = "parent_of", target = "task" },
+  { type = "blocks", target = "task" },
+  { type = "mitigates", target = "risk" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.decision]
@@ -61,6 +71,12 @@ allowed_edges = [
   { type = "constrained_by", target = "constraint" },
   { type = "supersedes", target = "decision" },
   { type = "has_question", target = "open_question" },
+  { type = "depended_on_by", target = "feature" },
+  { type = "blocks", target = "task" },
+  { type = "superseded_by", target = "decision" },
+  { type = "answers", target = "open_question" },
+  { type = "relates_to", target = "insight" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.constraint]
@@ -72,6 +88,8 @@ allowed_edges = [
   { type = "constrains", target = "feature" },
   { type = "constrains", target = "decision" },
   { type = "constrains", target = "component" },
+  { type = "constrains", target = "api_surface" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.persona]
@@ -82,6 +100,7 @@ allowed_statuses = []
 allowed_edges = [
   { type = "served_by", target = "feature" },
   { type = "served_by", target = "epic" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.metric]
@@ -92,6 +111,7 @@ allowed_statuses = ["proposed", "tracking", "met", "missed", "retired"]
 allowed_edges = [
   { type = "measures", target = "feature" },
   { type = "measures", target = "epic" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.risk]
@@ -102,6 +122,7 @@ allowed_statuses = ["identified", "mitigated", "accepted", "realized"]
 allowed_edges = [
   { type = "risk_for", target = "feature" },
   { type = "mitigated_by", target = "task" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.open_question]
@@ -114,6 +135,8 @@ allowed_edges = [
   { type = "question_for", target = "decision" },
   { type = "blocks", target = "task" },
   { type = "answered_by", target = "decision" },
+  { type = "question_for", target = "task" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.component]
@@ -128,6 +151,10 @@ allowed_edges = [
   { type = "has_decision", target = "decision" },
   { type = "exposes", target = "api_surface" },
   { type = "informed_by", target = "insight" },
+  { type = "constrained_by", target = "constraint" },
+  { type = "depended_on_by", target = "component" },
+  { type = "relates_to", target = "insight" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.api_surface]
@@ -139,6 +166,7 @@ allowed_edges = [
   { type = "exposed_by", target = "component" },
   { type = "exposed_by", target = "feature" },
   { type = "constrained_by", target = "constraint" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.insight]
@@ -152,6 +180,9 @@ allowed_edges = [
   { type = "relates_to", target = "feature" },
   { type = "relates_to", target = "decision" },
   { type = "relates_to", target = "insight" },
+  { type = "informs", target = "feature" },
+  { type = "informs", target = "component" },
+  { type = "relates_to", target = "note" },
 ]
 
 [node_types.note]

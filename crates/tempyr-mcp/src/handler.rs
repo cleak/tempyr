@@ -25,19 +25,13 @@ use crate::protocol::JsonRpcResponse;
 
 /// Resolve the project context from the current directory.
 fn find_project() -> Result<(std::path::PathBuf, std::path::PathBuf, Schema), String> {
-    let mut dir = std::env::current_dir().map_err(|e| e.to_string())?;
-    loop {
-        let gf_dir = dir.join(".tempyr");
-        if gf_dir.is_dir() {
-            let schema_path = gf_dir.join("schema.toml");
-            let schema = Schema::load(&schema_path).map_err(|e| e.to_string())?;
-            let graph_dir = dir.join("graph");
-            return Ok((graph_dir, gf_dir, schema));
-        }
-        if !dir.pop() {
-            return Err("Not a tempyr project".to_string());
-        }
-    }
+    let root = tempyr_core::project::find_project_root()
+        .ok_or_else(|| "Not a tempyr project (no .tempyr/ or .tempyr-redirect found)".to_string())?;
+    let gf_dir = root.join(".tempyr");
+    let schema_path = gf_dir.join("schema.toml");
+    let schema = Schema::load(&schema_path).map_err(|e| e.to_string())?;
+    let graph_dir = root.join("graph");
+    Ok((graph_dir, gf_dir, schema))
 }
 
 pub fn handle_initialize(id: Value) -> JsonRpcResponse {

@@ -153,6 +153,12 @@ impl Schema {
     }
 
     /// Validate that an edge type is allowed from source_type to target_type.
+    ///
+    /// An edge is valid if:
+    /// 1. It's explicitly listed in the source type's allowed_edges, OR
+    /// 2. The reverse direction is explicitly allowed (i.e., target_type has
+    ///    reverse(edge_type) → source_type in its allowed_edges). This handles
+    ///    implicit reverses like note's `relates_to → *`.
     pub fn validate_edge(
         &self,
         source_type: &str,
@@ -171,18 +177,31 @@ impl Schema {
             TempyrError::Schema(format!("Unknown node type: '{source_type}'"))
         })?;
 
-        // Check the edge is allowed for this source type -> target type
-        let allowed = source_def.allowed_edges.iter().any(|ae| {
+        // Check the edge is explicitly allowed for this source type -> target type
+        let forward_allowed = source_def.allowed_edges.iter().any(|ae| {
             ae.edge_type == edge_type && (ae.target == target_type || ae.target == "*")
         });
 
-        if !allowed {
-            return Err(TempyrError::Schema(format!(
-                "Edge type '{edge_type}' is not allowed from '{source_type}' to '{target_type}'"
-            )));
+        if forward_allowed {
+            return Ok(());
         }
 
-        Ok(())
+        // Check if this is a valid implicit reverse: target_type -> reverse(edge_type) -> source_type
+        if let Some(reverse_type) = self.reverse_edge_type(edge_type)
+            && let Some(target_def) = self.node_types.get(target_type)
+        {
+            let reverse_allowed = target_def.allowed_edges.iter().any(|ae| {
+                ae.edge_type == reverse_type
+                    && (ae.target == source_type || ae.target == "*")
+            });
+            if reverse_allowed {
+                return Ok(());
+            }
+        }
+
+        Err(TempyrError::Schema(format!(
+            "Edge type '{edge_type}' is not allowed from '{source_type}' to '{target_type}'"
+        )))
     }
 
     /// Validate that a status is allowed for a given node type.
@@ -300,6 +319,55 @@ mod tests {
         assert_eq!(schema.type_for_directory("features"), Some("feature"));
         assert_eq!(schema.type_for_directory("epics"), Some("epic"));
         assert_eq!(schema.type_for_directory("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_schema_validate_edge_implicit_reverse() {
+        let schema = load_default_schema();
+
+        // note has relates_to → *, so any type should be able to have relates_to → note
+        assert!(schema.validate_edge("feature", "relates_to", "note").is_ok());
+        assert!(schema.validate_edge("decision", "relates_to", "note").is_ok());
+        assert!(schema.validate_edge("persona", "relates_to", "note").is_ok());
+    }
+
+    /// Verify that every allowed_edge has a valid reverse: either explicitly listed
+    /// in the target type's allowed_edges, or implicitly valid via reverse lookup.
+    #[test]
+    fn test_schema_all_edges_have_valid_reverse() {
+        let schema = load_default_schema();
+        let mut missing = Vec::new();
+
+        for (source_type, source_def) in &schema.node_types {
+            for ae in &source_def.allowed_edges {
+                let Some(reverse_type) = schema.reverse_edge_type(&ae.edge_type) else {
+                    panic!("Edge type '{}' has no reverse defined", ae.edge_type);
+                };
+
+                if ae.target == "*" {
+                    // Wildcard: every target type should accept the reverse
+                    // (via implicit reverse check in validate_edge, so we just verify
+                    // the reverse edge type exists)
+                    continue;
+                }
+
+                // Check: target_type → reverse_type → source_type is valid
+                let result = schema.validate_edge(&ae.target, reverse_type, source_type);
+                if result.is_err() {
+                    missing.push(format!(
+                        "{} --{}--> {} requires {} --{}--> {} (not in schema)",
+                        source_type, ae.edge_type, ae.target,
+                        ae.target, reverse_type, source_type
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "Schema has edges without valid reverses:\n  {}",
+            missing.join("\n  ")
+        );
     }
 
     #[test]

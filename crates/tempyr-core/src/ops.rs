@@ -262,6 +262,76 @@ pub fn remove_edge(
     Ok(())
 }
 
+/// Repair missing reverse edges across the entire graph.
+///
+/// For every edge A→B (type X), checks that B has the reverse edge B→A (reverse(X)).
+/// Missing reverses are added and the affected files are written.
+/// Returns the list of (node_id, added_edge) pairs.
+pub fn repair_reverse_edges(
+    graph_dir: &Path,
+    schema: &Schema,
+) -> Result<Vec<(String, String, String)>> {
+    use crate::graph::Graph;
+
+    let graph = Graph::load_from_directory(graph_dir, schema.clone())?;
+    let mut repairs: Vec<(String, String, String)> = Vec::new();
+
+    // Collect all missing reverse edges
+    for node in graph.nodes.values() {
+        for edge in node.edges() {
+            let Some(target_node) = graph.get_node(&edge.target) else {
+                continue; // dangling edge, skip
+            };
+
+            let Some(reverse_type) = schema.reverse_edge_type(&edge.edge_type) else {
+                continue; // unknown edge type, skip
+            };
+
+            let has_reverse = target_node.edges().iter().any(|e| {
+                e.target == node.id() && e.edge_type == reverse_type
+            });
+
+            if !has_reverse {
+                repairs.push((
+                    edge.target.clone(),
+                    node.id().to_string(),
+                    reverse_type.to_string(),
+                ));
+            }
+        }
+    }
+
+    // Deduplicate (same repair could be detected from both sides)
+    repairs.sort();
+    repairs.dedup();
+
+    // Apply repairs: add reverse edges to target files
+    for (target_id, source_id, reverse_type) in &repairs {
+        let target_path = find_node_file(graph_dir, target_id)?;
+        let content = std::fs::read_to_string(&target_path)?;
+        let mut target_node = parse_node(&content, target_path.clone())?;
+
+        // Skip if already present (may have been added by a prior repair in this batch)
+        let already_has = target_node.frontmatter.edges.iter().any(|e| {
+            e.target == *source_id && e.edge_type == *reverse_type
+        });
+        if already_has {
+            continue;
+        }
+
+        target_node
+            .frontmatter
+            .edges
+            .push(EdgeEntry::new(source_id, reverse_type));
+        sort_edges(&mut target_node.frontmatter.edges);
+        target_node.frontmatter.updated = Some(Utc::now());
+
+        atomic_write(&target_path, &serialize_node(&target_node)?)?;
+    }
+
+    Ok(repairs)
+}
+
 /// Rename a node, updating its file and all references across the graph.
 pub fn rename_node(
     graph_dir: &Path,

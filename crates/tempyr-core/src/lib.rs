@@ -3,6 +3,7 @@ pub mod graph;
 pub mod id;
 pub mod node;
 pub mod ops;
+pub mod project;
 pub mod schema;
 pub mod temporal;
 pub mod traverse;
