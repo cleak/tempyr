@@ -13,8 +13,8 @@ tempyr-index = { path = "../tempyr-index" }
 tempyr-interview = { path = "../tempyr-interview" }
 tempyr-render = { path = "../tempyr-render" }
 tempyr-linear = { path = "../tempyr-linear" }
+rmcp = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
 tokio = { workspace = true }
-thiserror = { workspace = true }
