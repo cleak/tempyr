@@ -6,6 +6,15 @@ use std::io::{self, BufRead, Write};
 use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use serde_json::{Value, json};
 
+/// Wire format detected from the first client message.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Transport {
+    /// Standard MCP: `Content-Length: N\r\n\r\n{json}`
+    ContentLength,
+    /// Legacy: one JSON object per line
+    JsonLines,
+}
+
 fn main() {
     eprintln!("tempyr-mcp: MCP server starting on stdio");
 
@@ -13,10 +22,11 @@ fn main() {
     let stdout = io::stdout();
     let mut reader = stdin.lock();
     let mut writer = stdout.lock();
+    let mut transport = None;
 
     loop {
-        let message = match read_message(&mut reader) {
-            Ok(Some(message)) => message,
+        let (message, detected) = match read_message(&mut reader) {
+            Ok(Some(pair)) => pair,
             Ok(None) => break,
             Err(e) => {
                 eprintln!("Error reading stdin: {e}");
@@ -24,10 +34,13 @@ fn main() {
             }
         };
 
+        // Lock transport on first message
+        let t = *transport.get_or_insert(detected);
+
         let outcome = process_request(&message);
 
         if let Some(response) = outcome.response {
-            if let Err(e) = write_message(&mut writer, &response) {
+            if let Err(e) = write_message(&mut writer, &response, t) {
                 eprintln!("Error writing stdout: {e}");
                 break;
             }
@@ -39,7 +52,7 @@ fn main() {
     }
 }
 
-fn read_message<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
+fn read_message<R: BufRead>(reader: &mut R) -> io::Result<Option<(String, Transport)>> {
     loop {
         let mut line = String::new();
         let bytes_read = reader.read_line(&mut line)?;
@@ -53,10 +66,12 @@ fn read_message<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
             continue;
         }
 
+        // Legacy JSON-lines: line starts with '{'
         if trimmed.starts_with('{') {
-            return Ok(Some(trimmed.to_string()));
+            return Ok(Some((trimmed.to_string(), Transport::JsonLines)));
         }
 
+        // Standard MCP: Content-Length headers followed by body
         let mut content_length = None;
         parse_header(trimmed, &mut content_length)?;
 
@@ -86,7 +101,7 @@ fn read_message<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
         reader.read_exact(&mut body)?;
         let body =
             String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        return Ok(Some(body));
+        return Ok(Some((body, Transport::ContentLength)));
     }
 }
 
@@ -110,11 +125,23 @@ fn parse_header(line: &str, content_length: &mut Option<usize>) -> io::Result<()
     Ok(())
 }
 
-fn write_message<W: Write>(writer: &mut W, response: &JsonRpcResponse) -> io::Result<()> {
+fn write_message<W: Write>(
+    writer: &mut W,
+    response: &JsonRpcResponse,
+    transport: Transport,
+) -> io::Result<()> {
     let body =
         serde_json::to_vec(response).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
-    writer.write_all(&body)?;
+    match transport {
+        Transport::ContentLength => {
+            write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+            writer.write_all(&body)?;
+        }
+        Transport::JsonLines => {
+            writer.write_all(&body)?;
+            writer.write_all(b"\n")?;
+        }
+    }
     writer.flush()
 }
 
@@ -208,43 +235,65 @@ fn process_request(message: &str) -> ProcessOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{process_request, read_message, write_message};
+    use super::{Transport, process_request, read_message, write_message};
     use crate::protocol::JsonRpcResponse;
     use serde_json::{Value, json};
     use std::io::Cursor;
 
     #[test]
-    fn read_message_accepts_content_length_frames() {
+    fn read_message_detects_content_length_transport() {
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
         let framed = format!("Content-Length: {}\r\n\r\n{body}", body.len());
         let mut cursor = Cursor::new(framed.into_bytes());
 
-        let message = read_message(&mut cursor).expect("frame should parse");
+        let (message, transport) = read_message(&mut cursor)
+            .expect("frame should parse")
+            .expect("should have a message");
 
-        assert_eq!(message.as_deref(), Some(body));
+        assert_eq!(message, body);
+        assert_eq!(transport, Transport::ContentLength);
     }
 
     #[test]
-    fn read_message_accepts_legacy_json_lines() {
+    fn read_message_detects_json_lines_transport() {
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
         let mut cursor = Cursor::new(format!("{body}\n").into_bytes());
 
-        let message = read_message(&mut cursor).expect("legacy line should parse");
+        let (message, transport) = read_message(&mut cursor)
+            .expect("legacy line should parse")
+            .expect("should have a message");
 
-        assert_eq!(message.as_deref(), Some(body));
+        assert_eq!(message, body);
+        assert_eq!(transport, Transport::JsonLines);
     }
 
     #[test]
-    fn write_message_emits_content_length_frames() {
+    fn write_message_content_length_format() {
         let response = JsonRpcResponse::success(Value::from(7), json!({"ok": true}));
         let mut output = Vec::new();
 
-        write_message(&mut output, &response).expect("frame should write");
+        write_message(&mut output, &response, Transport::ContentLength)
+            .expect("frame should write");
 
         let rendered = String::from_utf8(output).expect("frame should be utf-8");
         assert!(rendered.starts_with("Content-Length: "));
         assert!(rendered.contains("\r\n\r\n"));
         assert!(rendered.ends_with(r#"{"jsonrpc":"2.0","result":{"ok":true},"id":7}"#));
+    }
+
+    #[test]
+    fn write_message_json_lines_format() {
+        let response = JsonRpcResponse::success(Value::from(7), json!({"ok": true}));
+        let mut output = Vec::new();
+
+        write_message(&mut output, &response, Transport::JsonLines).expect("line should write");
+
+        let rendered = String::from_utf8(output).expect("line should be utf-8");
+        assert!(!rendered.contains("Content-Length"));
+        assert_eq!(
+            rendered,
+            "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true},\"id\":7}\n"
+        );
     }
 
     #[test]
