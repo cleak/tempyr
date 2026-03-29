@@ -10,7 +10,7 @@ use tempyr_core::temporal::TemporalFilter;
 use tempyr_core::traverse::bfs;
 use tempyr_core::validate::validate_graph;
 use tempyr_index::fts::MetadataFilter;
-use tempyr_index::hybrid::{hybrid_retrieve, RetrievalConfig};
+use tempyr_index::hybrid::{RetrievalConfig, hybrid_retrieve};
 use tempyr_index::indexer::Index;
 use tempyr_interview::gaps::next_questions;
 use tempyr_interview::proposer;
@@ -27,8 +27,9 @@ use crate::protocol::JsonRpcResponse;
 
 /// Resolve the project context from the current directory.
 fn find_project() -> Result<(std::path::PathBuf, std::path::PathBuf, Schema), String> {
-    let root = tempyr_core::project::find_project_root()
-        .ok_or_else(|| "Not a tempyr project (no .tempyr/ or .tempyr-redirect found)".to_string())?;
+    let root = tempyr_core::project::find_project_root().ok_or_else(|| {
+        "Not a tempyr project (no .tempyr/ or .tempyr-redirect found)".to_string()
+    })?;
     let gf_dir = root.join(".tempyr");
     let schema_path = gf_dir.join("schema.toml");
     let schema = Schema::load(&schema_path).map_err(|e| e.to_string())?;
@@ -42,6 +43,7 @@ pub fn handle_initialize(id: Value) -> JsonRpcResponse {
         json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {
+                "resources": {},
                 "tools": {}
             },
             "serverInfo": {
@@ -385,8 +387,14 @@ pub fn handle_tool_call(id: Value, params: Value) -> JsonRpcResponse {
 }
 
 fn tool_graph_search(args: &Value) -> Result<String, String> {
-    let query = args.get("query").and_then(|v| v.as_str()).ok_or("Missing 'query'")?;
-    let max_results = args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'query'")?;
+    let max_results = args
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10) as usize;
     let node_type = args.get("node_type").and_then(|v| v.as_str());
     let status = args.get("status").and_then(|v| v.as_str());
     let owner = args.get("owner").and_then(|v| v.as_str());
@@ -395,18 +403,27 @@ fn tool_graph_search(args: &Value) -> Result<String, String> {
     let index_path = gf_dir.join("index.db");
     let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
 
-    let filter = MetadataFilter { node_type, status, owner };
-    let results = index.search_fts_with_metadata(query, &filter, max_results).map_err(|e| e.to_string())?;
+    let filter = MetadataFilter {
+        node_type,
+        status,
+        owner,
+    };
+    let results = index
+        .search_fts_with_metadata(query, &filter, max_results)
+        .map_err(|e| e.to_string())?;
 
-    let output: Vec<Value> = results.iter().map(|r| {
-        json!({
-            "node_id": r.node_id,
-            "title": r.title,
-            "node_type": r.node_type,
-            "status": r.status,
-            "snippet": r.snippet
+    let output: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            json!({
+                "node_id": r.node_id,
+                "title": r.title,
+                "node_type": r.node_type,
+                "status": r.status,
+                "snippet": r.snippet
+            })
         })
-    }).collect();
+        .collect();
 
     serde_json::to_string_pretty(&output).map_err(|e| e.to_string())
 }
@@ -415,32 +432,50 @@ fn tool_graph_list(args: &Value) -> Result<String, String> {
     let node_type = args.get("node_type").and_then(|v| v.as_str());
     let status = args.get("status").and_then(|v| v.as_str());
     let owner = args.get("owner").and_then(|v| v.as_str());
-    let max_results = args.get("max_results").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let max_results = args
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as usize;
 
     let (_, gf_dir, _) = find_project()?;
     let index_path = gf_dir.join("index.db");
     let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
 
-    let filter = MetadataFilter { node_type, status, owner };
-    let results = index.query_by_metadata(&filter, max_results).map_err(|e| e.to_string())?;
+    let filter = MetadataFilter {
+        node_type,
+        status,
+        owner,
+    };
+    let results = index
+        .query_by_metadata(&filter, max_results)
+        .map_err(|e| e.to_string())?;
 
-    let output: Vec<Value> = results.iter().map(|r| {
-        json!({
-            "node_id": r.node_id,
-            "title": r.title,
-            "node_type": r.node_type,
-            "status": r.status,
-            "owner": r.owner
+    let output: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            json!({
+                "node_id": r.node_id,
+                "title": r.title,
+                "node_type": r.node_type,
+                "status": r.status,
+                "owner": r.owner
+            })
         })
-    }).collect();
+        .collect();
 
     serde_json::to_string_pretty(&output).map_err(|e| e.to_string())
 }
 
 fn tool_graph_context(args: &Value) -> Result<String, String> {
-    let query = args.get("query").and_then(|v| v.as_str()).ok_or("Missing 'query'")?;
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'query'")?;
     let root = args.get("root_node").and_then(|v| v.as_str());
-    let budget = args.get("token_budget").and_then(|v| v.as_u64()).unwrap_or(8000) as usize;
+    let budget = args
+        .get("token_budget")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8000) as usize;
 
     let (graph_dir, gf_dir, schema) = find_project()?;
     let resolved_root = root
@@ -454,13 +489,19 @@ fn tool_graph_context(args: &Value) -> Result<String, String> {
         token_budget: budget,
         ..RetrievalConfig::standard()
     };
-    let results = hybrid_retrieve(&index, &graph, query, resolved_root.as_deref(), &config).map_err(|e| e.to_string())?;
+    let results = hybrid_retrieve(&index, &graph, query, resolved_root.as_deref(), &config)
+        .map_err(|e| e.to_string())?;
 
     let mut output = String::new();
     for r in &results {
         if let Some(node) = graph.get_node(&r.node_id) {
-            output.push_str(&format!("### {} ({})\n**Score**: {:.3}\n\n{}\n\n---\n\n",
-                node.title(), node.node_type(), r.combined_score, node.body.trim()));
+            output.push_str(&format!(
+                "### {} ({})\n**Score**: {:.3}\n\n{}\n\n---\n\n",
+                node.title(),
+                node.node_type(),
+                r.combined_score,
+                node.body.trim()
+            ));
         }
     }
 
@@ -468,7 +509,10 @@ fn tool_graph_context(args: &Value) -> Result<String, String> {
 }
 
 fn tool_graph_traverse(args: &Value) -> Result<String, String> {
-    let node_id = args.get("node_id").and_then(|v| v.as_str()).ok_or("Missing 'node_id'")?;
+    let node_id = args
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'node_id'")?;
     let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
 
     let (graph_dir, _, schema) = find_project()?;
@@ -476,21 +520,27 @@ fn tool_graph_traverse(args: &Value) -> Result<String, String> {
     let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
 
     let results = bfs(&graph, &resolved, depth, None);
-    let output: Vec<Value> = results.iter().map(|r| {
-        let node = graph.get_node(&r.node_id);
-        json!({
-            "node_id": r.node_id,
-            "depth": r.depth,
-            "type": node.map(|n| n.node_type()),
-            "title": node.map(|n| n.title()),
+    let output: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            let node = graph.get_node(&r.node_id);
+            json!({
+                "node_id": r.node_id,
+                "depth": r.depth,
+                "type": node.map(|n| n.node_type()),
+                "title": node.map(|n| n.title()),
+            })
         })
-    }).collect();
+        .collect();
 
     serde_json::to_string_pretty(&output).map_err(|e| e.to_string())
 }
 
 fn tool_graph_get_node(args: &Value) -> Result<String, String> {
-    let node_id = args.get("node_id").and_then(|v| v.as_str()).ok_or("Missing 'node_id'")?;
+    let node_id = args
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'node_id'")?;
 
     let (graph_dir, _, _) = find_project()?;
     let resolved = ops::resolve_node_id(&graph_dir, node_id).map_err(|e| e.to_string())?;
@@ -501,33 +551,59 @@ fn tool_graph_get_node(args: &Value) -> Result<String, String> {
 }
 
 fn tool_graph_add_node(args: &Value) -> Result<String, String> {
-    let slug = args.get("slug").and_then(|v| v.as_str()).ok_or("Missing 'slug'")?;
-    let node_type = args.get("node_type").and_then(|v| v.as_str()).ok_or("Missing 'node_type'")?;
-    let body = args.get("body").and_then(|v| v.as_str()).ok_or("Missing 'body'")?;
+    let slug = args
+        .get("slug")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'slug'")?;
+    let node_type = args
+        .get("node_type")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'node_type'")?;
+    let body = args
+        .get("body")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'body'")?;
     let status = args.get("status").and_then(|v| v.as_str());
     let owner = args.get("owner").and_then(|v| v.as_str());
     let tags: Option<Vec<String>> = args.get("tags").and_then(|v| {
         v.as_array().map(|arr| {
-            arr.iter().filter_map(|t| t.as_str().map(String::from)).collect()
+            arr.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
         })
     });
 
     let (graph_dir, _, _) = find_project()?;
     let (generated_id, path) = ops::create_node_file_auto_id(
-        &graph_dir, slug, node_type, status, owner, tags.as_deref(), body,
-    ).map_err(|e| e.to_string())?;
+        &graph_dir,
+        slug,
+        node_type,
+        status,
+        owner,
+        tags.as_deref(),
+        body,
+    )
+    .map_err(|e| e.to_string())?;
 
-    Ok(format!("Created node '{generated_id}' at {}", path.display()))
+    Ok(format!(
+        "Created node '{generated_id}' at {}",
+        path.display()
+    ))
 }
 
 fn tool_graph_update_node(args: &Value) -> Result<String, String> {
-    let node_id = args.get("node_id").and_then(|v| v.as_str()).ok_or("Missing 'node_id'")?;
+    let node_id = args
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'node_id'")?;
     let body = args.get("body").and_then(|v| v.as_str());
     let status = args.get("status").and_then(|v| v.as_str());
     let owner = args.get("owner").and_then(|v| v.as_str());
     let tags: Option<Vec<String>> = args.get("tags").and_then(|v| {
         v.as_array().map(|arr| {
-            arr.iter().filter_map(|t| t.as_str().map(String::from)).collect()
+            arr.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
         })
     });
 
@@ -541,30 +617,60 @@ fn tool_graph_update_node(args: &Value) -> Result<String, String> {
         owner,
         tags.as_deref(),
         &schema,
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     let mut changed: Vec<&str> = Vec::new();
-    if body.is_some() { changed.push("body"); }
-    if status.is_some() { changed.push("status"); }
-    if owner.is_some() { changed.push("owner"); }
-    if tags.is_some() { changed.push("tags"); }
+    if body.is_some() {
+        changed.push("body");
+    }
+    if status.is_some() {
+        changed.push("status");
+    }
+    if owner.is_some() {
+        changed.push("owner");
+    }
+    if tags.is_some() {
+        changed.push("tags");
+    }
 
-    Ok(format!("Updated node '{resolved}' ({}) at {}", changed.join(", "), path.display()))
+    Ok(format!(
+        "Updated node '{resolved}' ({}) at {}",
+        changed.join(", "),
+        path.display()
+    ))
 }
 
 fn tool_graph_add_edge(args: &Value) -> Result<String, String> {
-    let source = args.get("source").and_then(|v| v.as_str()).ok_or("Missing 'source'")?;
-    let target = args.get("target").and_then(|v| v.as_str()).ok_or("Missing 'target'")?;
-    let edge_type = args.get("edge_type").and_then(|v| v.as_str()).ok_or("Missing 'edge_type'")?;
+    let source = args
+        .get("source")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'source'")?;
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'target'")?;
+    let edge_type = args
+        .get("edge_type")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'edge_type'")?;
 
     let (graph_dir, _, schema) = find_project()?;
     let resolved_source = ops::resolve_node_id(&graph_dir, source).map_err(|e| e.to_string())?;
     let resolved_target = ops::resolve_node_id(&graph_dir, target).map_err(|e| e.to_string())?;
-    ops::add_edge(&graph_dir, &resolved_source, &resolved_target, edge_type, &schema)
-        .map_err(|e| e.to_string())?;
+    ops::add_edge(
+        &graph_dir,
+        &resolved_source,
+        &resolved_target,
+        edge_type,
+        &schema,
+    )
+    .map_err(|e| e.to_string())?;
 
     let reverse = schema.reverse_edge_type(edge_type).unwrap_or("?");
-    Ok(format!("Added edge: {resolved_source} --{edge_type}--> {resolved_target} (reverse: {reverse})"))
+    Ok(format!(
+        "Added edge: {resolved_source} --{edge_type}--> {resolved_target} (reverse: {reverse})"
+    ))
 }
 
 fn tool_graph_validate(_args: &Value) -> Result<String, String> {
@@ -573,7 +679,11 @@ fn tool_graph_validate(_args: &Value) -> Result<String, String> {
     let issues = validate_graph(&graph);
 
     if issues.is_empty() {
-        Ok(format!("Graph is valid. {} nodes, {} edges.", graph.node_count(), graph.edge_count()))
+        Ok(format!(
+            "Graph is valid. {} nodes, {} edges.",
+            graph.node_count(),
+            graph.edge_count()
+        ))
     } else {
         let lines: Vec<String> = issues.iter().map(|i| i.to_string()).collect();
         Ok(lines.join("\n"))
@@ -581,9 +691,18 @@ fn tool_graph_validate(_args: &Value) -> Result<String, String> {
 }
 
 fn tool_graph_render(args: &Value) -> Result<String, String> {
-    let template = args.get("template").and_then(|v| v.as_str()).ok_or("Missing 'template'")?;
-    let root_raw = args.get("root_node").and_then(|v| v.as_str()).ok_or("Missing 'root_node'")?;
-    let include_history = args.get("include_history").and_then(|v| v.as_bool()).unwrap_or(false);
+    let template = args
+        .get("template")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'template'")?;
+    let root_raw = args
+        .get("root_node")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'root_node'")?;
+    let include_history = args
+        .get("include_history")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let (graph_dir, gf_dir, schema) = find_project()?;
     let root_id = ops::resolve_node_id(&graph_dir, root_raw).map_err(|e| e.to_string())?;
@@ -606,7 +725,8 @@ fn tool_graph_render(args: &Value) -> Result<String, String> {
             "task-prompt" => include_str!("../../../templates/task-prompt.toml"),
             _ => return Err(format!("Unknown template: '{template}'")),
         };
-        tempyr_render::render_from_str(&graph, template_toml, &root_id, &filter).map_err(|e| e.to_string())
+        tempyr_render::render_from_str(&graph, template_toml, &root_id, &filter)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -734,28 +854,28 @@ fn tool_interview_start(args: &Value) -> Result<String, String> {
     }
 
     let existing_suffixes = tempyr_core::id::collect_existing_suffixes(&graph_dir);
-    let mut result = proposer::interview_start(brain_dump, root_type, &schema, &existing_ids, &existing_suffixes)
-        .map_err(|e| e.to_string())?;
+    let mut result = proposer::interview_start(
+        brain_dump,
+        root_type,
+        &schema,
+        &existing_ids,
+        &existing_suffixes,
+    )
+    .map_err(|e| e.to_string())?;
 
     // Populate rich context
     result.session.graph_context_rich = context_rich;
 
     // Re-run gap detection with graph for context-aware existing_related + question_type
     if let Some(ref g) = graph {
-        let gaps = tempyr_interview::gaps::detect_gaps_with_graph(
-            &result.session,
-            &schema,
-            Some(g),
-        );
+        let gaps =
+            tempyr_interview::gaps::detect_gaps_with_graph(&result.session, &schema, Some(g));
         result.questions = gaps.iter().take(3).cloned().collect();
         result.session.remaining_gaps = gaps;
     }
 
     // Save session
-    result
-        .session
-        .save(&sessions)
-        .map_err(|e| e.to_string())?;
+    result.session.save(&sessions).map_err(|e| e.to_string())?;
 
     let state = session_state_json(&result.session, &schema);
     serde_json::to_string_pretty(&state).map_err(|e| e.to_string())
@@ -789,8 +909,7 @@ fn tool_interview_answer(args: &Value) -> Result<String, String> {
 
     // Record answer, then reanalyze with graph context
     session.record_answer(&question_context, answer, vec![]);
-    let update =
-        proposer::reanalyze_with_graph(&mut session, &schema, graph.as_ref());
+    let update = proposer::reanalyze_with_graph(&mut session, &schema, graph.as_ref());
 
     // Save session
     session.save(&sessions).map_err(|e| e.to_string())?;
@@ -822,8 +941,7 @@ fn tool_interview_show(args: &Value) -> Result<String, String> {
     let (_, gf_dir, schema) = find_project()?;
     let sessions = sessions_dir(&gf_dir);
 
-    let session =
-        InterviewSession::load_by_id(&sessions, session_id).map_err(|e| e.to_string())?;
+    let session = InterviewSession::load_by_id(&sessions, session_id).map_err(|e| e.to_string())?;
 
     let state = session_state_json(&session, &schema);
     serde_json::to_string_pretty(&state).map_err(|e| e.to_string())
@@ -838,8 +956,7 @@ fn tool_interview_commit(args: &Value) -> Result<String, String> {
     let (graph_dir, gf_dir, schema) = find_project()?;
     let sessions = sessions_dir(&gf_dir);
 
-    let session =
-        InterviewSession::load_by_id(&sessions, session_id).map_err(|e| e.to_string())?;
+    let session = InterviewSession::load_by_id(&sessions, session_id).map_err(|e| e.to_string())?;
 
     let result = session
         .commit(&graph_dir, &schema, &sessions)
@@ -859,13 +976,17 @@ fn tool_interview_commit(args: &Value) -> Result<String, String> {
     if index_path.exists() {
         if let Err(e) = (|| -> std::result::Result<(), String> {
             let schema2 = Schema::load(&gf_dir.join("schema.toml")).map_err(|e| e.to_string())?;
-            let graph = Graph::load_from_directory(&graph_dir, schema2)
-                .map_err(|e| e.to_string())?;
+            let graph =
+                Graph::load_from_directory(&graph_dir, schema2).map_err(|e| e.to_string())?;
             let index = Index::open(&index_path).map_err(|e| e.to_string())?;
-            index.incremental_update(&graph).map_err(|e| e.to_string())?;
+            index
+                .incremental_update(&graph)
+                .map_err(|e| e.to_string())?;
             Ok(())
         })() {
-            all_warnings.push(format!("Index update failed (run 'tempyr index rebuild'): {e}"));
+            all_warnings.push(format!(
+                "Index update failed (run 'tempyr index rebuild'): {e}"
+            ));
         }
     }
 
@@ -896,7 +1017,10 @@ fn tool_interview_adjust(args: &Value) -> Result<String, String> {
     let mut session =
         InterviewSession::load_by_id(&sessions, session_id).map_err(|e| e.to_string())?;
 
-    let new_id = args.get("new_id").and_then(|v| v.as_str()).map(String::from);
+    let new_id = args
+        .get("new_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     let patch = NodePatch {
         id: new_id.clone(),
@@ -942,8 +1066,7 @@ fn tool_interview_resume(args: &Value) -> Result<String, String> {
     let (_, gf_dir, schema) = find_project()?;
     let sessions = sessions_dir(&gf_dir);
 
-    let session =
-        InterviewSession::load_by_id(&sessions, session_id).map_err(|e| e.to_string())?;
+    let session = InterviewSession::load_by_id(&sessions, session_id).map_err(|e| e.to_string())?;
 
     let state = session_state_json(&session, &schema);
     serde_json::to_string_pretty(&state).map_err(|e| e.to_string())
@@ -1115,9 +1238,8 @@ fn resolve_interview_node_id(
         1 => Ok(matches.into_iter().next().unwrap()),
         0 => {
             // Fall back to disk resolution for existing graph nodes
-            ops::resolve_node_id(graph_dir, input).map_err(|e| {
-                format!("Node '{input}' not found in session or on disk: {e}")
-            })
+            ops::resolve_node_id(graph_dir, input)
+                .map_err(|e| format!("Node '{input}' not found in session or on disk: {e}"))
         }
         _ => Err(format!(
             "Ambiguous node ID '{input}' matches multiple tentative nodes: {}",
@@ -1128,7 +1250,16 @@ fn resolve_interview_node_id(
 
 // ─── Linear Tools ──────────────────────────────────────
 
-fn build_linear_deps() -> Result<(LinearClient, LinearConfig, std::path::PathBuf, std::path::PathBuf, Schema), String> {
+fn build_linear_deps() -> Result<
+    (
+        LinearClient,
+        LinearConfig,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        Schema,
+    ),
+    String,
+> {
     let (graph_dir, gf_dir, schema) = find_project()?;
     let client = LinearClient::from_env().map_err(|e| e.to_string())?;
     let config = LinearConfig::load(&gf_dir).map_err(|e| e.to_string())?;
@@ -1150,14 +1281,18 @@ fn build_status_mapper_from_config(config: &LinearConfig) -> StatusMapper {
 
 fn tool_linear_push(args: &Value) -> Result<String, String> {
     let node_id_raw = args.get("node_id").and_then(|v| v.as_str());
-    let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let (client, config, gf_dir, graph_dir, schema) = build_linear_deps()?;
     let resolved_node_id = node_id_raw
         .map(|r| ops::resolve_node_id(&graph_dir, r).map_err(|e| e.to_string()))
         .transpose()?;
     let node_id = resolved_node_id.as_deref();
-    let graph = Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
+    let graph =
+        Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
     let index = Index::open(&gf_dir.join("index.db")).ok();
     let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
     let status_mapper = build_status_mapper_from_config(&config);
@@ -1170,7 +1305,9 @@ fn tool_linear_push(args: &Value) -> Result<String, String> {
         let nodes: Vec<&str> = if let Some(id) = node_id {
             vec![id]
         } else {
-            graph.nodes.values()
+            graph
+                .nodes
+                .values()
                 .filter(|n| syncable.contains(&n.node_type()))
                 .map(|n| n.id())
                 .collect()
@@ -1192,16 +1329,28 @@ fn tool_linear_push(args: &Value) -> Result<String, String> {
             "dry_run": true,
             "would_create": would_create,
             "would_update": would_update,
-        })).map_err(|e| e.to_string());
+        }))
+        .map_err(|e| e.to_string());
     }
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async {
         if let Some(id) = node_id {
-            let node = graph.get_node(id).ok_or_else(|| format!("Node not found: {id}"))?;
+            let node = graph
+                .get_node(id)
+                .ok_or_else(|| format!("Node not found: {id}"))?;
             let entry = tempyr_linear::push::push_node(
-                &client, node, &graph, index.as_ref(), &schema, &config, &mut sync_state, &status_mapper,
-            ).await.map_err(|e| e.to_string())?;
+                &client,
+                node,
+                &graph,
+                index.as_ref(),
+                &schema,
+                &config,
+                &mut sync_state,
+                &status_mapper,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
             sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
             let action = match entry.action {
                 tempyr_linear::push::PushAction::Created => "created",
@@ -1212,24 +1361,37 @@ fn tool_linear_push(args: &Value) -> Result<String, String> {
                 "node_id": entry.node_id,
                 "linear_id": entry.linear_id,
                 "linear_identifier": entry.linear_identifier,
-            })).map_err(|e| e.to_string())
+            }))
+            .map_err(|e| e.to_string())
         } else {
             let result = tempyr_linear::push::push_all(
-                &client, &graph, index.as_ref(), &schema, &config, &mut sync_state, &status_mapper,
-            ).await.map_err(|e| e.to_string())?;
+                &client,
+                &graph,
+                index.as_ref(),
+                &schema,
+                &config,
+                &mut sync_state,
+                &status_mapper,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
             sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
             serde_json::to_string_pretty(&json!({
                 "created": result.created.len(),
                 "updated": result.updated.len(),
                 "skipped": result.skipped.len(),
                 "errors": result.errors,
-            })).map_err(|e| e.to_string())
+            }))
+            .map_err(|e| e.to_string())
         }
     })
 }
 
 fn tool_linear_pull(args: &Value) -> Result<String, String> {
-    let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let (client, config, gf_dir, graph_dir, schema) = build_linear_deps()?;
     let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
@@ -1240,14 +1402,22 @@ fn tool_linear_pull(args: &Value) -> Result<String, String> {
             "dry_run": true,
             "tracked_entries": sync_state.entries.len(),
             "last_sync": sync_state.last_sync_at,
-        })).map_err(|e| e.to_string());
+        }))
+        .map_err(|e| e.to_string());
     }
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async {
         let result = tempyr_linear::pull::pull(
-            &client, &graph_dir, &schema, &config, &mut sync_state, &status_mapper,
-        ).await.map_err(|e| e.to_string())?;
+            &client,
+            &graph_dir,
+            &schema,
+            &config,
+            &mut sync_state,
+            &status_mapper,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
         serde_json::to_string_pretty(&json!({
             "created": result.created,
@@ -1256,15 +1426,20 @@ fn tool_linear_pull(args: &Value) -> Result<String, String> {
             "conflicts": result.conflicts.len(),
             "warnings": result.warnings,
             "errors": result.errors,
-        })).map_err(|e| e.to_string())
+        }))
+        .map_err(|e| e.to_string())
     })
 }
 
 fn tool_linear_sync(args: &Value) -> Result<String, String> {
-    let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let (client, config, gf_dir, graph_dir, schema) = build_linear_deps()?;
-    let graph = Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
+    let graph =
+        Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
     let index = Index::open(&gf_dir.join("index.db")).ok();
     let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
     let status_mapper = build_status_mapper_from_config(&config);
@@ -1275,14 +1450,24 @@ fn tool_linear_sync(args: &Value) -> Result<String, String> {
             "dry_run": true,
             "would_push": report.stale_count + report.unlinked_syncable_count,
             "tracked_for_pull": report.linked_count,
-        })).map_err(|e| e.to_string());
+        }))
+        .map_err(|e| e.to_string());
     }
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     rt.block_on(async {
         let result = tempyr_linear::sync::sync(
-            &client, &graph_dir, &graph, index.as_ref(), &schema, &config, &mut sync_state, &status_mapper,
-        ).await.map_err(|e| e.to_string())?;
+            &client,
+            &graph_dir,
+            &graph,
+            index.as_ref(),
+            &schema,
+            &config,
+            &mut sync_state,
+            &status_mapper,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
         serde_json::to_string_pretty(&json!({
             "push": {
@@ -1296,7 +1481,8 @@ fn tool_linear_sync(args: &Value) -> Result<String, String> {
                 "conflicts": result.pull.conflicts.len(),
                 "errors": result.pull.errors.len(),
             }
-        })).map_err(|e| e.to_string())
+        }))
+        .map_err(|e| e.to_string())
     })
 }
 
@@ -1307,7 +1493,8 @@ fn tool_linear_status(_args: &Value) -> Result<String, String> {
         return serde_json::to_string_pretty(&json!({
             "configured": false,
             "message": "Linear integration not configured. Run `tempyr linear setup` first."
-        })).map_err(|e| e.to_string());
+        }))
+        .map_err(|e| e.to_string());
     }
 
     let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
@@ -1322,5 +1509,6 @@ fn tool_linear_status(_args: &Value) -> Result<String, String> {
         "orphaned": report.orphaned_count,
         "last_sync": report.last_sync,
         "entries": report.entries,
-    })).map_err(|e| e.to_string())
+    }))
+    .map_err(|e| e.to_string())
 }

@@ -4,13 +4,14 @@ use serde_json::Value;
 /// A JSON-RPC 2.0 request.
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
-    /// Required by JSON-RPC 2.0 spec — must be present for valid deserialization.
+    /// Required by the JSON-RPC 2.0 spec.
     #[allow(dead_code)]
     pub jsonrpc: String,
     pub method: String,
     #[serde(default)]
     pub params: Value,
-    pub id: Value,
+    #[serde(default)]
+    pub id: Option<Value>,
 }
 
 /// A JSON-RPC 2.0 response.
