@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI coding agents working with code in this repository.
 
 ## Project Overview
 
@@ -43,7 +43,7 @@ The project is a **Rust workspace** with seven crates:
 | `tempyr-cli` | CLI binary (`tempyr`): clap-based, all user-facing commands |
 | `tempyr-mcp` | MCP server binary: exposes graph operations as tools for Claude Code |
 
-Crate dependency order: `core` ← `index` ← `interview`/`render`/`linear` ← `cli`/`mcp`.
+Crate dependency order: `core` <- `index` <- `interview`/`render`/`linear` <- `cli`/`mcp`.
 
 ### Data Model
 
@@ -55,14 +55,14 @@ Crate dependency order: `core` ← `index` ← `interview`/`render`/`linear` ←
 ### Key Design Patterns
 
 - **LLM is for extraction only.** Gap detection, phase transitions, duplicate checking, and graph operations are deterministic Rust code. The LLM extracts structured data from natural language — it doesn't make control-flow decisions.
-- **Bidirectional edge sync.** Every `add-edge` writes both files atomically. `validate` catches drift. Edge type pairs are defined in `schema.toml` (e.g., `child_of` ↔ `parent_of`).
+- **Bidirectional edge sync.** Every `add-edge` writes both files atomically. `validate` catches drift. Edge type pairs are defined in `schema.toml` (e.g., `child_of` <-> `parent_of`).
 - **Temporal edges.** Edges have optional `valid_from`/`valid_until` for point-in-time rendering. Nodes have a `status` lifecycle (e.g., `superseded`). Decisions get superseded, not deleted.
 - **Content-hash embedding cache.** Embeddings are keyed by blake3 hash of the markdown body (not frontmatter). Re-embed only when body changes.
 - **Token budget enforcement.** Hybrid retrieval greedily fills context by combined score until the token budget is exhausted.
 
 ### Interview Engine Flow
 
-The interview is a 5-phase state machine: Discovery → Product → Technical → Decomposition → Review. Each phase has typed gaps (e.g., `MissingPersona`, `NoTechnicalDecision`) that drive contextual questions. Phase transitions happen when required gaps in the current phase are filled. All proposals are tentative until the user commits.
+The interview is a 5-phase state machine: Discovery -> Product -> Technical -> Decomposition -> Review. Each phase has typed gaps (e.g., `MissingPersona`, `NoTechnicalDecision`) that drive contextual questions. Phase transitions happen when required gaps in the current phase are filled. All proposals are tentative until the user commits.
 
 ## Key Dependencies
 
