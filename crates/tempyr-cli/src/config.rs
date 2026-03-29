@@ -5,6 +5,9 @@ use tempyr_core::schema::Schema;
 
 /// Project context: resolved paths for a tempyr project.
 pub struct ProjectContext {
+    /// Project root directory — canonical anchor from which other paths are derived.
+    /// Not read directly yet, but needed for relative path display, git ops, etc.
+    #[allow(dead_code)]
     pub root: PathBuf,
     pub graph_dir: PathBuf,
     pub tempyr_dir: PathBuf,
