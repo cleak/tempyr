@@ -118,3 +118,6 @@ Return ONLY valid JSON, no markdown fences, no preamble:
   multiple nodes. A node should be independently linkable.
 - Use `graph_search` or `graph_context` to check for existing nodes before
   proposing new ones that might be duplicates
+- Your JSON output will be applied by the interview skill using
+  `interview_add_node` and `interview_add_edge` (tentative, not written to
+  disk until commit). Source/target in edges can reference tentative node IDs.

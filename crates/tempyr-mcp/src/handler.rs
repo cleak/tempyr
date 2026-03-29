@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
 use tempyr_core::graph::Graph;
+use tempyr_core::id;
 use tempyr_core::ops;
 use tempyr_core::schema::Schema;
 use tempyr_core::temporal::TemporalFilter;
@@ -14,7 +15,7 @@ use tempyr_index::indexer::Index;
 use tempyr_interview::gaps::next_questions;
 use tempyr_interview::proposer;
 use tempyr_interview::session::{
-    ExistingNodeSummary, InterviewSession, NodePatch,
+    EdgeSource, ExistingNodeSummary, InterviewSession, NodePatch, TentativeEdge, TentativeNode,
 };
 use tempyr_linear::client::LinearClient;
 use tempyr_linear::config::LinearConfig;
@@ -262,6 +263,36 @@ pub fn handle_tools_list(id: Value) -> JsonRpcResponse {
                     }
                 },
                 {
+                    "name": "interview_add_node",
+                    "description": "Add a tentative node to an active interview session. The node is stored in session state (not written to disk) until interview_commit. Automatically re-analyzes gaps and may advance the interview phase.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string"},
+                            "slug": {"type": "string", "description": "Human-readable kebab-case slug (no type prefix). A 6-char suffix is appended automatically."},
+                            "node_type": {"type": "string", "description": "Node type: feature, epic, task, decision, constraint, persona, metric, risk, open_question, component, api_surface, insight, note"},
+                            "body": {"type": "string", "description": "Markdown body content"},
+                            "status": {"type": "string", "description": "Node status (default: draft)", "default": "draft"},
+                            "confidence": {"type": "number", "description": "Extraction confidence 0.0-1.0 (0.9+ explicit, 0.6-0.8 inferred)", "default": 0.9}
+                        },
+                        "required": ["session_id", "slug", "node_type", "body"]
+                    }
+                },
+                {
+                    "name": "interview_add_edge",
+                    "description": "Add a tentative edge to an active interview session. Both source and target can be tentative node IDs (from interview_add_node) or existing graph node IDs. Stored in session state until interview_commit.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string"},
+                            "source": {"type": "string", "description": "Source node ID (full ID or 6-char suffix)"},
+                            "target": {"type": "string", "description": "Target node ID (full ID or 6-char suffix)"},
+                            "edge_type": {"type": "string", "description": "Edge type: child_of, serves, measured_by, constrained_by, depends_on, has_risk, decomposes_to, uses, has_question, etc."}
+                        },
+                        "required": ["session_id", "source", "target", "edge_type"]
+                    }
+                },
+                {
                     "name": "linear_push",
                     "description": "Push graph node(s) to Linear with full context and data lineage. Creates or updates Linear issues/projects with rich descriptions containing parent context, related decisions, blocking items, and MCP breadcrumbs.",
                     "inputSchema": {
@@ -327,6 +358,8 @@ pub fn handle_tool_call(id: Value, params: Value) -> JsonRpcResponse {
         "interview_commit" => tool_interview_commit(&arguments),
         "interview_adjust" => tool_interview_adjust(&arguments),
         "interview_resume" => tool_interview_resume(&arguments),
+        "interview_add_node" => tool_interview_add_node(&arguments),
+        "interview_add_edge" => tool_interview_add_edge(&arguments),
         "linear_push" => tool_linear_push(&arguments),
         "linear_pull" => tool_linear_pull(&arguments),
         "linear_sync" => tool_linear_sync(&arguments),
@@ -914,6 +947,183 @@ fn tool_interview_resume(args: &Value) -> Result<String, String> {
 
     let state = session_state_json(&session, &schema);
     serde_json::to_string_pretty(&state).map_err(|e| e.to_string())
+}
+
+fn tool_interview_add_node(args: &Value) -> Result<String, String> {
+    let session_id = args
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'session_id'")?;
+    let slug = args
+        .get("slug")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'slug'")?;
+    let node_type = args
+        .get("node_type")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'node_type'")?;
+    let body = args
+        .get("body")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'body'")?;
+    let status = args
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("draft");
+    let confidence = args
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.9) as f32;
+
+    let (graph_dir, gf_dir, schema) = find_project()?;
+    let sessions = sessions_dir(&gf_dir);
+    let graph = Graph::load_from_directory(&graph_dir, schema.clone()).ok();
+
+    let mut session =
+        InterviewSession::load_by_id(&sessions, session_id).map_err(|e| e.to_string())?;
+
+    // Generate hybrid ID (same logic as proposer::add_proposed_node, but we
+    // reanalyze only once with graph context instead of twice).
+    let node_id = if id::is_hybrid_id(slug) {
+        slug.to_string()
+    } else {
+        let existing: HashSet<String> = session
+            .tentative_nodes
+            .iter()
+            .filter_map(|n| id::parse_node_id(&n.id).map(|p| p.suffix))
+            .collect();
+        id::make_node_id(slug, &existing)
+    };
+
+    session.add_tentative_node(TentativeNode {
+        id: node_id.clone(),
+        node_type: node_type.to_string(),
+        status: status.to_string(),
+        fields: HashMap::new(),
+        body: body.to_string(),
+        confidence,
+        source_qa: vec![session.answered.len()],
+    });
+
+    let update = proposer::reanalyze_with_graph(&mut session, &schema, graph.as_ref());
+
+    session.save(&sessions).map_err(|e| e.to_string())?;
+
+    let response = json!({
+        "session_id": session.id,
+        "node_id": node_id,
+        "node_type": node_type,
+        "filled_gaps": update.filled_gaps,
+        "next_questions": update.questions,
+        "phase": session.phase,
+        "phase_changed": update.phase_changed,
+        "progress": {
+            "filled": update.progress.filled,
+            "total": update.progress.total,
+            "percentage": update.progress.percentage,
+        },
+        "tentative_nodes_count": session.tentative_nodes.len() + 1,
+        "tentative_edges_count": session.tentative_edges.len(),
+    });
+
+    serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+}
+
+fn tool_interview_add_edge(args: &Value) -> Result<String, String> {
+    let session_id = args
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'session_id'")?;
+    let source = args
+        .get("source")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'source'")?;
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'target'")?;
+    let edge_type = args
+        .get("edge_type")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'edge_type'")?;
+
+    let (graph_dir, gf_dir, schema) = find_project()?;
+    let sessions = sessions_dir(&gf_dir);
+    let graph = Graph::load_from_directory(&graph_dir, schema.clone()).ok();
+
+    let mut session =
+        InterviewSession::load_by_id(&sessions, session_id).map_err(|e| e.to_string())?;
+
+    // Resolve source/target: check tentative nodes first, then try disk resolution
+    let resolved_source = resolve_interview_node_id(&session, &graph_dir, source)?;
+    let resolved_target = resolve_interview_node_id(&session, &graph_dir, target)?;
+
+    session.add_tentative_edge(TentativeEdge {
+        source: resolved_source.clone(),
+        target: resolved_target.clone(),
+        edge_type: edge_type.to_string(),
+        source_type: EdgeSource::ExplicitFromAnswer,
+    });
+
+    let update = proposer::reanalyze_with_graph(&mut session, &schema, graph.as_ref());
+
+    session.save(&sessions).map_err(|e| e.to_string())?;
+
+    let response = json!({
+        "session_id": session.id,
+        "edge": format!("{resolved_source} --{edge_type}--> {resolved_target}"),
+        "filled_gaps": update.filled_gaps,
+        "next_questions": update.questions,
+        "phase": session.phase,
+        "phase_changed": update.phase_changed,
+        "progress": {
+            "filled": update.progress.filled,
+            "total": update.progress.total,
+            "percentage": update.progress.percentage,
+        },
+        "tentative_nodes_count": session.tentative_nodes.len() + 1,
+        "tentative_edges_count": session.tentative_edges.len(),
+    });
+
+    serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+}
+
+/// Resolve a node ID within an interview context.
+/// Checks tentative nodes first (root + proposed), then falls back to disk resolution.
+/// Returns an error if the suffix matches multiple tentative nodes (ambiguity).
+fn resolve_interview_node_id(
+    session: &InterviewSession,
+    graph_dir: &std::path::Path,
+    input: &str,
+) -> Result<String, String> {
+    let suffix_pattern = format!("-{input}");
+
+    // Collect all tentative matches (root + proposed)
+    let mut matches = Vec::new();
+
+    let root = &session.root_node;
+    if root.id == input || root.id.ends_with(&suffix_pattern) {
+        matches.push(root.id.clone());
+    }
+    for node in &session.tentative_nodes {
+        if node.id == input || node.id.ends_with(&suffix_pattern) {
+            matches.push(node.id.clone());
+        }
+    }
+
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        0 => {
+            // Fall back to disk resolution for existing graph nodes
+            ops::resolve_node_id(graph_dir, input).map_err(|e| {
+                format!("Node '{input}' not found in session or on disk: {e}")
+            })
+        }
+        _ => Err(format!(
+            "Ambiguous node ID '{input}' matches multiple tentative nodes: {}",
+            matches.join(", ")
+        )),
+    }
 }
 
 // ─── Linear Tools ──────────────────────────────────────

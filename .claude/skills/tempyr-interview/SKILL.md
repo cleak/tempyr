@@ -12,14 +12,14 @@ allowed-tools:
   - mcp__tempyr__interview_commit
   - mcp__tempyr__interview_adjust
   - mcp__tempyr__interview_resume
+  - mcp__tempyr__interview_add_node
+  - mcp__tempyr__interview_add_edge
   - mcp__tempyr__graph_search
   - mcp__tempyr__graph_list
   - mcp__tempyr__graph_context
   - mcp__tempyr__graph_traverse
   - mcp__tempyr__graph_get_node
-  - mcp__tempyr__graph_add_node
   - mcp__tempyr__graph_update_node
-  - mcp__tempyr__graph_add_edge
 ---
 
 # Tempyr Interview Skill
@@ -65,14 +65,17 @@ typed something and you received it as a user message):
 
 1. **Record** the answer: call `interview_answer` with the user's actual response
 2. **Extract** entities from the answer text. For each entity you identify:
-   - If the node **already exists**, call `graph_update_node` with the node_id
-     and the fields to change (body, status, owner, tags). Only provided
-     fields are overwritten.
-   - If the node is **new**, call `graph_add_node` with a human-readable
-     `slug` (e.g. `session-replay`, `p99-latency`) and `node_type`. The system
-     generates a 6-char suffix automatically and returns the full ID.
-   - Call `graph_add_edge` using the full ID returned by `graph_add_node`.
-     You can also use the 6-char suffix alone for existing nodes.
+   - If the node **already exists in the graph** (not tentative), call
+     `graph_update_node` with the node_id and the fields to change (body,
+     status, owner, tags). Only provided fields are overwritten.
+   - If the node is **new**, call `interview_add_node` with the `session_id`,
+     a human-readable `slug` (e.g. `session-replay`, `p99-latency`), and
+     `node_type`. The system generates a 6-char suffix automatically and
+     returns the full ID. The node is stored as tentative (not written to
+     disk) until `interview_commit`.
+   - Call `interview_add_edge` using the `session_id` and the full ID
+     returned by `interview_add_node`. You can reference tentative nodes
+     (including the root node), existing graph nodes, or use 6-char suffixes.
    - Do NOT include type prefixes in slugs — use `session-replay` not
      `feat-session-replay`. The `node_type` field handles typing.
 3. **Show** what was created/linked in compact format (see below)
@@ -85,8 +88,9 @@ Alternatively, spawn the `tempyr-extractor` subagent for complex answers
 - Current tentative nodes (from `interview_show`)
 - Existing graph context
 
-Then apply its JSON output by calling `graph_add_node` (new) or
-`graph_update_node` (existing) and `graph_add_edge` for each entity.
+Then apply its JSON output by calling `interview_add_node` (new) or
+`graph_update_node` (existing graph nodes) and `interview_add_edge` for
+each entity.
 
 ### How to present tentative nodes
 
