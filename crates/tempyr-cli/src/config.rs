@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use tempyr_core::project;
 use tempyr_core::project::{CacheLayout, IndexLayout};
 use tempyr_core::schema::Schema;
+use tempyr_index::embeddings::{
+    EmbeddingConfig, EmbeddingConfigPartial, ResolvedEmbeddingConfig, resolve_embedding_config,
+};
 
 /// Project context: resolved paths for a tempyr project.
 pub struct ProjectContext {
@@ -56,6 +59,25 @@ impl ProjectContext {
         let digest = blake3::hash(key_src.as_bytes()).to_hex().to_string();
         self.shared_embeddings_dir()
             .join(format!("{}.db", &digest[..16]))
+    }
+
+    pub fn embedding_config(&self) -> EmbeddingConfig {
+        let mut config = EmbeddingConfig::default();
+        let config_path = self.tempyr_dir.join("config.toml");
+
+        if let Ok(content) = std::fs::read_to_string(&config_path)
+            && let Ok(table) = content.parse::<toml::Table>()
+            && let Some(emb) = table.get("embedding")
+            && let Ok(partial) = emb.clone().try_into::<EmbeddingConfigPartial>()
+        {
+            config.apply_partial(partial);
+        }
+
+        config
+    }
+
+    pub fn resolved_embedding_config(&self) -> anyhow::Result<ResolvedEmbeddingConfig> {
+        Ok(resolve_embedding_config(&self.embedding_config())?)
     }
 
     /// Resolve the best available index path for the current graph snapshot.

@@ -376,4 +376,40 @@ mod tests {
         assert!(hash.is_some());
         assert!(index.get_content_hash("nonexistent").unwrap().is_none());
     }
+
+    #[test]
+    fn test_node_ids_and_content_hashes() {
+        let graph = make_test_graph();
+        let index = Index::create_in_memory().unwrap();
+        index.rebuild(&graph).unwrap();
+
+        let mut all_rows = index.node_ids_and_content_hashes(None).unwrap();
+        all_rows.sort();
+
+        let mut expected_all = vec![
+            (
+                "epic-a".to_string(),
+                graph.get_node("epic-a").unwrap().content_hash.clone(),
+            ),
+            (
+                "feat-a".to_string(),
+                graph.get_node("feat-a").unwrap().content_hash.clone(),
+            ),
+            (
+                "task-a".to_string(),
+                graph.get_node("task-a").unwrap().content_hash.clone(),
+            ),
+        ];
+        expected_all.sort();
+        assert_eq!(all_rows, expected_all);
+
+        let feature_rows = index.node_ids_and_content_hashes(Some("feature")).unwrap();
+        assert_eq!(
+            feature_rows,
+            vec![(
+                "feat-a".to_string(),
+                graph.get_node("feat-a").unwrap().content_hash.clone(),
+            )]
+        );
+    }
 }

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 #[cfg(feature = "local-embeddings")]
 use std::sync::Mutex;
@@ -394,25 +395,111 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             provider: "voyage".to_string(),
-            model: Some("voyage-4".to_string()),
-            dimensions: Some(1024),
+            model: None,
+            dimensions: None,
         }
     }
 }
 
-/// Create an embedding provider from configuration.
-pub fn create_provider(config: &EmbeddingConfig) -> Result<Box<dyn EmbeddingProvider>> {
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct EmbeddingConfigPartial {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub dimensions: Option<usize>,
+}
+
+impl EmbeddingConfig {
+    pub fn apply_partial(&mut self, partial: EmbeddingConfigPartial) {
+        if let Some(provider) = partial.provider {
+            self.provider = provider;
+            self.model = None;
+            self.dimensions = None;
+        }
+        if let Some(model) = partial.model {
+            self.model = Some(model);
+        }
+        if let Some(dimensions) = partial.dimensions {
+            self.dimensions = Some(dimensions);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedEmbeddingConfig {
+    pub provider: String,
+    pub model: Option<String>,
+    pub dimensions: usize,
+}
+
+const VOYAGE_MODEL: &str = "voyage-4";
+const VOYAGE_DIMENSIONS: usize = 1024;
+const GEMINI_MODEL: &str = "gemini-embedding-001";
+const GEMINI_DIMENSIONS: usize = 768;
+const LOCAL_MODEL: &str = "all-MiniLM-L6-v2";
+const LOCAL_DIMENSIONS: usize = 384;
+
+pub fn resolve_embedding_config(config: &EmbeddingConfig) -> Result<ResolvedEmbeddingConfig> {
     match config.provider.as_str() {
-        "voyage" => {
-            let model = config.model.as_deref().unwrap_or("voyage-4");
-            let dims = config.dimensions.unwrap_or(1024);
-            Ok(Box::new(VoyageClient::from_env(model, dims)?))
+        "voyage" => Ok(ResolvedEmbeddingConfig {
+            provider: "voyage".to_string(),
+            model: Some(
+                config
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| VOYAGE_MODEL.to_string()),
+            ),
+            dimensions: config.dimensions.unwrap_or(VOYAGE_DIMENSIONS),
+        }),
+        "gemini" => Ok(ResolvedEmbeddingConfig {
+            provider: "gemini".to_string(),
+            model: Some(
+                config
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| GEMINI_MODEL.to_string()),
+            ),
+            dimensions: config.dimensions.unwrap_or(GEMINI_DIMENSIONS),
+        }),
+        "local" => {
+            if let Some(model) = config.model.as_deref()
+                && model != LOCAL_MODEL
+            {
+                return Err(IndexError::General(format!(
+                    "Local embeddings only support model '{LOCAL_MODEL}', got '{model}'"
+                )));
+            }
+            if let Some(dimensions) = config.dimensions
+                && dimensions != LOCAL_DIMENSIONS
+            {
+                return Err(IndexError::General(format!(
+                    "Local embeddings only support {LOCAL_DIMENSIONS} dimensions, got {dimensions}"
+                )));
+            }
+
+            Ok(ResolvedEmbeddingConfig {
+                provider: "local".to_string(),
+                model: Some(LOCAL_MODEL.to_string()),
+                dimensions: LOCAL_DIMENSIONS,
+            })
         }
-        "gemini" => {
-            let model = config.model.as_deref().unwrap_or("gemini-embedding-001");
-            let dims = config.dimensions.unwrap_or(768);
-            Ok(Box::new(GeminiClient::from_env(model, dims)?))
-        }
+        other => Err(IndexError::General(format!(
+            "Unknown embedding provider: '{other}'. Use 'voyage', 'gemini', or 'local'."
+        ))),
+    }
+}
+
+pub fn create_provider_from_resolved(
+    config: &ResolvedEmbeddingConfig,
+) -> Result<Box<dyn EmbeddingProvider>> {
+    match config.provider.as_str() {
+        "voyage" => Ok(Box::new(VoyageClient::from_env(
+            config.model.as_deref().unwrap_or(VOYAGE_MODEL),
+            config.dimensions,
+        )?)),
+        "gemini" => Ok(Box::new(GeminiClient::from_env(
+            config.model.as_deref().unwrap_or(GEMINI_MODEL),
+            config.dimensions,
+        )?)),
         #[cfg(feature = "local-embeddings")]
         "local" => Ok(Box::new(FastembedClient::new()?)),
         #[cfg(not(feature = "local-embeddings"))]
@@ -425,6 +512,12 @@ pub fn create_provider(config: &EmbeddingConfig) -> Result<Box<dyn EmbeddingProv
             "Unknown embedding provider: '{other}'. Use 'voyage', 'gemini', or 'local'."
         ))),
     }
+}
+
+/// Create an embedding provider from configuration.
+pub fn create_provider(config: &EmbeddingConfig) -> Result<Box<dyn EmbeddingProvider>> {
+    let resolved = resolve_embedding_config(config)?;
+    create_provider_from_resolved(&resolved)
 }
 
 // Embed graph nodes
@@ -552,9 +645,11 @@ pub async fn embed_graph(
     provider: &dyn EmbeddingProvider,
 ) -> Result<EmbedStats> {
     let mut to_embed: Vec<(String, String, String)> = Vec::new(); // (id, hash, text)
+    let mut seen_hashes = HashSet::new();
 
     for node in graph.nodes.values() {
-        let needs_embedding = !store.has_embedding(&node.content_hash)?;
+        let needs_embedding = seen_hashes.insert(node.content_hash.clone())
+            && !store.has_embedding(&node.content_hash)?;
         if needs_embedding {
             let text = format!("{}\n\n{}", node.title(), node.body.trim());
             to_embed.push((node.id().to_string(), node.content_hash.clone(), text));
@@ -704,5 +799,66 @@ reverse = "dependency_of"
 
         assert_eq!(store.count().unwrap(), 2);
         assert_eq!(store.count_embeddings_for_index(&index, None).unwrap(), 1);
+    }
+
+    #[test]
+    fn resolve_embedding_config_applies_provider_defaults() {
+        let mut config = EmbeddingConfig::default();
+        config.apply_partial(EmbeddingConfigPartial {
+            provider: Some("gemini".to_string()),
+            ..Default::default()
+        });
+
+        let resolved = resolve_embedding_config(&config).unwrap();
+
+        assert_eq!(resolved.provider, "gemini");
+        assert_eq!(resolved.model.as_deref(), Some(GEMINI_MODEL));
+        assert_eq!(resolved.dimensions, GEMINI_DIMENSIONS);
+    }
+
+    #[test]
+    fn resolve_embedding_config_rejects_invalid_local_dimensions() {
+        let config = EmbeddingConfig {
+            provider: "local".to_string(),
+            model: None,
+            dimensions: Some(1024),
+        };
+
+        let err = resolve_embedding_config(&config).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Local embeddings only support 384 dimensions")
+        );
+    }
+
+    #[test]
+    fn embed_graph_dedupes_duplicate_content_hashes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let schema = make_schema();
+        let mut graph = Graph::new(schema);
+        let node_a = parse_node(
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Shared Title\n\nSame body.\n",
+            PathBuf::from("graph/features/feat-a.md"),
+        )
+        .unwrap();
+        let node_b = parse_node(
+            "---\nid: feat-b\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Shared Title\n\nSame body.\n",
+            PathBuf::from("graph/features/feat-b.md"),
+        )
+        .unwrap();
+        graph.add_node(node_a);
+        graph.add_node(node_b);
+
+        let provider = FixedProvider {
+            embeddings: vec![vec![1.0, 0.0]],
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let stats = rt.block_on(embed_graph(&store, &graph, &provider)).unwrap();
+
+        assert_eq!(stats.embedded, 1);
+        assert_eq!(store.count().unwrap(), 1);
     }
 }

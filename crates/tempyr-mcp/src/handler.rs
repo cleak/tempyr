@@ -270,6 +270,16 @@ fn index_layout(
     tempyr_core::project::IndexLayout::resolve(root, graph_dir, gf_dir).map_err(|e| e.to_string())
 }
 
+fn open_optional_index(graph_dir: &Path, gf_dir: &Path) -> Result<Option<Index>, String> {
+    let layout = index_layout(graph_dir, gf_dir)?;
+    match layout.current_index_path().map_err(|e| e.to_string())? {
+        Some(path) => Index::open(&path)
+            .map(Some)
+            .map_err(|e| format!("Index: {e}")),
+        None => Ok(None),
+    }
+}
+
 fn sessions_dir(gf_dir: &Path) -> PathBuf {
     gf_dir.join("sessions")
 }
@@ -764,11 +774,10 @@ impl TempyrServer {
 
         let mut existing_ids = Vec::new();
         let mut context_rich = Vec::new();
-        if let Ok(layout) = index_layout(&graph_dir, &gf_dir)
-            && let Ok(Some(index_path)) = layout.current_index_path()
-            && let Ok(index) = Index::open(&index_path)
-            && let Ok(results) = index.search_fts_filtered(&p.brain_dump, None, 20)
-        {
+        if let Some(index) = open_optional_index(&graph_dir, &gf_dir)? {
+            let results = index
+                .search_fts_filtered(&p.brain_dump, None, 20)
+                .map_err(|e| format!("Index search: {e}"))?;
             for r in &results {
                 existing_ids.push(r.node_id.clone());
                 context_rich.push(ExistingNodeSummary {
@@ -1118,10 +1127,6 @@ impl TempyrServer {
         let node_id = resolved_node_id.as_deref();
         let graph =
             Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
-        let index = index_layout(&graph_dir, &gf_dir)
-            .ok()
-            .and_then(|layout| layout.current_index_path().ok().flatten())
-            .and_then(|path| Index::open(&path).ok());
         let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
         let status_mapper = build_status_mapper_from_config(&config);
 
@@ -1160,6 +1165,8 @@ impl TempyrServer {
             }))
             .map_err(|e| e.to_string());
         }
+
+        let index = open_optional_index(&graph_dir, &gf_dir)?;
 
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -1271,10 +1278,6 @@ impl TempyrServer {
         let (client, config, gf_dir, graph_dir, schema) = build_linear_deps()?;
         let graph =
             Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
-        let index = index_layout(&graph_dir, &gf_dir)
-            .ok()
-            .and_then(|layout| layout.current_index_path().ok().flatten())
-            .and_then(|path| Index::open(&path).ok());
         let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
         let status_mapper = build_status_mapper_from_config(&config);
 
@@ -1287,6 +1290,8 @@ impl TempyrServer {
             }))
             .map_err(|e| e.to_string());
         }
+
+        let index = open_optional_index(&graph_dir, &gf_dir)?;
 
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {

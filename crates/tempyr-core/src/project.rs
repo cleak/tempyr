@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use blake3::Hasher;
+use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,34 @@ pub struct GitDirs {
 pub struct CacheLayout {
     pub shared_root: PathBuf,
     pub worktree_root: PathBuf,
+}
+
+const SNAPSHOT_KEY_CACHE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SnapshotMetadata {
+    files: Vec<SnapshotMetadataEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SnapshotMetadataEntry {
+    label: String,
+    size: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SnapshotKeyCacheEntry {
+    version: u32,
+    snapshot_key: String,
+    metadata: SnapshotMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SnapshotInput {
+    label: String,
+    path: PathBuf,
 }
 
 impl CacheLayout {
@@ -72,7 +101,25 @@ impl IndexLayout {
             return Ok(snapshot_key);
         }
 
-        let snapshot_key = graph_snapshot_key(&self.graph_dir, &self.tempyr_dir)?;
+        let inputs = collect_snapshot_inputs(&self.graph_dir, &self.tempyr_dir);
+        let metadata = snapshot_metadata(&inputs)?;
+        if let Some(cached) = read_snapshot_key_cache(&self.snapshot_key_cache_path())?
+            && cached.version == SNAPSHOT_KEY_CACHE_VERSION
+            && cached.metadata == metadata
+        {
+            *self.snapshot_key.borrow_mut() = Some(cached.snapshot_key.clone());
+            return Ok(cached.snapshot_key);
+        }
+
+        let snapshot_key = snapshot_key_from_inputs(&inputs)?;
+        let _ = write_snapshot_key_cache(
+            &self.snapshot_key_cache_path(),
+            &SnapshotKeyCacheEntry {
+                version: SNAPSHOT_KEY_CACHE_VERSION,
+                snapshot_key: snapshot_key.clone(),
+                metadata,
+            },
+        );
         *self.snapshot_key.borrow_mut() = Some(snapshot_key.clone());
         Ok(snapshot_key)
     }
@@ -87,6 +134,10 @@ impl IndexLayout {
 
     pub fn active_snapshot_path(&self) -> PathBuf {
         self.cache.active_snapshot_path()
+    }
+
+    fn snapshot_key_cache_path(&self) -> PathBuf {
+        self.cache.worktree_root.join("snapshot-key-cache.json")
     }
 
     pub fn shared_snapshot_index_path(&self) -> io::Result<PathBuf> {
@@ -305,6 +356,11 @@ pub fn cache_layout(root: &Path, tempyr_dir: &Path) -> CacheLayout {
 /// - `.tempyr/schema.toml`
 /// - a format/version marker for cache invalidation
 pub fn graph_snapshot_key(graph_dir: &Path, tempyr_dir: &Path) -> io::Result<String> {
+    let inputs = collect_snapshot_inputs(graph_dir, tempyr_dir);
+    snapshot_key_from_inputs(&inputs)
+}
+
+fn collect_snapshot_inputs(graph_dir: &Path, tempyr_dir: &Path) -> Vec<SnapshotInput> {
     let mut files = Vec::new();
 
     if graph_dir.exists() {
@@ -316,33 +372,84 @@ pub fn graph_snapshot_key(graph_dir: &Path, tempyr_dir: &Path) -> io::Result<Str
             let path = entry.path();
             if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
                 let rel = path.strip_prefix(graph_dir).unwrap_or(path).to_path_buf();
-                files.push((
-                    format!("graph/{}", rel.to_string_lossy().replace('\\', "/")),
-                    path.to_path_buf(),
-                ));
+                files.push(SnapshotInput {
+                    label: format!("graph/{}", rel.to_string_lossy().replace('\\', "/")),
+                    path: path.to_path_buf(),
+                });
             }
         }
     }
 
     let schema_path = tempyr_dir.join("schema.toml");
     if schema_path.is_file() {
-        files.push(("schema.toml".to_string(), schema_path));
+        files.push(SnapshotInput {
+            label: "schema.toml".to_string(),
+            path: schema_path,
+        });
     }
 
-    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files.sort_by(|a, b| a.label.cmp(&b.label));
+    files
+}
 
+fn snapshot_key_from_inputs(inputs: &[SnapshotInput]) -> io::Result<String> {
     let mut hasher = Hasher::new();
     hasher.update(b"tempyr-snapshot-v1\0");
 
-    for (label, path) in files {
-        hasher.update(label.as_bytes());
+    for input in inputs {
+        hasher.update(input.label.as_bytes());
         hasher.update(b"\0");
-        hasher.update(&fs::read(path)?);
+        hasher.update(&fs::read(&input.path)?);
         hasher.update(b"\0");
     }
 
     let hex = hasher.finalize().to_hex().to_string();
     Ok(hex[..16].to_string())
+}
+
+fn snapshot_metadata(inputs: &[SnapshotInput]) -> io::Result<SnapshotMetadata> {
+    let mut files = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let metadata = fs::metadata(&input.path)?;
+        let (modified_secs, modified_nanos) = modified_timestamp(&metadata);
+        files.push(SnapshotMetadataEntry {
+            label: input.label.clone(),
+            size: metadata.len(),
+            modified_secs,
+            modified_nanos,
+        });
+    }
+    Ok(SnapshotMetadata { files })
+}
+
+fn modified_timestamp(metadata: &fs::Metadata) -> (u64, u32) {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| (duration.as_secs(), duration.subsec_nanos()))
+        .unwrap_or((0, 0))
+}
+
+fn read_snapshot_key_cache(path: &Path) -> io::Result<Option<SnapshotKeyCacheEntry>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(None),
+    };
+    Ok(serde_json::from_str(&raw).ok())
+}
+
+fn write_snapshot_key_cache(path: &Path, cache: &SnapshotKeyCacheEntry) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let raw = serde_json::to_string(cache)
+        .map_err(|err| io::Error::other(format!("Failed to serialize snapshot cache: {err}")))?;
+    fs::write(path, raw)
 }
 
 fn read_commondir(git_dir: &Path) -> Option<PathBuf> {
@@ -500,6 +607,69 @@ mod tests {
         let second = graph_snapshot_key(&graph_dir, &tempyr_dir).unwrap();
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn snapshot_key_uses_metadata_cache_across_layout_instances() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let graph_dir = root.join("graph");
+        let features_dir = graph_dir.join("features");
+        let tempyr_dir = root.join(".tempyr");
+        fs::create_dir_all(&features_dir).unwrap();
+        fs::create_dir_all(&tempyr_dir).unwrap();
+        fs::write(tempyr_dir.join("schema.toml"), "name = 'x'\n").unwrap();
+        fs::write(features_dir.join("a.md"), "# A\n").unwrap();
+
+        let metadata =
+            snapshot_metadata(&collect_snapshot_inputs(&graph_dir, &tempyr_dir)).unwrap();
+        let layout = IndexLayout::resolve(root, &graph_dir, &tempyr_dir).unwrap();
+        write_snapshot_key_cache(
+            &layout.snapshot_key_cache_path(),
+            &SnapshotKeyCacheEntry {
+                version: SNAPSHOT_KEY_CACHE_VERSION,
+                snapshot_key: "cached-snapshot".to_string(),
+                metadata,
+            },
+        )
+        .unwrap();
+
+        let fresh_layout = IndexLayout::resolve(root, &graph_dir, &tempyr_dir).unwrap();
+
+        assert_eq!(fresh_layout.snapshot_key().unwrap(), "cached-snapshot");
+    }
+
+    #[test]
+    fn snapshot_key_ignores_stale_metadata_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let graph_dir = root.join("graph");
+        let features_dir = graph_dir.join("features");
+        let tempyr_dir = root.join(".tempyr");
+        fs::create_dir_all(&features_dir).unwrap();
+        fs::create_dir_all(&tempyr_dir).unwrap();
+        fs::write(tempyr_dir.join("schema.toml"), "name = 'x'\n").unwrap();
+        fs::write(features_dir.join("a.md"), "# A\n").unwrap();
+
+        let metadata =
+            snapshot_metadata(&collect_snapshot_inputs(&graph_dir, &tempyr_dir)).unwrap();
+        let layout = IndexLayout::resolve(root, &graph_dir, &tempyr_dir).unwrap();
+        write_snapshot_key_cache(
+            &layout.snapshot_key_cache_path(),
+            &SnapshotKeyCacheEntry {
+                version: SNAPSHOT_KEY_CACHE_VERSION,
+                snapshot_key: "cached-snapshot".to_string(),
+                metadata,
+            },
+        )
+        .unwrap();
+
+        fs::write(features_dir.join("a.md"), "# A changed more\n").unwrap();
+
+        let fresh_layout = IndexLayout::resolve(root, &graph_dir, &tempyr_dir).unwrap();
+        let actual = graph_snapshot_key(&graph_dir, &tempyr_dir).unwrap();
+
+        assert_eq!(fresh_layout.snapshot_key().unwrap(), actual);
     }
 
     #[test]

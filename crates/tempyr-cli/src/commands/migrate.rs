@@ -213,10 +213,15 @@ fn add_suffix(graph_dir: &Path, tempyr_dir: &Path, dry_run: bool) -> anyhow::Res
         // Crockford validation. Cross-check against suffixes we've seen.
         // The prefix check avoids self-confirming false positives from legacy IDs like
         // `feat-system`, where the trailing segment happens to be six valid Crockford chars.
-        if id::parse_node_id(&old_id).is_some()
-            && !id::has_legacy_type_prefix(&old_id, node.node_type())
-        {
-            continue;
+        if id::parse_node_id(&old_id).is_some() {
+            if !id::has_legacy_type_prefix(&old_id, node.node_type()) {
+                continue;
+            }
+
+            let stripped = id::strip_type_prefix(&old_id);
+            if stripped != old_id && id::parse_node_id(stripped).is_some() {
+                continue;
+            }
         }
 
         let slug = id::strip_type_prefix(&old_id).to_string();
@@ -238,7 +243,7 @@ fn add_suffix(graph_dir: &Path, tempyr_dir: &Path, dry_run: bool) -> anyhow::Res
     }
 
     if dry_run {
-        println!("Dry run — would migrate {} node(s):", renames.len());
+        println!("Dry run - would migrate {} node(s):", renames.len());
         for (old, new) in &renames {
             println!("  {old} -> {new}");
         }

@@ -120,10 +120,25 @@ impl Index {
 
     /// Count the number of cached embeddings.
     pub fn embedding_count(&self) -> Result<usize> {
-        let count: usize = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM embedding_cache", [], |row| row.get(0))
-            .unwrap_or(0);
+        self.embedding_count_for_node_type(None)
+    }
+
+    /// Count cached embeddings, optionally limited to a node type.
+    pub fn embedding_count_for_node_type(&self, node_type_filter: Option<&str>) -> Result<usize> {
+        let count = if let Some(node_type) = node_type_filter {
+            self.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM embedding_cache ec \
+                     JOIN nodes n ON n.id = ec.node_id WHERE n.node_type = ?1",
+                    [node_type],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0)
+        } else {
+            self.conn
+                .query_row("SELECT COUNT(*) FROM embedding_cache", [], |row| row.get(0))
+                .unwrap_or(0)
+        };
         Ok(count)
     }
 
@@ -317,6 +332,39 @@ mod tests {
         index.store_embedding("n1", "h", &[1.0, 0.0]).unwrap();
 
         assert_eq!(index.embedding_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_embedding_count_for_node_type() {
+        let index = make_index();
+
+        index.conn.execute(
+            "INSERT INTO nodes (id, node_type, file_path, content_hash, body_text, title) VALUES ('f1', 'feature', 'f.md', 'h1', '', '')",
+            [],
+        ).unwrap();
+        index.conn.execute(
+            "INSERT INTO nodes (id, node_type, file_path, content_hash, body_text, title) VALUES ('d1', 'decision', 'd.md', 'h2', '', '')",
+            [],
+        ).unwrap();
+        index.store_embedding("f1", "h1", &[1.0, 0.0]).unwrap();
+        index.store_embedding("d1", "h2", &[0.0, 1.0]).unwrap();
+
+        assert_eq!(
+            index
+                .embedding_count_for_node_type(Some("feature"))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            index
+                .embedding_count_for_node_type(Some("decision"))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            index.embedding_count_for_node_type(Some("task")).unwrap(),
+            0
+        );
     }
 
     #[test]

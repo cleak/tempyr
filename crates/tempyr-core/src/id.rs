@@ -116,23 +116,27 @@ pub fn collect_existing_suffixes(graph_dir: &Path) -> HashSet<String> {
     suffixes
 }
 
+const LEGACY_TYPE_PREFIXES: &[(&str, &[&str])] = &[
+    ("feature", &["feature-", "feat-"]),
+    ("decision", &["decision-", "dec-"]),
+    ("component", &["component-", "comp-"]),
+    ("constraint", &["constraint-"]),
+    ("api_surface", &["api_surface-"]),
+    ("open_question", &["open_question-"]),
+    ("persona", &["persona-"]),
+    ("metric", &["metric-"]),
+    ("insight", &["insight-"]),
+    ("epic", &["epic-"]),
+    ("note", &["note-"]),
+    ("risk", &["risk-"]),
+    ("task", &["task-"]),
+];
+
 fn legacy_type_prefixes_for(node_type: &str) -> &'static [&'static str] {
-    match node_type {
-        "feature" => &["feature-", "feat-"],
-        "decision" => &["decision-", "dec-"],
-        "component" => &["component-", "comp-"],
-        "constraint" => &["constraint-"],
-        "api_surface" => &["api_surface-"],
-        "open_question" => &["open_question-"],
-        "persona" => &["persona-"],
-        "metric" => &["metric-"],
-        "insight" => &["insight-"],
-        "epic" => &["epic-"],
-        "note" => &["note-"],
-        "risk" => &["risk-"],
-        "task" => &["task-"],
-        _ => &[],
-    }
+    LEGACY_TYPE_PREFIXES
+        .iter()
+        .find_map(|(candidate, prefixes)| (*candidate == node_type).then_some(*prefixes))
+        .unwrap_or(&[])
 }
 
 /// Check whether an ID still carries the legacy type prefix convention for its node type.
@@ -142,42 +146,26 @@ pub fn has_legacy_type_prefix(id: &str, node_type: &str) -> bool {
         .any(|prefix| id.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty()))
 }
 
-/// Known type prefixes that should be stripped during migration.
-/// Ordered longest-first so `open_question-` matches before `open-`.
-const TYPE_PREFIXES: &[&str] = &[
-    "open_question-",
-    "api_surface-",
-    "constraint-",
-    "component-",
-    "decision-",
-    "feature-",
-    "insight-",
-    "persona-",
-    "metric-",
-    "epic-",
-    "note-",
-    "risk-",
-    "task-",
-    // Common abbreviations
-    "feat-",
-    "dec-",
-    "comp-",
-];
-
 /// Strip a type prefix from an old-format ID to produce a clean slug.
 ///
 /// `feat-session-replay` -> `session-replay`
 /// `decision-use-sqlite` -> `use-sqlite`
 /// `my-custom-thing` -> `my-custom-thing` (no known prefix, unchanged)
 pub fn strip_type_prefix(id: &str) -> &str {
-    for prefix in TYPE_PREFIXES {
-        if let Some(rest) = id.strip_prefix(prefix)
-            && !rest.is_empty()
-        {
-            return rest;
+    let mut best_match: Option<(&str, &str)> = None;
+
+    for (_, prefixes) in LEGACY_TYPE_PREFIXES {
+        for prefix in *prefixes {
+            if let Some(rest) = id.strip_prefix(prefix)
+                && !rest.is_empty()
+                && best_match.is_none_or(|(best_prefix, _)| prefix.len() > best_prefix.len())
+            {
+                best_match = Some((prefix, rest));
+            }
         }
     }
-    id
+
+    best_match.map(|(_, rest)| rest).unwrap_or(id)
 }
 
 #[cfg(test)]
@@ -247,6 +235,7 @@ mod tests {
     #[test]
     fn test_has_legacy_type_prefix() {
         assert!(has_legacy_type_prefix("feat-session-replay", "feature"));
+        assert!(has_legacy_type_prefix("feat-system-a1b2c3", "feature"));
         assert!(has_legacy_type_prefix("decision-storage", "decision"));
         assert!(!has_legacy_type_prefix("session-replay-a1b2c3", "feature"));
         assert!(!has_legacy_type_prefix("storage-a1b2c3", "decision"));
