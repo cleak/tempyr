@@ -140,15 +140,15 @@ const TYPE_PREFIXES: &[&str] = &[
 
 /// Strip a type prefix from an old-format ID to produce a clean slug.
 ///
-/// `feat-session-replay` → `session-replay`
-/// `decision-use-sqlite` → `use-sqlite`
-/// `my-custom-thing` → `my-custom-thing` (no known prefix, unchanged)
+/// `feat-session-replay` -> `session-replay`
+/// `decision-use-sqlite` -> `use-sqlite`
+/// `my-custom-thing` -> `my-custom-thing` (no known prefix, unchanged)
 pub fn strip_type_prefix(id: &str) -> &str {
     for prefix in TYPE_PREFIXES {
-        if let Some(rest) = id.strip_prefix(prefix) {
-            if !rest.is_empty() {
-                return rest;
-            }
+        if let Some(rest) = id.strip_prefix(prefix)
+            && !rest.is_empty()
+        {
+            return rest;
         }
     }
     id
@@ -230,7 +230,10 @@ mod tests {
     #[test]
     fn test_strip_type_prefix() {
         assert_eq!(strip_type_prefix("feat-session-replay"), "session-replay");
-        assert_eq!(strip_type_prefix("feature-session-replay"), "session-replay");
+        assert_eq!(
+            strip_type_prefix("feature-session-replay"),
+            "session-replay"
+        );
         assert_eq!(strip_type_prefix("decision-use-sqlite"), "use-sqlite");
         assert_eq!(strip_type_prefix("dec-use-sqlite"), "use-sqlite");
         assert_eq!(strip_type_prefix("epic-observability"), "observability");
@@ -240,11 +243,17 @@ mod tests {
         assert_eq!(strip_type_prefix("component-api-gateway"), "api-gateway");
         assert_eq!(strip_type_prefix("constraint-latency"), "latency");
         assert_eq!(strip_type_prefix("metric-mttr"), "mttr");
-        assert_eq!(strip_type_prefix("open_question-auth-approach"), "auth-approach");
+        assert_eq!(
+            strip_type_prefix("open_question-auth-approach"),
+            "auth-approach"
+        );
         assert_eq!(strip_type_prefix("api_surface-graphql"), "graphql");
         assert_eq!(strip_type_prefix("note-meeting-notes"), "meeting-notes");
-        assert_eq!(strip_type_prefix("insight-caching-gotcha"), "caching-gotcha");
-        // No matching prefix — unchanged
+        assert_eq!(
+            strip_type_prefix("insight-caching-gotcha"),
+            "caching-gotcha"
+        );
+        // No matching prefix - unchanged
         assert_eq!(strip_type_prefix("my-custom-thing"), "my-custom-thing");
         // Don't strip prefix that leaves nothing
         assert_eq!(strip_type_prefix("feat-"), "feat-");

@@ -11,11 +11,7 @@ pub fn run(
     owner: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let index_path = ctx.index_path();
-    if !index_path.exists() {
-        anyhow::bail!("Index not found. Run `tempyr index rebuild` first.");
-    }
-
+    let index_path = ctx.current_index_path()?;
     let index = Index::open(&index_path)?;
     let filter = MetadataFilter {
         node_type,

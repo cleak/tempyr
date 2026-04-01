@@ -75,9 +75,9 @@ fn render_fields(output: &mut String, fields: &[(String, String)]) {
 mod tests {
     use super::*;
     use crate::collector::{SectionData, SectionItem};
-    use crate::template::{RenderTemplate, TemplateMeta, SectionDef};
-    use tempyr_core::node::parse_node;
+    use crate::template::{RenderTemplate, TemplateMeta};
     use std::path::PathBuf;
+    use tempyr_core::node::parse_node;
 
     fn make_root() -> Node {
         let content = "---\nid: feat-test\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Test Feature\n\nA test feature body.\n";

@@ -1,8 +1,15 @@
 use async_trait::async_trait;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
+#[cfg(feature = "local-embeddings")]
+use std::sync::Mutex;
 
-use crate::Result;
 use crate::IndexError;
+use crate::Result;
+use crate::indexer::Index;
+use crate::vector::{VectorSearchResult, blob_to_embedding, cosine_similarity, embedding_to_blob};
 
 /// Trait for embedding providers. Implementations call external APIs or local models.
 #[async_trait]
@@ -24,7 +31,7 @@ pub enum InputType {
     Document,
 }
 
-// ─── Voyage AI ──────────────────────────────────────────
+// Voyage AI
 
 pub struct VoyageClient {
     api_key: String,
@@ -134,7 +141,7 @@ impl EmbeddingProvider for VoyageClient {
     }
 }
 
-// ─── Google Gemini ──────────────────────────────────────
+// Google Gemini
 
 pub struct GeminiClient {
     api_key: String,
@@ -155,9 +162,7 @@ impl GeminiClient {
 
     pub fn from_env(model: &str, dimensions: usize) -> Result<Self> {
         let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
-            IndexError::General(
-                "GEMINI_API_KEY environment variable not set.".to_string(),
-            )
+            IndexError::General("GEMINI_API_KEY environment variable not set.".to_string())
         })?;
         Ok(Self::new(&api_key, model, dimensions))
     }
@@ -228,9 +233,7 @@ impl EmbeddingProvider for GeminiClient {
                     .map(|text| GeminiSingleRequest {
                         model: model_path.clone(),
                         content: GeminiContent {
-                            parts: vec![GeminiPart {
-                                text: text.clone(),
-                            }],
+                            parts: vec![GeminiPart { text: text.clone() }],
                         },
                         task_type: task_type.to_string(),
                         output_dimensionality: Some(self.dimensions),
@@ -272,7 +275,7 @@ impl EmbeddingProvider for GeminiClient {
 
             Ok(all_embeddings)
         } else {
-            // Single text — use single endpoint
+            // Single text - use single endpoint
             let body = GeminiSingleRequest {
                 model: model_path,
                 content: GeminiContent {
@@ -324,11 +327,11 @@ impl EmbeddingProvider for GeminiClient {
     }
 }
 
-// ─── Local fastembed fallback ───────────────────────────
+// Local fastembed fallback
 
 #[cfg(feature = "local-embeddings")]
 pub struct FastembedClient {
-    model: fastembed::TextEmbedding,
+    model: Mutex<fastembed::TextEmbedding>,
     dims: usize,
 }
 
@@ -342,7 +345,10 @@ impl FastembedClient {
         )
         .map_err(|e| IndexError::General(format!("Failed to load fastembed model: {e}")))?;
 
-        Ok(Self { model, dims: 384 })
+        Ok(Self {
+            model: Mutex::new(model),
+            dims: 384,
+        })
     }
 }
 
@@ -354,9 +360,12 @@ impl EmbeddingProvider for FastembedClient {
             return Ok(Vec::new());
         }
 
-        let embeddings = self
+        let mut model = self
             .model
-            .embed(texts.to_vec(), None)
+            .lock()
+            .map_err(|_| IndexError::General("Fastembed model lock poisoned".to_string()))?;
+        let embeddings = model
+            .embed(texts, None)
             .map_err(|e| IndexError::General(format!("Fastembed error: {e}")))?;
 
         Ok(embeddings)
@@ -371,7 +380,7 @@ impl EmbeddingProvider for FastembedClient {
     }
 }
 
-// ─── Provider factory ───────────────────────────────────
+// Provider factory
 
 /// Embedding provider configuration from config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -418,28 +427,153 @@ pub fn create_provider(config: &EmbeddingConfig) -> Result<Box<dyn EmbeddingProv
     }
 }
 
-// ─── Embed graph nodes ──────────────────────────────────
+// Embed graph nodes
 
-use crate::indexer::Index;
 use tempyr_core::graph::Graph;
+
+pub struct EmbeddingStore {
+    conn: Connection,
+}
+
+impl EmbeddingStore {
+    pub fn open_or_create(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                IndexError::General(format!("Failed to create embeddings dir: {e}"))
+            })?;
+        }
+
+        let conn = Connection::open(path)?;
+        let store = Self { conn };
+        store.create_tables()?;
+        Ok(store)
+    }
+
+    fn create_tables(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS embeddings (
+                content_hash TEXT PRIMARY KEY,
+                embedding    BLOB NOT NULL
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
+    pub fn has_embedding(&self, content_hash: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM embeddings WHERE content_hash = ?1",
+            [content_hash],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn store_embedding(&self, content_hash: &str, embedding: &[f32]) -> Result<()> {
+        let blob = embedding_to_blob(embedding);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO embeddings (content_hash, embedding) VALUES (?1, ?2)",
+            rusqlite::params![content_hash, blob],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_embedding(&self, content_hash: &str) -> Result<Option<Vec<f32>>> {
+        let result = self.conn.query_row(
+            "SELECT embedding FROM embeddings WHERE content_hash = ?1",
+            [content_hash],
+            |row| {
+                let blob: Vec<u8> = row.get(0)?;
+                Ok(blob)
+            },
+        );
+
+        match result {
+            Ok(blob) => Ok(Some(blob_to_embedding(&blob))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn count(&self) -> Result<usize> {
+        let count: usize = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))?;
+        Ok(count)
+    }
+
+    pub fn vector_search(
+        &self,
+        index: &Index,
+        query_embedding: &[f32],
+        max_results: usize,
+        node_type_filter: Option<&str>,
+    ) -> Result<Vec<VectorSearchResult>> {
+        let all_embeddings = self.load_all_embeddings()?;
+        let sql = if node_type_filter.is_some() {
+            "SELECT id, content_hash FROM nodes WHERE node_type = ?1"
+        } else {
+            "SELECT id, content_hash FROM nodes"
+        };
+
+        let mut stmt = index.conn.prepare(sql)?;
+        let rows: Vec<(String, String)> = if let Some(node_type) = node_type_filter {
+            stmt.query_map([node_type], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let mut results = Vec::new();
+        for (node_id, content_hash) in rows {
+            if let Some(embedding) = all_embeddings.get(&content_hash) {
+                results.push(VectorSearchResult {
+                    node_id,
+                    similarity: cosine_similarity(query_embedding, embedding),
+                });
+            }
+        }
+
+        results.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(max_results);
+        Ok(results)
+    }
+
+    fn load_all_embeddings(&self) -> Result<HashMap<String, Vec<f32>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT content_hash, embedding FROM embeddings")?;
+        let mut out = HashMap::new();
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in rows {
+            let (content_hash, blob) = row?;
+            out.insert(content_hash, blob_to_embedding(&blob));
+        }
+        Ok(out)
+    }
+}
 
 /// Embed all nodes in the graph, using the cache to skip unchanged nodes.
 pub async fn embed_graph(
-    index: &Index,
+    store: &EmbeddingStore,
     graph: &Graph,
     provider: &dyn EmbeddingProvider,
 ) -> Result<EmbedStats> {
     let mut to_embed: Vec<(String, String, String)> = Vec::new(); // (id, hash, text)
 
     for node in graph.nodes.values() {
-        let needs_embedding = !index.has_valid_embedding(node.id(), &node.content_hash)?;
+        let needs_embedding = !store.has_embedding(&node.content_hash)?;
         if needs_embedding {
             let text = format!("{}\n\n{}", node.title(), node.body.trim());
-            to_embed.push((
-                node.id().to_string(),
-                node.content_hash.clone(),
-                text,
-            ));
+            to_embed.push((node.id().to_string(), node.content_hash.clone(), text));
         }
     }
 
@@ -458,12 +592,9 @@ pub async fn embed_graph(
     let embeddings = provider.embed(&texts, InputType::Document).await?;
 
     // Store in cache
-    for ((id, hash, _), embedding) in to_embed.iter().zip(embeddings.iter()) {
-        index.store_embedding(id, hash, embedding)?;
+    for ((_, hash, _), embedding) in to_embed.iter().zip(embeddings.iter()) {
+        store.store_embedding(hash, embedding)?;
     }
-
-    // Prune embeddings for removed nodes
-    index.prune_embeddings()?;
 
     Ok(EmbedStats {
         embedded: texts.len(),

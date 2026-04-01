@@ -1,5 +1,5 @@
 use crate::config::ProjectContext;
-use tempyr_index::embeddings::{self, EmbeddingConfig, InputType};
+use tempyr_index::embeddings::{self, EmbeddingConfig, EmbeddingStore, InputType};
 use tempyr_index::indexer::Index;
 
 pub fn run(
@@ -9,16 +9,17 @@ pub fn run(
     node_type: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let index_path = ctx.index_path();
-    if !index_path.exists() {
-        anyhow::bail!("Index not found. Run `tempyr index rebuild` first.");
-    }
-
+    let index_path = ctx.current_index_path()?;
     let index = Index::open(&index_path)?;
+    let config = load_embedding_config(ctx);
+    let store_path =
+        ctx.embedding_store_path(&config.provider, config.model.as_deref(), config.dimensions);
+    let store = EmbeddingStore::open_or_create(&store_path)?;
 
     // Check if embeddings exist
-    let emb_count = index.embedding_count()?;
-    if emb_count == 0 {
+    let emb_count = store.count()?;
+    let use_legacy_index_embeddings = emb_count == 0 && index.embedding_count()? > 0;
+    if emb_count == 0 && !use_legacy_index_embeddings {
         anyhow::bail!(
             "No embeddings found. Run `tempyr index rebuild` with an embedding \
              API key set (VOYAGE_API_KEY or GEMINI_API_KEY)."
@@ -26,7 +27,6 @@ pub fn run(
     }
 
     // Embed the query
-    let config = load_embedding_config(ctx);
     let provider = embeddings::create_provider(&config)?;
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -36,15 +36,22 @@ pub fn run(
         anyhow::bail!("Failed to embed query");
     }
 
-    let results = index.vector_search(&query_embeddings[0], max_results, node_type)?;
+    let results = if use_legacy_index_embeddings {
+        index.vector_search(&query_embeddings[0], max_results, node_type)?
+    } else {
+        store.vector_search(&index, &query_embeddings[0], max_results, node_type)?
+    };
 
     if json {
-        let json_results: Vec<_> = results.iter().map(|r| {
-            serde_json::json!({
-                "node_id": r.node_id,
-                "similarity": r.similarity,
+        let json_results: Vec<_> = results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "node_id": r.node_id,
+                    "similarity": r.similarity,
+                })
             })
-        }).collect();
+            .collect();
         println!("{}", serde_json::to_string_pretty(&json_results)?);
     } else {
         if results.is_empty() {
@@ -61,14 +68,12 @@ pub fn run(
 
 fn load_embedding_config(ctx: &ProjectContext) -> EmbeddingConfig {
     let config_path = ctx.tempyr_dir.join("config.toml");
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
-        if let Ok(table) = content.parse::<toml::Table>() {
-            if let Some(emb) = table.get("embedding") {
-                if let Ok(config) = emb.clone().try_into::<EmbeddingConfig>() {
-                    return config;
-                }
-            }
-        }
+    if let Ok(content) = std::fs::read_to_string(&config_path)
+        && let Ok(table) = content.parse::<toml::Table>()
+        && let Some(emb) = table.get("embedding")
+        && let Ok(config) = emb.clone().try_into::<EmbeddingConfig>()
+    {
+        return config;
     }
     EmbeddingConfig::default()
 }

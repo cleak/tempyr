@@ -1,5 +1,5 @@
-use crate::indexer::Index;
 use crate::Result;
+use crate::indexer::Index;
 
 /// A vector search result.
 #[derive(Debug, Clone)]
@@ -39,11 +39,7 @@ impl Index {
     }
 
     /// Get the cached embedding for a node, if the content hash matches.
-    pub fn get_embedding(
-        &self,
-        node_id: &str,
-        content_hash: &str,
-    ) -> Result<Option<Vec<f32>>> {
+    pub fn get_embedding(&self, node_id: &str, content_hash: &str) -> Result<Option<Vec<f32>>> {
         let result = self.conn.query_row(
             "SELECT embedding FROM embedding_cache WHERE node_id = ?1 AND content_hash = ?2",
             rusqlite::params![node_id, content_hash],
@@ -62,11 +58,14 @@ impl Index {
 
     /// Check if a node has a cached embedding with the given content hash.
     pub fn has_valid_embedding(&self, node_id: &str, content_hash: &str) -> Result<bool> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM embedding_cache WHERE node_id = ?1 AND content_hash = ?2",
-            rusqlite::params![node_id, content_hash],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM embedding_cache WHERE node_id = ?1 AND content_hash = ?2",
+                rusqlite::params![node_id, content_hash],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         Ok(count > 0)
     }
 
@@ -109,7 +108,11 @@ impl Index {
             })
             .collect();
 
-        results.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(max_results);
 
         Ok(results)
@@ -117,11 +120,10 @@ impl Index {
 
     /// Count the number of cached embeddings.
     pub fn embedding_count(&self) -> Result<usize> {
-        let count: usize = self.conn.query_row(
-            "SELECT COUNT(*) FROM embedding_cache",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let count: usize = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM embedding_cache", [], |row| row.get(0))
+            .unwrap_or(0);
         Ok(count)
     }
 
@@ -136,22 +138,19 @@ impl Index {
 }
 
 /// Convert f32 slice to raw byte blob.
-fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
-    embedding
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect()
+pub(crate) fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+    embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
 /// Convert raw byte blob back to f32 vector.
-fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
+pub(crate) fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
 }
 
 /// Cosine similarity between two vectors.
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
@@ -169,11 +168,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     }
 
     let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom == 0.0 {
-        0.0
-    } else {
-        dot / denom
-    }
+    if denom == 0.0 { 0.0 } else { dot / denom }
 }
 
 #[cfg(test)]

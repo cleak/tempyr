@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::str::FromStr;
 
 use serde::Deserialize;
 
@@ -44,11 +45,14 @@ impl RenderTemplate {
     pub fn load(path: &Path) -> crate::Result<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| RenderError::Template(format!("Cannot read template: {e}")))?;
-        Self::from_str(&content)
+        content.parse()
     }
+}
 
-    /// Parse a template from a TOML string.
-    pub fn from_str(content: &str) -> crate::Result<Self> {
+impl FromStr for RenderTemplate {
+    type Err = RenderError;
+
+    fn from_str(content: &str) -> crate::Result<Self> {
         toml::from_str(content)
             .map_err(|e| RenderError::Template(format!("Invalid template TOML: {e}")))
     }
@@ -76,7 +80,11 @@ mod tests {
         assert!(!template.sections.is_empty());
 
         // Verify known sections exist
-        let headings: Vec<_> = template.sections.iter().map(|s| s.heading.as_str()).collect();
+        let headings: Vec<_> = template
+            .sections
+            .iter()
+            .map(|s| s.heading.as_str())
+            .collect();
         assert!(headings.contains(&"Overview"));
         assert!(headings.contains(&"Target Users"));
         assert!(headings.contains(&"Success Metrics"));
@@ -90,7 +98,11 @@ mod tests {
         assert_eq!(template.meta.root_types, vec!["task"]);
         assert!(!template.sections.is_empty());
 
-        let headings: Vec<_> = template.sections.iter().map(|s| s.heading.as_str()).collect();
+        let headings: Vec<_> = template
+            .sections
+            .iter()
+            .map(|s| s.heading.as_str())
+            .collect();
         assert!(headings.contains(&"Objective"));
         assert!(headings.contains(&"Feature Context"));
         assert!(headings.contains(&"Blocked By"));
@@ -104,7 +116,11 @@ mod tests {
         let template = RenderTemplate::load(&templates_dir().join("tdd.toml")).unwrap();
         assert_eq!(template.meta.name, "Technical Design Document");
 
-        let headings: Vec<_> = template.sections.iter().map(|s| s.heading.as_str()).collect();
+        let headings: Vec<_> = template
+            .sections
+            .iter()
+            .map(|s| s.heading.as_str())
+            .collect();
         assert!(headings.contains(&"Architecture Decisions"));
         assert!(headings.contains(&"System Components"));
         assert!(headings.contains(&"Relevant Insights"));
@@ -115,18 +131,31 @@ mod tests {
         let template = RenderTemplate::load(&templates_dir().join("prd.toml")).unwrap();
 
         // Check the "Key Decisions" section has a status filter
-        let decisions = template.sections.iter().find(|s| s.heading == "Key Decisions").unwrap();
+        let decisions = template
+            .sections
+            .iter()
+            .find(|s| s.heading == "Key Decisions")
+            .unwrap();
         assert_eq!(decisions.traverse.as_deref(), Some("depends_on"));
         assert_eq!(decisions.target_type.as_deref(), Some("decision"));
         let filter = decisions.filter.as_ref().unwrap();
-        assert!(filter.get("status").unwrap().contains(&"decided".to_string()));
+        assert!(
+            filter
+                .get("status")
+                .unwrap()
+                .contains(&"decided".to_string())
+        );
     }
 
     #[test]
     fn test_template_semantic_search_section() {
         let template = RenderTemplate::load(&templates_dir().join("tdd.toml")).unwrap();
 
-        let insights = template.sections.iter().find(|s| s.heading == "Relevant Insights").unwrap();
+        let insights = template
+            .sections
+            .iter()
+            .find(|s| s.heading == "Relevant Insights")
+            .unwrap();
         assert_eq!(insights.source.as_deref(), Some("semantic_search"));
         assert_eq!(insights.query_from.as_deref(), Some("root"));
         assert_eq!(insights.max_results, Some(5));

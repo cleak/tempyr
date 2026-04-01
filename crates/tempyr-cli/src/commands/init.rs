@@ -51,7 +51,7 @@ pub fn run() -> anyhow::Result<()> {
     std::fs::write(gf_dir.join("config.toml"), DEFAULT_CONFIG)?;
 
     // Load schema to get directory names
-    let schema = tempyr_core::schema::Schema::from_str(DEFAULT_SCHEMA)?;
+    let schema: tempyr_core::schema::Schema = DEFAULT_SCHEMA.parse()?;
 
     // Create graph directories
     for node_type in schema.node_types.values() {

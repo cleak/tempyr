@@ -3,8 +3,8 @@ use chrono::Utc;
 use tempyr_core::graph::Graph;
 use tempyr_core::traverse::bfs_scored;
 
-use crate::indexer::Index;
 use crate::Result;
+use crate::indexer::Index;
 
 /// Configuration for the hybrid retrieval pipeline.
 #[derive(Debug, Clone, Default)]
@@ -43,6 +43,9 @@ pub struct HybridResult {
     pub vector_score: Option<f64>,
 }
 
+type ScoreTriplet = (Option<f64>, Option<f64>, Option<f64>);
+type ScoreMap = std::collections::HashMap<String, ScoreTriplet>;
+
 /// Run the full hybrid retrieval pipeline.
 ///
 /// Combines structural traversal (if root_id provided), BM25 full-text search,
@@ -54,17 +57,13 @@ pub fn hybrid_retrieve(
     root_id: Option<&str>,
     config: &RetrievalConfig,
 ) -> Result<Vec<HybridResult>> {
-    let mut scores: std::collections::HashMap<String, (Option<f64>, Option<f64>, Option<f64>)> =
-        std::collections::HashMap::new();
+    let mut scores: ScoreMap = ScoreMap::new();
 
     // Step 1: Structural retrieval (if root provided)
     if let Some(root) = root_id {
         let structural = bfs_scored(graph, root, 2);
         for (node_id, score) in structural {
-            scores
-                .entry(node_id)
-                .or_insert((None, None, None))
-                .0 = Some(score);
+            scores.entry(node_id).or_insert((None, None, None)).0 = Some(score);
         }
     }
 
@@ -73,8 +72,14 @@ pub fn hybrid_retrieve(
     if !fts_results.is_empty() {
         // Normalize BM25 scores to 0.0..1.0
         // FTS5 rank is negative (lower = better), so we invert
-        let min_score = fts_results.iter().map(|r| r.score).fold(f64::INFINITY, f64::min);
-        let max_score = fts_results.iter().map(|r| r.score).fold(f64::NEG_INFINITY, f64::max);
+        let min_score = fts_results
+            .iter()
+            .map(|r| r.score)
+            .fold(f64::INFINITY, f64::min);
+        let max_score = fts_results
+            .iter()
+            .map(|r| r.score)
+            .fold(f64::NEG_INFINITY, f64::max);
         let range = max_score - min_score;
 
         for result in &fts_results {
@@ -117,7 +122,11 @@ pub fn hybrid_retrieve(
     } else {
         config.bm25_weight + config.vector_weight / 2.0
     };
-    let effective_vector = if has_vector { config.vector_weight } else { 0.0 };
+    let effective_vector = if has_vector {
+        config.vector_weight
+    } else {
+        0.0
+    };
 
     let now = Utc::now();
 
@@ -130,18 +139,20 @@ pub fn hybrid_retrieve(
 
             // Recency boost
             if let Ok(Some(updated_str)) = index.get_updated_at(&node_id)
-                && let Ok(updated) = chrono::DateTime::parse_from_rfc3339(&updated_str) {
-                    let days_ago = (now - updated.to_utc()).num_days();
-                    if days_ago <= config.recency_boost_days {
-                        combined += config.recency_boost_value;
-                    }
+                && let Ok(updated) = chrono::DateTime::parse_from_rfc3339(&updated_str)
+            {
+                let days_ago = (now - updated.to_utc()).num_days();
+                if days_ago <= config.recency_boost_days {
+                    combined += config.recency_boost_value;
                 }
+            }
 
             // Type priority boost: decisions and constraints get +0.05
             if let Ok(Some(node_type)) = index.get_node_type(&node_id)
-                && (node_type == "decision" || node_type == "constraint") {
-                    combined += 0.05;
-                }
+                && (node_type == "decision" || node_type == "constraint")
+            {
+                combined += 0.05;
+            }
 
             HybridResult {
                 node_id,
@@ -154,7 +165,11 @@ pub fn hybrid_retrieve(
         .collect();
 
     // Step 5: Sort by combined score descending
-    results.sort_by(|a, b| b.combined_score.partial_cmp(&a.combined_score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.combined_score
+            .partial_cmp(&a.combined_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Step 6: Budget enforcement
     results = apply_budget(results, index, config.token_budget)?;
@@ -193,11 +208,11 @@ fn estimate_tokens(index: &Index, node_id: &str) -> Result<usize> {
 impl Index {
     /// Get the title of a node from the index (for token estimation).
     pub fn get_title_text(&self, node_id: &str) -> Result<Option<String>> {
-        let result = self.conn.query_row(
-            "SELECT title FROM nodes WHERE id = ?1",
-            [node_id],
-            |row| row.get(0),
-        );
+        let result =
+            self.conn
+                .query_row("SELECT title FROM nodes WHERE id = ?1", [node_id], |row| {
+                    row.get(0)
+                });
         match result {
             Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -209,10 +224,10 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use tempyr_core::graph::Graph;
     use tempyr_core::node::parse_node;
     use tempyr_core::schema::Schema;
-    use std::path::{Path, PathBuf};
 
     fn make_schema() -> Schema {
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -308,7 +323,10 @@ mod tests {
         let results = hybrid_retrieve(&index, &graph, "storage", None, &config).unwrap();
 
         // decision-storage should get a +0.05 type boost
-        let decision = results.iter().find(|r| r.node_id == "decision-storage").unwrap();
+        let decision = results
+            .iter()
+            .find(|r| r.node_id == "decision-storage")
+            .unwrap();
         assert!(decision.combined_score > 0.0);
     }
 
@@ -320,14 +338,8 @@ mod tests {
             ..RetrievalConfig::standard()
         };
 
-        let results = hybrid_retrieve(
-            &index,
-            &graph,
-            "replay storage ingestion",
-            None,
-            &config,
-        )
-        .unwrap();
+        let results =
+            hybrid_retrieve(&index, &graph, "replay storage ingestion", None, &config).unwrap();
 
         // With a budget of 10 tokens, at most 1-2 nodes should fit
         assert!(results.len() <= 2);

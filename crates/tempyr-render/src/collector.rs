@@ -114,9 +114,10 @@ fn collect_traverse_section(
 
         // Filter by target type if specified
         if let Some(tt) = target_type
-            && target_node.node_type() != tt {
-                continue;
-            }
+            && target_node.node_type() != tt
+        {
+            continue;
+        }
 
         // Filter by node visibility
         if !is_node_visible(target_node, temporal_filter) {
@@ -126,10 +127,11 @@ fn collect_traverse_section(
         // Apply status filter if specified
         if let Some(filter_map) = &section.filter
             && let Some(allowed_statuses) = filter_map.get("status")
-                && let Some(status) = target_node.status()
-                    && !allowed_statuses.contains(&status.to_string()) {
-                        continue;
-                    }
+            && let Some(status) = target_node.status()
+            && !allowed_statuses.contains(&status.to_string())
+        {
+            continue;
+        }
 
         let body = if include_body {
             Some(target_node.body.clone())
@@ -213,10 +215,7 @@ fn collect_sub_items(
 }
 
 /// Collect internal edges between items (e.g., blocked_by between tasks).
-fn collect_internal_edges(
-    node: &Node,
-    section: &SectionDef,
-) -> Vec<(String, String, String)> {
+fn collect_internal_edges(node: &Node, section: &SectionDef) -> Vec<(String, String, String)> {
     let Some(edge_types) = &section.internal_edge_types else {
         return Vec::new();
     };
@@ -245,8 +244,14 @@ fn collect_fields(node: &Node, section: &SectionDef) -> Vec<(String, String)> {
         let value = match field.as_str() {
             "status" => node.status().map(String::from),
             "owner" => node.frontmatter.owner.clone(),
-            "created" => node.frontmatter.created.map(|c| c.format("%Y-%m-%d").to_string()),
-            "updated" => node.frontmatter.updated.map(|u| u.format("%Y-%m-%d").to_string()),
+            "created" => node
+                .frontmatter
+                .created
+                .map(|c| c.format("%Y-%m-%d").to_string()),
+            "updated" => node
+                .frontmatter
+                .updated
+                .map(|u| u.format("%Y-%m-%d").to_string()),
             _ => None,
         };
         if let Some(v) = value {
@@ -285,11 +290,11 @@ pub fn extract_body_section(body: &str, section_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use tempyr_core::graph::Graph;
     use tempyr_core::node::parse_node;
     use tempyr_core::schema::Schema;
     use tempyr_core::temporal::TemporalFilter;
-    use std::path::{Path, PathBuf};
 
     fn make_schema() -> Schema {
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -368,8 +373,19 @@ A recording agent captures DOM snapshots.
         let data = collect_section(&graph, root, &section, &TemporalFilter::current());
         assert!(data.is_root_section);
         assert_eq!(data.items.len(), 1);
-        assert!(data.items[0].body.as_ref().unwrap().contains("Session Replay"));
-        assert!(data.items[0].fields.iter().any(|(k, v)| k == "status" && v == "draft"));
+        assert!(
+            data.items[0]
+                .body
+                .as_ref()
+                .unwrap()
+                .contains("Session Replay")
+        );
+        assert!(
+            data.items[0]
+                .fields
+                .iter()
+                .any(|(k, v)| k == "status" && v == "draft")
+        );
     }
 
     #[test]
@@ -444,7 +460,10 @@ A recording agent captures DOM snapshots.
             include_fields: None,
             filter: Some({
                 let mut m = std::collections::HashMap::new();
-                m.insert("status".to_string(), vec!["decided".to_string(), "discussing".to_string()]);
+                m.insert(
+                    "status".to_string(),
+                    vec!["decided".to_string(), "discussing".to_string()],
+                );
                 m
             }),
             sub_traverse: None,

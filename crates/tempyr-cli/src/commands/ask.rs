@@ -1,6 +1,6 @@
 use crate::config::ProjectContext;
 use tempyr_core::graph::Graph;
-use tempyr_index::hybrid::{hybrid_retrieve, RetrievalConfig};
+use tempyr_index::hybrid::{RetrievalConfig, hybrid_retrieve};
 use tempyr_index::indexer::Index;
 
 pub fn run(
@@ -9,11 +9,7 @@ pub fn run(
     root: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let index_path = ctx.index_path();
-    if !index_path.exists() {
-        anyhow::bail!("Index not found. Run `tempyr index rebuild` first.");
-    }
-
+    let index_path = ctx.current_index_path()?;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
     let index = Index::open(&index_path)?;
     let config = RetrievalConfig {
@@ -41,11 +37,14 @@ pub fn run(
                 }));
             }
         }
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "question": question,
-            "context_nodes": context_nodes,
-            "note": "Use the MCP server graph_ask tool for LLM-generated answers. This output provides the retrieved context."
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "question": question,
+                "context_nodes": context_nodes,
+                "note": "Use the MCP server graph_ask tool for LLM-generated answers. This output provides the retrieved context."
+            }))?
+        );
         return Ok(());
     }
 
@@ -55,7 +54,12 @@ pub fn run(
 
     for r in &results {
         if let Some(node) = graph.get_node(&r.node_id) {
-            println!("--- {} ({}) [score: {:.3}] ---", node.title(), node.node_type(), r.combined_score);
+            println!(
+                "--- {} ({}) [score: {:.3}] ---",
+                node.title(),
+                node.node_type(),
+                r.combined_score
+            );
             // Show first few lines of body
             let preview: String = node.body.lines().take(5).collect::<Vec<_>>().join("\n");
             println!("{preview}");
@@ -63,7 +67,9 @@ pub fn run(
         }
     }
 
-    println!("Note: For a synthesized answer, use the MCP server's graph_ask tool with Claude Code.");
+    println!(
+        "Note: For a synthesized answer, use the MCP server's graph_ask tool with Claude Code."
+    );
 
     Ok(())
 }

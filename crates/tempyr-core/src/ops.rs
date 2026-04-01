@@ -7,7 +7,7 @@ use crate::edge::EdgeEntry;
 use crate::id;
 use crate::node::{Node, NodeFrontmatter, parse_node, serialize_node};
 use crate::schema::Schema;
-use crate::{TempyrError, Result};
+use crate::{Result, TempyrError};
 
 /// Create a new node file on disk.
 pub fn create_node_file(
@@ -81,11 +81,7 @@ pub fn create_node_file_auto_id(
 ///
 /// `old_id` must be a hybrid ID. The suffix is extracted and appended to
 /// `new_slug` to form the new ID. All edge references are updated atomically.
-pub fn rename_node_slug(
-    graph_dir: &Path,
-    old_id: &str,
-    new_slug: &str,
-) -> Result<Vec<PathBuf>> {
+pub fn rename_node_slug(graph_dir: &Path, old_id: &str, new_slug: &str) -> Result<Vec<PathBuf>> {
     let parsed = id::parse_node_id(old_id).ok_or_else(|| {
         TempyrError::Node(format!(
             "Cannot slug-rename a non-hybrid ID: '{old_id}'. Use full rename instead."
@@ -147,9 +143,7 @@ pub fn resolve_node_id(graph_dir: &Path, query: &str) -> Result<String> {
         }
     }
 
-    Err(TempyrError::NotFound(format!(
-        "Node not found: '{query}'"
-    )))
+    Err(TempyrError::NotFound(format!("Node not found: '{query}'")))
 }
 
 /// Add an edge between two nodes, writing both files (bidirectional).
@@ -160,9 +154,9 @@ pub fn add_edge(
     edge_type: &str,
     schema: &Schema,
 ) -> Result<()> {
-    let reverse_type = schema.reverse_edge_type(edge_type).ok_or_else(|| {
-        TempyrError::Edge(format!("Unknown edge type: '{edge_type}'"))
-    })?;
+    let reverse_type = schema
+        .reverse_edge_type(edge_type)
+        .ok_or_else(|| TempyrError::Edge(format!("Unknown edge type: '{edge_type}'")))?;
 
     let source_path = find_node_file(graph_dir, source_id)?;
     let target_path = find_node_file(graph_dir, target_id)?;
@@ -221,9 +215,9 @@ pub fn remove_edge(
     edge_type: &str,
     schema: &Schema,
 ) -> Result<()> {
-    let reverse_type = schema.reverse_edge_type(edge_type).ok_or_else(|| {
-        TempyrError::Edge(format!("Unknown edge type: '{edge_type}'"))
-    })?;
+    let reverse_type = schema
+        .reverse_edge_type(edge_type)
+        .ok_or_else(|| TempyrError::Edge(format!("Unknown edge type: '{edge_type}'")))?;
 
     let source_path = find_node_file(graph_dir, source_id)?;
     let target_path = find_node_file(graph_dir, target_id)?;
@@ -264,7 +258,7 @@ pub fn remove_edge(
 
 /// Repair missing reverse edges across the entire graph.
 ///
-/// For every edge A→B (type X), checks that B has the reverse edge B→A (reverse(X)).
+/// For every edge A->B (type X), checks that B has the reverse edge B->A (reverse(X)).
 /// Missing reverses are added and the affected files are written.
 /// Returns the list of (node_id, added_edge) pairs.
 pub fn repair_reverse_edges(
@@ -287,9 +281,10 @@ pub fn repair_reverse_edges(
                 continue; // unknown edge type, skip
             };
 
-            let has_reverse = target_node.edges().iter().any(|e| {
-                e.target == node.id() && e.edge_type == reverse_type
-            });
+            let has_reverse = target_node
+                .edges()
+                .iter()
+                .any(|e| e.target == node.id() && e.edge_type == reverse_type);
 
             if !has_reverse {
                 repairs.push((
@@ -312,9 +307,11 @@ pub fn repair_reverse_edges(
         let mut target_node = parse_node(&content, target_path.clone())?;
 
         // Skip if already present (may have been added by a prior repair in this batch)
-        let already_has = target_node.frontmatter.edges.iter().any(|e| {
-            e.target == *source_id && e.edge_type == *reverse_type
-        });
+        let already_has = target_node
+            .frontmatter
+            .edges
+            .iter()
+            .any(|e| e.target == *source_id && e.edge_type == *reverse_type);
         if already_has {
             continue;
         }
@@ -333,11 +330,7 @@ pub fn repair_reverse_edges(
 }
 
 /// Rename a node, updating its file and all references across the graph.
-pub fn rename_node(
-    graph_dir: &Path,
-    old_id: &str,
-    new_id: &str,
-) -> Result<Vec<PathBuf>> {
+pub fn rename_node(graph_dir: &Path, old_id: &str, new_id: &str) -> Result<Vec<PathBuf>> {
     let old_path = find_node_file(graph_dir, old_id)?;
     let mut modified_files = Vec::new();
 
@@ -459,7 +452,7 @@ pub fn update_node(
 }
 
 /// Sort edges alphabetically by target (per spec: minimizes merge conflicts).
-fn sort_edges(edges: &mut Vec<EdgeEntry>) {
+fn sort_edges(edges: &mut [EdgeEntry]) {
     edges.sort_by(|a, b| a.target.cmp(&b.target));
 }
 
@@ -544,8 +537,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let graph_dir = tmp.path().join("graph");
         for dir in &[
-            "epics", "features", "tasks", "decisions", "constraints", "personas",
-            "metrics", "risks", "questions", "components", "api_surfaces", "insights", "notes",
+            "epics",
+            "features",
+            "tasks",
+            "decisions",
+            "constraints",
+            "personas",
+            "metrics",
+            "risks",
+            "questions",
+            "components",
+            "api_surfaces",
+            "insights",
+            "notes",
         ] {
             std::fs::create_dir_all(graph_dir.join(dir)).unwrap();
         }
@@ -588,8 +592,25 @@ mod tests {
         let tmp = setup_graph_dir();
         let graph_dir = tmp.path().join("graph");
 
-        create_node_file(&graph_dir, "feat-a", "feature", Some("draft"), None, None, "# A\n").unwrap();
-        let result = create_node_file(&graph_dir, "feat-a", "feature", Some("draft"), None, None, "# A\n");
+        create_node_file(
+            &graph_dir,
+            "feat-a",
+            "feature",
+            Some("draft"),
+            None,
+            None,
+            "# A\n",
+        )
+        .unwrap();
+        let result = create_node_file(
+            &graph_dir,
+            "feat-a",
+            "feature",
+            Some("draft"),
+            None,
+            None,
+            "# A\n",
+        );
         assert!(result.is_err());
     }
 
@@ -599,20 +620,40 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
         let schema = make_schema();
 
-        write_node(&graph_dir, "features", "feat-a", "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feat A\n");
-        write_node(&graph_dir, "epics", "epic-a", "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic A\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-a",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feat A\n",
+        );
+        write_node(
+            &graph_dir,
+            "epics",
+            "epic-a",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic A\n",
+        );
 
         add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
 
         // Verify source has forward edge
         let source_content = std::fs::read_to_string(graph_dir.join("features/feat-a.md")).unwrap();
         let source = parse_node(&source_content, PathBuf::from("test")).unwrap();
-        assert!(source.edges().iter().any(|e| e.target == "epic-a" && e.edge_type == "child_of"));
+        assert!(
+            source
+                .edges()
+                .iter()
+                .any(|e| e.target == "epic-a" && e.edge_type == "child_of")
+        );
 
         // Verify target has reverse edge
         let target_content = std::fs::read_to_string(graph_dir.join("epics/epic-a.md")).unwrap();
         let target = parse_node(&target_content, PathBuf::from("test")).unwrap();
-        assert!(target.edges().iter().any(|e| e.target == "feat-a" && e.edge_type == "parent_of"));
+        assert!(
+            target
+                .edges()
+                .iter()
+                .any(|e| e.target == "feat-a" && e.edge_type == "parent_of")
+        );
     }
 
     #[test]
@@ -621,9 +662,24 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
         let schema = make_schema();
 
-        write_node(&graph_dir, "features", "feat-a", "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
-        write_node(&graph_dir, "epics", "epic-z", "---\nid: epic-z\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Z\n");
-        write_node(&graph_dir, "epics", "epic-a", "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# A\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-a",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        );
+        write_node(
+            &graph_dir,
+            "epics",
+            "epic-z",
+            "---\nid: epic-z\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Z\n",
+        );
+        write_node(
+            &graph_dir,
+            "epics",
+            "epic-a",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# A\n",
+        );
 
         add_edge(&graph_dir, "feat-a", "epic-z", "child_of", &schema).unwrap();
         add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
@@ -640,8 +696,18 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
         let schema = make_schema();
 
-        write_node(&graph_dir, "features", "feat-a", "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
-        write_node(&graph_dir, "epics", "epic-a", "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# A\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-a",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        );
+        write_node(
+            &graph_dir,
+            "epics",
+            "epic-a",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# A\n",
+        );
 
         add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
         let result = add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema);
@@ -654,8 +720,18 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
         let schema = make_schema();
 
-        write_node(&graph_dir, "features", "feat-a", "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
-        write_node(&graph_dir, "epics", "epic-a", "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# A\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-a",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        );
+        write_node(
+            &graph_dir,
+            "epics",
+            "epic-a",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# A\n",
+        );
 
         add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
         remove_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
@@ -674,7 +750,12 @@ mod tests {
         let tmp = setup_graph_dir();
         let graph_dir = tmp.path().join("graph");
 
-        write_node(&graph_dir, "features", "feat-old", "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Old\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-old",
+            "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Old\n",
+        );
 
         let modified = rename_node(&graph_dir, "feat-old", "feat-new").unwrap();
         assert!(!modified.is_empty());
@@ -695,8 +776,18 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
         let schema = make_schema();
 
-        write_node(&graph_dir, "features", "feat-a", "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
-        write_node(&graph_dir, "epics", "epic-a", "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-a",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        );
+        write_node(
+            &graph_dir,
+            "epics",
+            "epic-a",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n",
+        );
 
         add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
 
@@ -716,7 +807,12 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
         let schema = make_schema();
 
-        write_node(&graph_dir, "features", "feat-a", "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-a",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        );
 
         update_status(&graph_dir, "feat-a", "active", &schema).unwrap();
 
@@ -731,7 +827,12 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
         let schema = make_schema();
 
-        write_node(&graph_dir, "features", "feat-a", "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-a",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        );
 
         let result = update_status(&graph_dir, "feat-a", "banana", &schema);
         assert!(result.is_err());
@@ -743,9 +844,23 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
         let schema = make_schema();
 
-        write_node(&graph_dir, "features", "feat-a", "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n\nOld body.\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-a",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n\nOld body.\n",
+        );
 
-        update_node(&graph_dir, "feat-a", Some("# A\n\nNew body.\n"), Some("active"), None, None, &schema).unwrap();
+        update_node(
+            &graph_dir,
+            "feat-a",
+            Some("# A\n\nNew body.\n"),
+            Some("active"),
+            None,
+            None,
+            &schema,
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(graph_dir.join("features/feat-a.md")).unwrap();
         let node = parse_node(&content, PathBuf::from("test")).unwrap();
@@ -762,18 +877,41 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
         let schema = make_schema();
 
-        write_node(&graph_dir, "features", "feat-a", "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
-        write_node(&graph_dir, "epics", "epic-a", "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-a",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        );
+        write_node(
+            &graph_dir,
+            "epics",
+            "epic-a",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n",
+        );
 
         add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
 
-        // Update body only — edges must survive
-        update_node(&graph_dir, "feat-a", Some("# A\n\nUpdated.\n"), None, None, None, &schema).unwrap();
+        // Update body only - edges must survive
+        update_node(
+            &graph_dir,
+            "feat-a",
+            Some("# A\n\nUpdated.\n"),
+            None,
+            None,
+            None,
+            &schema,
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(graph_dir.join("features/feat-a.md")).unwrap();
         let node = parse_node(&content, PathBuf::from("test")).unwrap();
         assert!(node.body.contains("Updated."));
-        assert!(node.edges().iter().any(|e| e.target == "epic-a" && e.edge_type == "child_of"));
+        assert!(
+            node.edges()
+                .iter()
+                .any(|e| e.target == "epic-a" && e.edge_type == "child_of")
+        );
     }
 
     #[test]
@@ -782,9 +920,15 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
 
         let (generated_id, path) = create_node_file_auto_id(
-            &graph_dir, "session-replay", "feature", Some("draft"), Some("caleb"), None,
+            &graph_dir,
+            "session-replay",
+            "feature",
+            Some("draft"),
+            Some("caleb"),
+            None,
             "# Session Replay\n\nA feature.\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(path.exists());
         assert!(id::is_hybrid_id(&generated_id));
@@ -802,11 +946,25 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
 
         let (id1, _) = create_node_file_auto_id(
-            &graph_dir, "thing-one", "feature", Some("draft"), None, None, "# One\n",
-        ).unwrap();
+            &graph_dir,
+            "thing-one",
+            "feature",
+            Some("draft"),
+            None,
+            None,
+            "# One\n",
+        )
+        .unwrap();
         let (id2, _) = create_node_file_auto_id(
-            &graph_dir, "thing-two", "feature", Some("draft"), None, None, "# Two\n",
-        ).unwrap();
+            &graph_dir,
+            "thing-two",
+            "feature",
+            Some("draft"),
+            None,
+            None,
+            "# Two\n",
+        )
+        .unwrap();
 
         let s1 = id::parse_node_id(&id1).unwrap().suffix;
         let s2 = id::parse_node_id(&id2).unwrap().suffix;
@@ -819,15 +977,24 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
 
         let (generated_id, _) = create_node_file_auto_id(
-            &graph_dir, "old-name", "feature", Some("draft"), None, None, "# Old\n",
-        ).unwrap();
+            &graph_dir,
+            "old-name",
+            "feature",
+            Some("draft"),
+            None,
+            None,
+            "# Old\n",
+        )
+        .unwrap();
 
         let suffix = id::parse_node_id(&generated_id).unwrap().suffix.clone();
         let modified = rename_node_slug(&graph_dir, &generated_id, "new-name").unwrap();
         assert!(!modified.is_empty());
 
         let expected_new_id = format!("new-name-{suffix}");
-        let new_path = graph_dir.join("features").join(format!("{expected_new_id}.md"));
+        let new_path = graph_dir
+            .join("features")
+            .join(format!("{expected_new_id}.md"));
         assert!(new_path.exists());
 
         let content = std::fs::read_to_string(&new_path).unwrap();
@@ -840,8 +1007,12 @@ mod tests {
         let tmp = setup_graph_dir();
         let graph_dir = tmp.path().join("graph");
 
-        write_node(&graph_dir, "features", "feat-old",
-            "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Old\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-old",
+            "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Old\n",
+        );
 
         let result = rename_node_slug(&graph_dir, "feat-old", "new-name");
         assert!(result.is_err());
@@ -853,8 +1024,15 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
 
         let (generated_id, _) = create_node_file_auto_id(
-            &graph_dir, "my-feature", "feature", Some("draft"), None, None, "# F\n",
-        ).unwrap();
+            &graph_dir,
+            "my-feature",
+            "feature",
+            Some("draft"),
+            None,
+            None,
+            "# F\n",
+        )
+        .unwrap();
 
         let resolved = resolve_node_id(&graph_dir, &generated_id).unwrap();
         assert_eq!(resolved, generated_id);
@@ -866,8 +1044,15 @@ mod tests {
         let graph_dir = tmp.path().join("graph");
 
         let (generated_id, _) = create_node_file_auto_id(
-            &graph_dir, "my-feature", "feature", Some("draft"), None, None, "# F\n",
-        ).unwrap();
+            &graph_dir,
+            "my-feature",
+            "feature",
+            Some("draft"),
+            None,
+            None,
+            "# F\n",
+        )
+        .unwrap();
 
         let suffix = id::parse_node_id(&generated_id).unwrap().suffix;
         let resolved = resolve_node_id(&graph_dir, &suffix).unwrap();
@@ -879,8 +1064,12 @@ mod tests {
         let tmp = setup_graph_dir();
         let graph_dir = tmp.path().join("graph");
 
-        write_node(&graph_dir, "features", "feat-legacy",
-            "---\nid: feat-legacy\ntype: feature\nstatus: draft\n---\n# Legacy\n");
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-legacy",
+            "---\nid: feat-legacy\ntype: feature\nstatus: draft\n---\n# Legacy\n",
+        );
 
         let resolved = resolve_node_id(&graph_dir, "feat-legacy").unwrap();
         assert_eq!(resolved, "feat-legacy");

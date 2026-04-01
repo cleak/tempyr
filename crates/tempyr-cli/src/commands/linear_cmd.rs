@@ -25,13 +25,14 @@ pub fn run_setup(ctx: &ProjectContext, json_output: bool) -> anyhow::Result<()> 
             .execute(VIEWER_QUERY, serde_json::Value::Null)
             .await?;
         if !json_output {
-            println!("Authenticated as: {} ({})", viewer.viewer.name, viewer.viewer.email);
+            println!(
+                "Authenticated as: {} ({})",
+                viewer.viewer.name, viewer.viewer.email
+            );
         }
 
         // List teams
-        let teams_data: TeamsData = client
-            .execute(TEAMS_QUERY, serde_json::Value::Null)
-            .await?;
+        let teams_data: TeamsData = client.execute(TEAMS_QUERY, serde_json::Value::Null).await?;
 
         let teams = &teams_data.teams.nodes;
         if teams.is_empty() {
@@ -84,13 +85,16 @@ pub fn run_setup(ctx: &ProjectContext, json_output: bool) -> anyhow::Result<()> 
         config.save(&ctx.tempyr_dir)?;
 
         if json_output {
-            println!("{}", serde_json::to_string_pretty(&json!({
-                "success": true,
-                "user": viewer.viewer.name,
-                "team": team.name,
-                "team_key": team.key,
-                "states": states_data.workflow_states.nodes.len(),
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "success": true,
+                    "user": viewer.viewer.name,
+                    "team": team.name,
+                    "team_key": team.key,
+                    "states": states_data.workflow_states.nodes.len(),
+                }))?
+            );
         } else {
             println!("\nLinear integration configured. Config saved to .tempyr/linear.json");
             println!("Run `tempyr linear push` to sync nodes to Linear.");
@@ -109,7 +113,10 @@ pub fn run_push(
     let client = LinearClient::from_env()?;
     let config = LinearConfig::load(&ctx.tempyr_dir)?;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
-    let index = Index::open(&ctx.tempyr_dir.join("index.db")).ok();
+    let index = ctx
+        .current_index_path()
+        .ok()
+        .and_then(|path| Index::open(&path).ok());
     let mut state = SyncState::load(&ctx.tempyr_dir)?;
     let status_mapper = build_status_mapper(&client, &config)?;
 
@@ -118,7 +125,7 @@ pub fn run_push(
     }
 
     let runtime = rt()?;
-    let result = runtime.block_on(async {
+    runtime.block_on(async {
         if let Some(id) = node_id {
             let node = graph
                 .get_node(id)
@@ -137,19 +144,25 @@ pub fn run_push(
             state.save(&ctx.tempyr_dir)?;
 
             if json_output {
-                println!("{}", serde_json::to_string_pretty(&json!({
-                    "pushed": [{
-                        "node_id": entry.node_id,
-                        "linear_id": entry.linear_id,
-                        "linear_identifier": entry.linear_identifier,
-                    }]
-                }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "pushed": [{
+                            "node_id": entry.node_id,
+                            "linear_id": entry.linear_id,
+                            "linear_identifier": entry.linear_identifier,
+                        }]
+                    }))?
+                );
             } else {
                 let action = match entry.action {
                     tempyr_linear::push::PushAction::Created => "Created",
                     tempyr_linear::push::PushAction::Updated => "Updated",
                 };
-                let ident = entry.linear_identifier.as_deref().unwrap_or(&entry.linear_id);
+                let ident = entry
+                    .linear_identifier
+                    .as_deref()
+                    .unwrap_or(&entry.linear_id);
                 println!("{action} {ident} <- {}", entry.node_id);
             }
             Ok(())
@@ -167,12 +180,15 @@ pub fn run_push(
             state.save(&ctx.tempyr_dir)?;
 
             if json_output {
-                println!("{}", serde_json::to_string_pretty(&json!({
-                    "created": result.created.len(),
-                    "updated": result.updated.len(),
-                    "skipped": result.skipped.len(),
-                    "errors": result.errors.len(),
-                }))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "created": result.created.len(),
+                        "updated": result.updated.len(),
+                        "skipped": result.skipped.len(),
+                        "errors": result.errors.len(),
+                    }))?
+                );
             } else {
                 for e in &result.created {
                     let ident = e.linear_identifier.as_deref().unwrap_or(&e.linear_id);
@@ -195,8 +211,7 @@ pub fn run_push(
             }
             Ok(())
         }
-    });
-    result
+    })
 }
 
 pub fn run_pull(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyhow::Result<()> {
@@ -207,14 +222,17 @@ pub fn run_pull(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
 
     if dry_run {
         if !json_output {
-            println!("Dry run: would poll Linear for changes since {:?}", state.last_sync_at);
+            println!(
+                "Dry run: would poll Linear for changes since {:?}",
+                state.last_sync_at
+            );
             println!("  {} tracked entries to check", state.entries.len());
         }
         return Ok(());
     }
 
     let runtime = rt()?;
-    let result = runtime.block_on(async {
+    runtime.block_on(async {
         let result = tempyr_linear::pull::pull(
             &client,
             &ctx.graph_dir,
@@ -227,19 +245,25 @@ pub fn run_pull(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
         state.save(&ctx.tempyr_dir)?;
 
         if json_output {
-            println!("{}", serde_json::to_string_pretty(&json!({
-                "created": result.created,
-                "updated": result.updated,
-                "status_changed": result.status_changed.len(),
-                "conflicts": result.conflicts.len(),
-                "errors": result.errors.len(),
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "created": result.created,
+                    "updated": result.updated,
+                    "status_changed": result.status_changed.len(),
+                    "conflicts": result.conflicts.len(),
+                    "errors": result.errors.len(),
+                }))?
+            );
         } else {
             for id in &result.created {
                 println!("  + Created node: {id}");
             }
             for sc in &result.status_changed {
-                println!("  ~ {} status: {} -> {}", sc.node_id, sc.old_status, sc.new_status);
+                println!(
+                    "  ~ {} status: {} -> {}",
+                    sc.node_id, sc.old_status, sc.new_status
+                );
             }
             for c in &result.conflicts {
                 eprintln!("  ! Conflict: {} ({})", c.node_id, c.reason);
@@ -259,15 +283,17 @@ pub fn run_pull(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
             );
         }
         Ok(())
-    });
-    result
+    })
 }
 
 pub fn run_sync(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyhow::Result<()> {
     let client = LinearClient::from_env()?;
     let config = LinearConfig::load(&ctx.tempyr_dir)?;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
-    let index = Index::open(&ctx.tempyr_dir.join("index.db")).ok();
+    let index = ctx
+        .current_index_path()
+        .ok()
+        .and_then(|path| Index::open(&path).ok());
     let mut state = SyncState::load(&ctx.tempyr_dir)?;
     let status_mapper = build_status_mapper(&client, &config)?;
 
@@ -276,7 +302,7 @@ pub fn run_sync(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
     }
 
     let runtime = rt()?;
-    let result = runtime.block_on(async {
+    runtime.block_on(async {
         let result = sync::sync(
             &client,
             &ctx.graph_dir,
@@ -291,36 +317,49 @@ pub fn run_sync(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
         state.save(&ctx.tempyr_dir)?;
 
         if json_output {
-            println!("{}", serde_json::to_string_pretty(&json!({
-                "push": {
-                    "created": result.push.created.len(),
-                    "updated": result.push.updated.len(),
-                    "errors": result.push.errors.len(),
-                },
-                "pull": {
-                    "created": result.pull.created.len(),
-                    "updated": result.pull.updated.len(),
-                    "conflicts": result.pull.conflicts.len(),
-                    "errors": result.pull.errors.len(),
-                }
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "push": {
+                        "created": result.push.created.len(),
+                        "updated": result.push.updated.len(),
+                        "errors": result.push.errors.len(),
+                    },
+                    "pull": {
+                        "created": result.pull.created.len(),
+                        "updated": result.pull.updated.len(),
+                        "conflicts": result.pull.conflicts.len(),
+                        "errors": result.pull.errors.len(),
+                    }
+                }))?
+            );
         } else {
-            println!("Push: {} created, {} updated, {} errors",
-                result.push.created.len(), result.push.updated.len(), result.push.errors.len());
-            println!("Pull: {} created, {} updated, {} conflicts, {} errors",
-                result.pull.created.len(), result.pull.updated.len(),
-                result.pull.conflicts.len(), result.pull.errors.len());
+            println!(
+                "Push: {} created, {} updated, {} errors",
+                result.push.created.len(),
+                result.push.updated.len(),
+                result.push.errors.len()
+            );
+            println!(
+                "Pull: {} created, {} updated, {} conflicts, {} errors",
+                result.pull.created.len(),
+                result.pull.updated.len(),
+                result.pull.conflicts.len(),
+                result.pull.errors.len()
+            );
         }
         Ok(())
-    });
-    result
+    })
 }
 
 pub fn run_status(ctx: &ProjectContext, json_output: bool) -> anyhow::Result<()> {
     let config_result = LinearConfig::load(&ctx.tempyr_dir);
     if config_result.is_err() {
         if json_output {
-            println!("{}", serde_json::to_string_pretty(&json!({ "configured": false }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({ "configured": false }))?
+            );
         } else {
             println!("Linear integration not configured. Run `tempyr linear setup` first.");
         }
@@ -336,9 +375,18 @@ pub fn run_status(ctx: &ProjectContext, json_output: bool) -> anyhow::Result<()>
     } else {
         println!("Linear sync status:");
         println!("  Linked:    {}", report.linked_count);
-        println!("  Unlinked:  {} (syncable nodes not yet pushed)", report.unlinked_syncable_count);
-        println!("  Stale:     {} (local changes pending push)", report.stale_count);
-        println!("  Orphaned:  {} (linked but node deleted)", report.orphaned_count);
+        println!(
+            "  Unlinked:  {} (syncable nodes not yet pushed)",
+            report.unlinked_syncable_count
+        );
+        println!(
+            "  Stale:     {} (local changes pending push)",
+            report.stale_count
+        );
+        println!(
+            "  Orphaned:  {} (linked but node deleted)",
+            report.orphaned_count
+        );
         if let Some(last) = report.last_sync {
             println!("  Last sync: {}", last.format("%Y-%m-%d %H:%M:%S UTC"));
         } else {
@@ -401,7 +449,7 @@ pub fn run_unlink(ctx: &ProjectContext, node_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ─── Helpers ───────────────────────────────────────────
+// Helpers
 
 fn build_status_mapper(
     client: &LinearClient,
@@ -485,12 +533,15 @@ fn run_push_dry_run(
         }
 
         if json_output {
-            println!("{}", serde_json::to_string_pretty(&json!({
-                "dry_run": true,
-                "would_create": would_create,
-                "would_update": would_update,
-                "would_skip": would_skip,
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "dry_run": true,
+                    "would_create": would_create,
+                    "would_update": would_update,
+                    "would_skip": would_skip,
+                }))?
+            );
         } else {
             println!("\nDry run: {would_create} create, {would_update} update, {would_skip} skip");
         }
@@ -499,26 +550,30 @@ fn run_push_dry_run(
     Ok(())
 }
 
-fn run_sync_dry_run(
-    graph: &Graph,
-    state: &SyncState,
-    json_output: bool,
-) -> anyhow::Result<()> {
+fn run_sync_dry_run(graph: &Graph, state: &SyncState, json_output: bool) -> anyhow::Result<()> {
     let report = sync::status_summary(state, graph);
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "dry_run": true,
-            "would_push": report.stale_count + report.unlinked_syncable_count,
-            "tracked": report.linked_count,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "dry_run": true,
+                "would_push": report.stale_count + report.unlinked_syncable_count,
+                "tracked": report.linked_count,
+            }))?
+        );
     } else {
         println!("Dry run sync:");
-        println!("  Would push: {} nodes ({} new, {} updated)",
+        println!(
+            "  Would push: {} nodes ({} new, {} updated)",
             report.stale_count + report.unlinked_syncable_count,
             report.unlinked_syncable_count,
-            report.stale_count);
-        println!("  Would poll Linear for {} tracked entries", report.linked_count);
+            report.stale_count
+        );
+        println!(
+            "  Would poll Linear for {} tracked entries",
+            report.linked_count
+        );
     }
 
     Ok(())

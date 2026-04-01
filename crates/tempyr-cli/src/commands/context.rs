@@ -1,6 +1,6 @@
 use crate::config::ProjectContext;
 use tempyr_core::graph::Graph;
-use tempyr_index::hybrid::{hybrid_retrieve, RetrievalConfig};
+use tempyr_index::hybrid::{RetrievalConfig, hybrid_retrieve};
 use tempyr_index::indexer::Index;
 
 pub fn run(
@@ -10,11 +10,7 @@ pub fn run(
     budget: usize,
     json: bool,
 ) -> anyhow::Result<()> {
-    let index_path = ctx.index_path();
-    if !index_path.exists() {
-        anyhow::bail!("Index not found. Run `tempyr index rebuild` first.");
-    }
-
+    let index_path = ctx.current_index_path()?;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
     let index = Index::open(&index_path)?;
     let config = RetrievalConfig {
@@ -46,8 +42,14 @@ pub fn run(
     }
 
     for result in &results {
-        let structural = result.structural_score.map(|s| format!(" struct={s:.2}")).unwrap_or_default();
-        let bm25 = result.bm25_score.map(|s| format!(" bm25={s:.2}")).unwrap_or_default();
+        let structural = result
+            .structural_score
+            .map(|s| format!(" struct={s:.2}"))
+            .unwrap_or_default();
+        let bm25 = result
+            .bm25_score
+            .map(|s| format!(" bm25={s:.2}"))
+            .unwrap_or_default();
         println!(
             "{} (score={:.3}{structural}{bm25})",
             result.node_id, result.combined_score
