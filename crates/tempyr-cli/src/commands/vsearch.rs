@@ -17,9 +17,10 @@ pub fn run(
     let store = EmbeddingStore::open_or_create(&store_path)?;
 
     // Check if embeddings exist
-    let emb_count = store.count()?;
-    let use_legacy_index_embeddings = emb_count == 0 && index.embedding_count()? > 0;
-    if emb_count == 0 && !use_legacy_index_embeddings {
+    let store_embedding_count = store.count_embeddings_for_index(&index, node_type)?;
+    let legacy_embedding_count = index.embedding_count()?;
+    let use_legacy_index_embeddings = store_embedding_count == 0 && legacy_embedding_count > 0;
+    if store_embedding_count == 0 && !use_legacy_index_embeddings {
         anyhow::bail!(
             "No embeddings found. Run `tempyr index rebuild` with an embedding \
              API key set (VOYAGE_API_KEY or GEMINI_API_KEY)."

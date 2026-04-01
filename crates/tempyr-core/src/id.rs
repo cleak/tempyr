@@ -116,6 +116,32 @@ pub fn collect_existing_suffixes(graph_dir: &Path) -> HashSet<String> {
     suffixes
 }
 
+fn legacy_type_prefixes_for(node_type: &str) -> &'static [&'static str] {
+    match node_type {
+        "feature" => &["feature-", "feat-"],
+        "decision" => &["decision-", "dec-"],
+        "component" => &["component-", "comp-"],
+        "constraint" => &["constraint-"],
+        "api_surface" => &["api_surface-"],
+        "open_question" => &["open_question-"],
+        "persona" => &["persona-"],
+        "metric" => &["metric-"],
+        "insight" => &["insight-"],
+        "epic" => &["epic-"],
+        "note" => &["note-"],
+        "risk" => &["risk-"],
+        "task" => &["task-"],
+        _ => &[],
+    }
+}
+
+/// Check whether an ID still carries the legacy type prefix convention for its node type.
+pub fn has_legacy_type_prefix(id: &str, node_type: &str) -> bool {
+    legacy_type_prefixes_for(node_type)
+        .iter()
+        .any(|prefix| id.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty()))
+}
+
 /// Known type prefixes that should be stripped during migration.
 /// Ordered longest-first so `open_question-` matches before `open-`.
 const TYPE_PREFIXES: &[&str] = &[
@@ -216,6 +242,14 @@ mod tests {
         existing.insert(s1.clone());
         let s2 = generate_suffix(&existing);
         assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn test_has_legacy_type_prefix() {
+        assert!(has_legacy_type_prefix("feat-session-replay", "feature"));
+        assert!(has_legacy_type_prefix("decision-storage", "decision"));
+        assert!(!has_legacy_type_prefix("session-replay-a1b2c3", "feature"));
+        assert!(!has_legacy_type_prefix("storage-a1b2c3", "decision"));
     }
 
     #[test]

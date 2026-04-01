@@ -342,6 +342,12 @@ pub fn rename_node(graph_dir: &Path, old_id: &str, new_id: &str) -> Result<Vec<P
 
     // Write to new path
     let new_path = old_path.with_file_name(format!("{new_id}.md"));
+    if new_path.exists() && new_path != old_path {
+        return Err(TempyrError::Node(format!(
+            "Target node already exists at {}",
+            new_path.display()
+        )));
+    }
     atomic_write(&new_path, &serialize_node(&node)?)?;
 
     // Remove old file if path changed
@@ -799,6 +805,30 @@ mod tests {
         let epic = parse_node(&epic_content, PathBuf::from("test")).unwrap();
         assert!(epic.edges().iter().any(|e| e.target == "feat-renamed"));
         assert!(!epic.edges().iter().any(|e| e.target == "feat-a"));
+    }
+
+    #[test]
+    fn test_rename_node_rejects_existing_target() {
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-a",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        );
+        write_node(
+            &graph_dir,
+            "features",
+            "feat-b",
+            "---\nid: feat-b\ntype: feature\nstatus: draft\nowner: caleb\n---\n# B\n",
+        );
+
+        let err = rename_node(&graph_dir, "feat-a", "feat-b").unwrap_err();
+        assert!(err.to_string().contains("Target node already exists"));
+        assert!(graph_dir.join("features/feat-a.md").exists());
+        assert!(graph_dir.join("features/feat-b.md").exists());
     }
 
     #[test]

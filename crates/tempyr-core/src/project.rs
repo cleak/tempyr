@@ -5,6 +5,7 @@
 //! the real tempyr project root. This lets you run tempyr commands from a working
 //! project that stores its knowledge graph in a separate repository.
 
+use std::cell::RefCell;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -46,10 +47,12 @@ impl CacheLayout {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct IndexLayout {
     pub cache: CacheLayout,
-    pub snapshot_key: String,
+    snapshot_key: RefCell<Option<String>>,
+    graph_dir: PathBuf,
+    tempyr_dir: PathBuf,
     pub legacy_index_path: PathBuf,
 }
 
@@ -57,9 +60,25 @@ impl IndexLayout {
     pub fn resolve(root: &Path, graph_dir: &Path, tempyr_dir: &Path) -> io::Result<Self> {
         Ok(Self {
             cache: cache_layout(root, tempyr_dir),
-            snapshot_key: graph_snapshot_key(graph_dir, tempyr_dir)?,
+            snapshot_key: RefCell::new(None),
+            graph_dir: graph_dir.to_path_buf(),
+            tempyr_dir: tempyr_dir.to_path_buf(),
             legacy_index_path: tempyr_dir.join("index.db"),
         })
+    }
+
+    pub fn snapshot_key(&self) -> io::Result<String> {
+        if let Some(snapshot_key) = self.snapshot_key.borrow().clone() {
+            return Ok(snapshot_key);
+        }
+
+        let snapshot_key = graph_snapshot_key(&self.graph_dir, &self.tempyr_dir)?;
+        *self.snapshot_key.borrow_mut() = Some(snapshot_key.clone());
+        Ok(snapshot_key)
+    }
+
+    pub fn set_snapshot_key(&self, snapshot_key: impl Into<String>) {
+        *self.snapshot_key.borrow_mut() = Some(snapshot_key.into());
     }
 
     pub fn active_index_path(&self) -> PathBuf {
@@ -70,34 +89,33 @@ impl IndexLayout {
         self.cache.active_snapshot_path()
     }
 
-    pub fn shared_snapshot_index_path(&self) -> PathBuf {
-        self.cache.snapshot_index_path(&self.snapshot_key)
+    pub fn shared_snapshot_index_path(&self) -> io::Result<PathBuf> {
+        Ok(self.cache.snapshot_index_path(&self.snapshot_key()?))
     }
 
-    pub fn current_index_path(&self) -> Option<PathBuf> {
-        let shared = self.shared_snapshot_index_path();
+    pub fn current_index_path(&self) -> io::Result<Option<PathBuf>> {
+        let snapshot_key = self.snapshot_key()?;
+        let shared = self.cache.snapshot_index_path(&snapshot_key);
         if shared.exists() {
-            return Some(shared);
+            return Ok(Some(shared));
         }
 
         let active = self.active_index_path();
-        if active.exists()
-            && self.active_snapshot_key().as_deref() == Some(self.snapshot_key.as_str())
-        {
-            return Some(active);
+        if active.exists() && self.active_snapshot_key().as_deref() == Some(snapshot_key.as_str()) {
+            return Ok(Some(active));
         }
 
         if self.legacy_index_path.exists() {
-            return Some(self.legacy_index_path.clone());
+            return Ok(Some(self.legacy_index_path.clone()));
         }
 
-        None
+        Ok(None)
     }
 
     pub fn ensure_active_index_seeded(&self) -> io::Result<PathBuf> {
+        let snapshot_key = self.snapshot_key()?;
         let active = self.active_index_path();
-        let snapshot_matches =
-            self.active_snapshot_key().as_deref() == Some(self.snapshot_key.as_str());
+        let snapshot_matches = self.active_snapshot_key().as_deref() == Some(snapshot_key.as_str());
         let needs_seed = !active.exists() || !snapshot_matches;
 
         if !needs_seed {
@@ -112,7 +130,7 @@ impl IndexLayout {
             fs::create_dir_all(parent)?;
         }
 
-        let shared = self.shared_snapshot_index_path();
+        let shared = self.cache.snapshot_index_path(&snapshot_key);
         if shared.exists() {
             fs::copy(&shared, &active)?;
             self.write_active_snapshot_key()?;
@@ -128,12 +146,13 @@ impl IndexLayout {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, &self.snapshot_key)
+        let snapshot_key = self.snapshot_key()?;
+        fs::write(path, snapshot_key)
     }
 
     pub fn publish_active_snapshot(&self) -> io::Result<PathBuf> {
         let active = self.active_index_path();
-        let shared = self.shared_snapshot_index_path();
+        let shared = self.shared_snapshot_index_path()?;
         if shared.exists() {
             return Ok(shared);
         }
@@ -149,13 +168,16 @@ impl IndexLayout {
             .as_nanos();
         let tmp = shared.with_extension(format!("db.tmp.{}.{}", std::process::id(), nonce));
         fs::copy(&active, &tmp)?;
-        match fs::rename(&tmp, &shared) {
-            Ok(()) => Ok(shared),
-            Err(_) if shared.exists() => {
+        match fs::hard_link(&tmp, &shared) {
+            Ok(()) => {
                 let _ = fs::remove_file(&tmp);
                 Ok(shared)
             }
             Err(err) => {
+                if err.kind() == io::ErrorKind::AlreadyExists {
+                    let _ = fs::remove_file(&tmp);
+                    return Ok(shared);
+                }
                 let _ = fs::remove_file(&tmp);
                 Err(err)
             }
@@ -493,8 +515,9 @@ mod tests {
         fs::write(features_dir.join("a.md"), "# A\n").unwrap();
 
         let layout = IndexLayout::resolve(root, &graph_dir, &tempyr_dir).unwrap();
+        let snapshot_key = layout.snapshot_key().unwrap();
         let active = layout.active_index_path();
-        let shared = layout.shared_snapshot_index_path();
+        let shared = layout.shared_snapshot_index_path().unwrap();
 
         fs::create_dir_all(active.parent().unwrap()).unwrap();
         fs::create_dir_all(shared.parent().unwrap()).unwrap();
@@ -512,7 +535,34 @@ mod tests {
             fs::read_to_string(layout.active_snapshot_path())
                 .unwrap()
                 .trim(),
-            layout.snapshot_key
+            snapshot_key
         );
+    }
+
+    #[test]
+    fn publish_active_snapshot_does_not_overwrite_existing_shared_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let graph_dir = root.join("graph");
+        let features_dir = graph_dir.join("features");
+        let tempyr_dir = root.join(".tempyr");
+        fs::create_dir_all(&features_dir).unwrap();
+        fs::create_dir_all(&tempyr_dir).unwrap();
+        fs::write(tempyr_dir.join("schema.toml"), "name = 'x'\n").unwrap();
+        fs::write(features_dir.join("a.md"), "# A\n").unwrap();
+
+        let layout = IndexLayout::resolve(root, &graph_dir, &tempyr_dir).unwrap();
+        let active = layout.active_index_path();
+        let shared = layout.shared_snapshot_index_path().unwrap();
+
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        fs::write(&active, "active-index").unwrap();
+        fs::write(&shared, "existing-shared-index").unwrap();
+
+        let published = layout.publish_active_snapshot().unwrap();
+
+        assert_eq!(published, shared);
+        assert_eq!(fs::read_to_string(shared).unwrap(), "existing-shared-index");
     }
 }

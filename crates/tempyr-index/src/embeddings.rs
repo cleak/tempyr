@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::Path;
 #[cfg(feature = "local-embeddings")]
 use std::sync::Mutex;
+use std::time::Duration;
 
 use crate::IndexError;
 use crate::Result;
@@ -444,6 +444,7 @@ impl EmbeddingStore {
         }
 
         let conn = Connection::open(path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
         let store = Self { conn };
         store.create_tables()?;
         Ok(store)
@@ -503,6 +504,20 @@ impl EmbeddingStore {
         Ok(count)
     }
 
+    pub fn count_embeddings_for_index(
+        &self,
+        index: &Index,
+        node_type_filter: Option<&str>,
+    ) -> Result<usize> {
+        let mut count = 0;
+        for (_, content_hash) in index.node_ids_and_content_hashes(node_type_filter)? {
+            if self.has_embedding(&content_hash)? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     pub fn vector_search(
         &self,
         index: &Index,
@@ -510,28 +525,12 @@ impl EmbeddingStore {
         max_results: usize,
         node_type_filter: Option<&str>,
     ) -> Result<Vec<VectorSearchResult>> {
-        let all_embeddings = self.load_all_embeddings()?;
-        let sql = if node_type_filter.is_some() {
-            "SELECT id, content_hash FROM nodes WHERE node_type = ?1"
-        } else {
-            "SELECT id, content_hash FROM nodes"
-        };
-
-        let mut stmt = index.conn.prepare(sql)?;
-        let rows: Vec<(String, String)> = if let Some(node_type) = node_type_filter {
-            stmt.query_map([node_type], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        } else {
-            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-
         let mut results = Vec::new();
-        for (node_id, content_hash) in rows {
-            if let Some(embedding) = all_embeddings.get(&content_hash) {
+        for (node_id, content_hash) in index.node_ids_and_content_hashes(node_type_filter)? {
+            if let Some(embedding) = self.get_embedding(&content_hash)? {
                 results.push(VectorSearchResult {
                     node_id,
-                    similarity: cosine_similarity(query_embedding, embedding),
+                    similarity: cosine_similarity(query_embedding, &embedding),
                 });
             }
         }
@@ -543,21 +542,6 @@ impl EmbeddingStore {
         });
         results.truncate(max_results);
         Ok(results)
-    }
-
-    fn load_all_embeddings(&self) -> Result<HashMap<String, Vec<f32>>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT content_hash, embedding FROM embeddings")?;
-        let mut out = HashMap::new();
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?;
-        for row in rows {
-            let (content_hash, blob) = row?;
-            out.insert(content_hash, blob_to_embedding(&blob));
-        }
-        Ok(out)
     }
 }
 
@@ -590,6 +574,13 @@ pub async fn embed_graph(
     // Batch embed
     let texts: Vec<String> = to_embed.iter().map(|(_, _, t)| t.clone()).collect();
     let embeddings = provider.embed(&texts, InputType::Document).await?;
+    if embeddings.len() != texts.len() {
+        return Err(IndexError::General(format!(
+            "Embedding provider returned {} vectors for {} texts",
+            embeddings.len(),
+            texts.len()
+        )));
+    }
 
     // Store in cache
     for ((_, hash, _), embedding) in to_embed.iter().zip(embeddings.iter()) {
@@ -617,5 +608,101 @@ impl std::fmt::Display for EmbedStats {
             "Embedded {} nodes ({} cached, {} dimensions)",
             self.embedded, self.skipped, self.dimensions
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    use tempyr_core::node::parse_node;
+    use tempyr_core::schema::Schema;
+
+    fn make_schema() -> Schema {
+        r#"
+[meta]
+version = "1"
+description = "test"
+
+[node_types.feature]
+description = "Feature"
+directory = "features"
+required_fields = []
+optional_fields = ["status", "owner"]
+allowed_statuses = ["draft"]
+allowed_edges = []
+
+[edge_types.depends_on]
+reverse = "dependency_of"
+"#
+        .parse()
+        .unwrap()
+    }
+
+    fn make_graph() -> Graph {
+        let mut graph = Graph::new(make_schema());
+        let node = parse_node(
+            "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Session Replay\n\nCapture sessions.\n",
+            PathBuf::from("graph/features/feat-replay.md"),
+        )
+        .unwrap();
+        graph.add_node(node);
+        graph
+    }
+
+    struct FixedProvider {
+        embeddings: Vec<Vec<f32>>,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for FixedProvider {
+        async fn embed(&self, _texts: &[String], _input_type: InputType) -> Result<Vec<Vec<f32>>> {
+            Ok(self.embeddings.clone())
+        }
+
+        fn dimensions(&self) -> usize {
+            self.embeddings.first().map_or(0, Vec::len)
+        }
+
+        fn name(&self) -> &str {
+            "fixed"
+        }
+    }
+
+    #[test]
+    fn embed_graph_rejects_mismatched_provider_output_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let graph = make_graph();
+        let provider = FixedProvider {
+            embeddings: Vec::new(),
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(embed_graph(&store, &graph, &provider))
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Embedding provider returned 0 vectors for 1 texts")
+        );
+    }
+
+    #[test]
+    fn count_embeddings_for_index_ignores_unrelated_cache_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let graph = make_graph();
+        let index = Index::create_in_memory().unwrap();
+        index.rebuild(&graph).unwrap();
+
+        let content_hash = graph.get_node("feat-replay").unwrap().content_hash.clone();
+        store.store_embedding("unrelated", &[0.0, 1.0]).unwrap();
+        store.store_embedding(&content_hash, &[1.0, 0.0]).unwrap();
+
+        assert_eq!(store.count().unwrap(), 2);
+        assert_eq!(store.count_embeddings_for_index(&index, None).unwrap(), 1);
     }
 }

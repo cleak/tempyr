@@ -17,7 +17,7 @@ pub fn run(
         ..RetrievalConfig::standard()
     };
 
-    let results = hybrid_retrieve(&index, &graph, question, root, &config)?;
+    let results = hybrid_retrieve(&index, &graph, question, root, &config, None)?;
 
     if results.is_empty() {
         println!("No relevant context found for: {question}");

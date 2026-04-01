@@ -195,15 +195,13 @@ impl Index {
             .conn
             .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))?;
 
-        let fts_entries: usize = self.conn.query_row(
-            "SELECT COUNT(*) FROM nodes_fts",
-            [],
-            |row| row.get(0),
-        )?;
+        let fts_entries: usize =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM nodes_fts", [], |row| row.get(0))?;
 
-        let mut stmt = self
-            .conn
-            .prepare("SELECT node_type, COUNT(*) FROM nodes GROUP BY node_type ORDER BY node_type")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT node_type, COUNT(*) FROM nodes GROUP BY node_type ORDER BY node_type",
+        )?;
         let nodes_by_type = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
@@ -231,6 +229,29 @@ impl Index {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// List node IDs and content hashes for vector-store backed operations.
+    pub fn node_ids_and_content_hashes(
+        &self,
+        node_type_filter: Option<&str>,
+    ) -> Result<Vec<(String, String)>> {
+        let sql = if node_type_filter.is_some() {
+            "SELECT id, content_hash FROM nodes WHERE node_type = ?1"
+        } else {
+            "SELECT id, content_hash FROM nodes"
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = if let Some(node_type) = node_type_filter {
+            stmt.query_map([node_type], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        Ok(rows)
     }
 
     /// Get the body text of a node from the index.
@@ -285,10 +306,10 @@ use serde_json as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use tempyr_core::graph::Graph;
     use tempyr_core::node::parse_node;
     use tempyr_core::schema::Schema;
-    use std::path::{Path, PathBuf};
 
     fn make_schema() -> Schema {
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))

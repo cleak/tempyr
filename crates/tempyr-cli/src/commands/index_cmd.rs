@@ -19,7 +19,7 @@ pub fn run_rebuild(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
     let stats = index.rebuild(&graph)?;
 
     // Try to generate embeddings
-    let embed_result = try_embed(&index, &graph, ctx);
+    let embed_result = try_embed(&graph, ctx);
     ctx.write_active_snapshot_key(&snapshot_key)?;
     ctx.publish_active_snapshot(&snapshot_key)?;
 
@@ -67,7 +67,7 @@ pub fn run_update(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
     let stats = index.incremental_update(&graph)?;
 
     // Try to generate embeddings for new/changed nodes
-    let embed_result = try_embed(&index, &graph, ctx);
+    let embed_result = try_embed(&graph, ctx);
     ctx.write_active_snapshot_key(&snapshot_key)?;
     ctx.publish_active_snapshot(&snapshot_key)?;
 
@@ -102,9 +102,19 @@ pub fn run_stats(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
     let config = load_embedding_config(ctx);
     let store_path =
         ctx.embedding_store_path(&config.provider, config.model.as_deref(), config.dimensions);
-    let emb_count = EmbeddingStore::open_or_create(&store_path)
-        .and_then(|s| s.count())
-        .unwrap_or_else(|_| index.embedding_count().unwrap_or(0));
+    let legacy_embedding_count = index.embedding_count().unwrap_or(0);
+    let (embedding_count, shared_embedding_count, shared_embedding_error) = if store_path.exists() {
+        match EmbeddingStore::open_or_create(&store_path) {
+            Ok(store) => (
+                store.count_embeddings_for_index(&index, None).ok(),
+                store.count().ok(),
+                None,
+            ),
+            Err(err) => (None, None, Some(err.to_string())),
+        }
+    } else {
+        (None, None, None)
+    };
 
     if json {
         println!(
@@ -113,7 +123,10 @@ pub fn run_stats(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
                 "node_count": stats.node_count,
                 "edge_count": stats.edge_count,
                 "fts_entries": stats.fts_entries,
-                "embedding_count": emb_count,
+                "embedding_count": embedding_count.unwrap_or(legacy_embedding_count),
+                "legacy_embedding_count": legacy_embedding_count,
+                "shared_embedding_count": shared_embedding_count,
+                "shared_embedding_error": shared_embedding_error,
                 "nodes_by_type": stats.nodes_by_type,
             }))?
         );
@@ -122,7 +135,19 @@ pub fn run_stats(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
         println!("  Nodes: {}", stats.node_count);
         println!("  Edges: {}", stats.edge_count);
         println!("  FTS entries: {}", stats.fts_entries);
-        println!("  Embeddings: {}", emb_count);
+        println!(
+            "  Embeddings (current snapshot): {}",
+            embedding_count.unwrap_or(legacy_embedding_count)
+        );
+        println!("  Legacy index embeddings: {legacy_embedding_count}");
+        match shared_embedding_count {
+            Some(count) => println!("  Shared embedding cache entries: {count}"),
+            None if shared_embedding_error.is_some() => println!(
+                "  Shared embedding cache entries: unavailable ({})",
+                shared_embedding_error.as_deref().unwrap_or("unknown error")
+            ),
+            None => println!("  Shared embedding cache entries: 0"),
+        }
         for (node_type, count) in &stats.nodes_by_type {
             println!("  {node_type}: {count}");
         }
@@ -132,11 +157,7 @@ pub fn run_stats(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
 }
 
 /// Try to embed graph nodes. Returns error (not fatal) if no API key is available.
-fn try_embed(
-    _index: &Index,
-    graph: &Graph,
-    ctx: &ProjectContext,
-) -> anyhow::Result<embeddings::EmbedStats> {
+fn try_embed(graph: &Graph, ctx: &ProjectContext) -> anyhow::Result<embeddings::EmbedStats> {
     let config = load_embedding_config(ctx);
     let provider = embeddings::create_provider(&config)?;
     let store_path =

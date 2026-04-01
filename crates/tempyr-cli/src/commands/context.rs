@@ -18,7 +18,7 @@ pub fn run(
         ..RetrievalConfig::standard()
     };
 
-    let results = hybrid_retrieve(&index, &graph, query, root, &config)?;
+    let results = hybrid_retrieve(&index, &graph, query, root, &config, None)?;
 
     if json {
         let json_results: Vec<_> = results

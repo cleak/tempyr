@@ -4,6 +4,7 @@ use tempyr_core::graph::Graph;
 use tempyr_core::traverse::bfs_scored;
 
 use crate::Result;
+use crate::embeddings::EmbeddingStore;
 use crate::indexer::Index;
 
 /// Configuration for the hybrid retrieval pipeline.
@@ -56,6 +57,7 @@ pub fn hybrid_retrieve(
     query: &str,
     root_id: Option<&str>,
     config: &RetrievalConfig,
+    embedding_store: Option<&EmbeddingStore>,
 ) -> Result<Vec<HybridResult>> {
     let mut scores: ScoreMap = ScoreMap::new();
 
@@ -98,7 +100,11 @@ pub fn hybrid_retrieve(
 
     // Step 3: Vector similarity search (if query embedding provided)
     if let Some(ref query_emb) = config.query_embedding {
-        let vec_results = index.vector_search(query_emb, 30, None)?;
+        let vec_results = if let Some(store) = embedding_store {
+            store.vector_search(index, query_emb, 30, None)?
+        } else {
+            index.vector_search(query_emb, 30, None)?
+        };
         for result in &vec_results {
             // Similarity is already 0.0..1.0 (cosine similarity)
             let normalized = result.similarity.max(0.0);
@@ -224,6 +230,7 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embeddings::EmbeddingStore;
     use std::path::{Path, PathBuf};
     use tempyr_core::graph::Graph;
     use tempyr_core::node::parse_node;
@@ -261,7 +268,8 @@ mod tests {
         let (graph, index) = build_graph_and_index();
         let config = RetrievalConfig::standard();
 
-        let results = hybrid_retrieve(&index, &graph, "replay sessions", None, &config).unwrap();
+        let results =
+            hybrid_retrieve(&index, &graph, "replay sessions", None, &config, None).unwrap();
         assert!(!results.is_empty());
         // All results should have bm25_score set, no structural
         for r in &results {
@@ -281,6 +289,7 @@ mod tests {
             "xyznonexistent",
             Some("feat-replay"),
             &config,
+            None,
         )
         .unwrap();
 
@@ -301,6 +310,7 @@ mod tests {
             "storage replay",
             Some("feat-replay"),
             &config,
+            None,
         )
         .unwrap();
 
@@ -320,7 +330,7 @@ mod tests {
         let (graph, index) = build_graph_and_index();
         let config = RetrievalConfig::standard();
 
-        let results = hybrid_retrieve(&index, &graph, "storage", None, &config).unwrap();
+        let results = hybrid_retrieve(&index, &graph, "storage", None, &config, None).unwrap();
 
         // decision-storage should get a +0.05 type boost
         let decision = results
@@ -338,10 +348,41 @@ mod tests {
             ..RetrievalConfig::standard()
         };
 
-        let results =
-            hybrid_retrieve(&index, &graph, "replay storage ingestion", None, &config).unwrap();
+        let results = hybrid_retrieve(
+            &index,
+            &graph,
+            "replay storage ingestion",
+            None,
+            &config,
+            None,
+        )
+        .unwrap();
 
         // With a budget of 10 tokens, at most 1-2 nodes should fit
         assert!(results.len() <= 2);
+    }
+
+    #[test]
+    fn test_hybrid_uses_shared_embedding_store_when_query_embedding_is_present() {
+        let (graph, index) = build_graph_and_index();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+
+        let replay_hash = index.get_content_hash("feat-replay").unwrap().unwrap();
+        let decision_hash = index.get_content_hash("decision-storage").unwrap().unwrap();
+        store.store_embedding(&replay_hash, &[1.0, 0.0]).unwrap();
+        store.store_embedding(&decision_hash, &[0.0, 1.0]).unwrap();
+
+        let config = RetrievalConfig {
+            query_embedding: Some(vec![1.0, 0.0]),
+            ..RetrievalConfig::standard()
+        };
+
+        let results = hybrid_retrieve(&index, &graph, "zzz", None, &config, Some(&store)).unwrap();
+
+        assert!(!results.is_empty());
+        let replay = results.iter().find(|r| r.node_id == "feat-replay").unwrap();
+        assert!(replay.vector_score.is_some());
+        assert!(replay.vector_score.unwrap() > 0.0);
     }
 }

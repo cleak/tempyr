@@ -211,8 +211,10 @@ fn add_suffix(graph_dir: &Path, tempyr_dir: &Path, dry_run: bool) -> anyhow::Res
         // Skip nodes that already have a hybrid ID with a known suffix.
         // is_hybrid_id alone isn't enough — words like "system" pass
         // Crockford validation. Cross-check against suffixes we've seen.
-        if let Some(parsed) = id::parse_node_id(&old_id)
-            && existing_suffixes.contains(&parsed.suffix)
+        // The prefix check avoids self-confirming false positives from legacy IDs like
+        // `feat-system`, where the trailing segment happens to be six valid Crockford chars.
+        if id::parse_node_id(&old_id).is_some()
+            && !id::has_legacy_type_prefix(&old_id, node.node_type())
         {
             continue;
         }
@@ -310,4 +312,59 @@ fn rename_edge_type(graph_dir: &Path, old_type: &str, new_type: &str) -> anyhow:
     println!("Renamed edge type '{old_type}' to '{new_type}' in {modified} file(s).");
     println!("Remember to update schema.toml to reflect this change.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn write_node(graph_dir: &Path, node_type_dir: &str, id: &str, node_type: &str) {
+        let dir = graph_dir.join(node_type_dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("{id}.md")),
+            format!("---\nid: {id}\ntype: {node_type}\nstatus: draft\nowner: caleb\n---\n# {id}\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn add_suffix_migrates_legacy_id_that_looks_hybrid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph_dir = tmp.path().join("graph");
+        let tempyr_dir = tmp.path().join(".tempyr");
+        fs::create_dir_all(&tempyr_dir).unwrap();
+
+        write_node(&graph_dir, "features", "feat-system", "feature");
+
+        add_suffix(&graph_dir, &tempyr_dir, false).unwrap();
+
+        assert!(!graph_dir.join("features/feat-system.md").exists());
+        let entries = fs::read_dir(graph_dir.join("features"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].starts_with("system-"));
+    }
+
+    #[test]
+    fn add_suffix_skips_existing_hybrid_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph_dir = tmp.path().join("graph");
+        let tempyr_dir = tmp.path().join(".tempyr");
+        fs::create_dir_all(&tempyr_dir).unwrap();
+
+        write_node(&graph_dir, "features", "session-replay-a1b2c3", "feature");
+
+        add_suffix(&graph_dir, &tempyr_dir, false).unwrap();
+
+        assert!(graph_dir.join("features/session-replay-a1b2c3.md").exists());
+        let entries = fs::read_dir(graph_dir.join("features"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec!["session-replay-a1b2c3.md".to_string()]);
+    }
 }

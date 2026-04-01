@@ -60,7 +60,7 @@ impl ProjectContext {
 
     /// Resolve the best available index path for the current graph snapshot.
     pub fn current_index_path(&self) -> anyhow::Result<PathBuf> {
-        self.index_layout()?.current_index_path().ok_or_else(|| {
+        self.index_layout()?.current_index_path()?.ok_or_else(|| {
             anyhow::anyhow!(
                 "Index not found for current graph snapshot. Run `tempyr index rebuild` first."
             )
@@ -71,20 +71,21 @@ impl ProjectContext {
     /// when possible.
     pub fn ensure_active_index_seeded(&self) -> anyhow::Result<(String, PathBuf)> {
         let layout = self.index_layout()?;
+        let snapshot_key = layout.snapshot_key()?;
         let active = layout.ensure_active_index_seeded()?;
-        Ok((layout.snapshot_key, active))
+        Ok((snapshot_key, active))
     }
 
     pub fn write_active_snapshot_key(&self, snapshot_key: &str) -> anyhow::Result<()> {
-        let mut layout = self.index_layout()?;
-        layout.snapshot_key = snapshot_key.to_string();
+        let layout = self.index_layout()?;
+        layout.set_snapshot_key(snapshot_key);
         layout.write_active_snapshot_key()?;
         Ok(())
     }
 
     pub fn publish_active_snapshot(&self, snapshot_key: &str) -> anyhow::Result<PathBuf> {
-        let mut layout = self.index_layout()?;
-        layout.snapshot_key = snapshot_key.to_string();
+        let layout = self.index_layout()?;
+        layout.set_snapshot_key(snapshot_key);
         Ok(layout.publish_active_snapshot()?)
     }
 

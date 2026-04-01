@@ -406,6 +406,7 @@ impl TempyrServer {
         let (graph_dir, gf_dir, _) = find_project()?;
         let index_path = index_layout(&graph_dir, &gf_dir)?
             .current_index_path()
+            .map_err(|e| e.to_string())?
             .ok_or_else(|| {
                 "Index not found for current graph snapshot. Run `tempyr index rebuild` first."
                     .to_string()
@@ -446,6 +447,7 @@ impl TempyrServer {
         let (graph_dir, gf_dir, _) = find_project()?;
         let index_path = index_layout(&graph_dir, &gf_dir)?
             .current_index_path()
+            .map_err(|e| e.to_string())?
             .ok_or_else(|| {
                 "Index not found for current graph snapshot. Run `tempyr index rebuild` first."
                     .to_string()
@@ -495,6 +497,7 @@ impl TempyrServer {
         let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
         let index_path = index_layout(&graph_dir, &gf_dir)?
             .current_index_path()
+            .map_err(|e| e.to_string())?
             .ok_or_else(|| {
                 "Index not found for current graph snapshot. Run `tempyr index rebuild` first."
                     .to_string()
@@ -505,8 +508,15 @@ impl TempyrServer {
             token_budget: budget,
             ..RetrievalConfig::standard()
         };
-        let results = hybrid_retrieve(&index, &graph, &p.query, resolved_root.as_deref(), &config)
-            .map_err(|e| e.to_string())?;
+        let results = hybrid_retrieve(
+            &index,
+            &graph,
+            &p.query,
+            resolved_root.as_deref(),
+            &config,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
 
         let mut output = String::new();
         for r in &results {
@@ -755,7 +765,7 @@ impl TempyrServer {
         let mut existing_ids = Vec::new();
         let mut context_rich = Vec::new();
         if let Ok(layout) = index_layout(&graph_dir, &gf_dir)
-            && let Some(index_path) = layout.current_index_path()
+            && let Ok(Some(index_path)) = layout.current_index_path()
             && let Ok(index) = Index::open(&index_path)
             && let Ok(results) = index.search_fts_filtered(&p.brain_dump, None, 20)
         {
@@ -905,7 +915,9 @@ impl TempyrServer {
                 layout
                     .write_active_snapshot_key()
                     .map_err(|e| e.to_string())?;
-                let _ = layout.publish_active_snapshot();
+                layout
+                    .publish_active_snapshot()
+                    .map_err(|e| e.to_string())?;
                 Ok(())
             })()
         {
@@ -1108,7 +1120,7 @@ impl TempyrServer {
             Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
         let index = index_layout(&graph_dir, &gf_dir)
             .ok()
-            .and_then(|layout| layout.current_index_path())
+            .and_then(|layout| layout.current_index_path().ok().flatten())
             .and_then(|path| Index::open(&path).ok());
         let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
         let status_mapper = build_status_mapper_from_config(&config);
@@ -1261,7 +1273,7 @@ impl TempyrServer {
             Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
         let index = index_layout(&graph_dir, &gf_dir)
             .ok()
-            .and_then(|layout| layout.current_index_path())
+            .and_then(|layout| layout.current_index_path().ok().flatten())
             .and_then(|path| Index::open(&path).ok());
         let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
         let status_mapper = build_status_mapper_from_config(&config);
