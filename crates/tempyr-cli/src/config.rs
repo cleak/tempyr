@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::path::{Path, PathBuf};
 
 use tempyr_core::project;
@@ -61,23 +62,38 @@ impl ProjectContext {
             .join(format!("{}.db", &digest[..16]))
     }
 
-    pub fn embedding_config(&self) -> EmbeddingConfig {
-        let mut config = EmbeddingConfig::default();
+    pub fn embedding_config(&self) -> anyhow::Result<EmbeddingConfig> {
         let config_path = self.tempyr_dir.join("config.toml");
+        if !config_path.exists() {
+            return Ok(EmbeddingConfig::default());
+        }
 
-        if let Ok(content) = std::fs::read_to_string(&config_path)
-            && let Ok(table) = content.parse::<toml::Table>()
-            && let Some(emb) = table.get("embedding")
-            && let Ok(partial) = emb.clone().try_into::<EmbeddingConfigPartial>()
-        {
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+        let table = content
+            .parse::<toml::Table>()
+            .with_context(|| format!("Failed to parse {}", config_path.display()))?;
+
+        let mut config = EmbeddingConfig::default();
+        if let Some(emb) = table.get("embedding") {
+            let partial = emb
+                .clone()
+                .try_into::<EmbeddingConfigPartial>()
+                .with_context(|| {
+                    format!(
+                        "Failed to parse [embedding] section in {}",
+                        config_path.display()
+                    )
+                })?;
             config.apply_partial(partial);
         }
 
-        config
+        Ok(config)
     }
 
     pub fn resolved_embedding_config(&self) -> anyhow::Result<ResolvedEmbeddingConfig> {
-        Ok(resolve_embedding_config(&self.embedding_config())?)
+        let config = self.embedding_config()?;
+        Ok(resolve_embedding_config(&config)?)
     }
 
     /// Resolve the best available index path for the current graph snapshot.
@@ -117,5 +133,84 @@ impl ProjectContext {
             &self.graph_dir,
             &self.tempyr_dir,
         )?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_schema() -> Schema {
+        r#"
+[meta]
+version = "1"
+description = "test"
+
+[node_types.feature]
+description = "Feature"
+directory = "features"
+required_fields = []
+optional_fields = []
+allowed_statuses = ["draft"]
+allowed_edges = []
+
+[edge_types]
+"#
+        .parse()
+        .unwrap()
+    }
+
+    fn make_context(root: &Path) -> ProjectContext {
+        let tempyr_dir = root.join(".tempyr");
+        std::fs::create_dir_all(&tempyr_dir).unwrap();
+
+        ProjectContext {
+            root: root.to_path_buf(),
+            graph_dir: root.join("graph"),
+            tempyr_dir: tempyr_dir.clone(),
+            cache: project::cache_layout(root, &tempyr_dir),
+            schema: test_schema(),
+        }
+    }
+
+    #[test]
+    fn embedding_config_defaults_when_config_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_context(tmp.path());
+
+        let config = ctx.embedding_config().unwrap();
+
+        assert_eq!(config.provider, "voyage");
+        assert_eq!(config.model, None);
+        assert_eq!(config.dimensions, None);
+    }
+
+    #[test]
+    fn embedding_config_errors_on_invalid_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_context(tmp.path());
+        std::fs::write(ctx.tempyr_dir.join("config.toml"), "[embedding\n").unwrap();
+
+        let err = ctx.embedding_config().unwrap_err();
+
+        assert!(err.to_string().contains("Failed to parse"));
+    }
+
+    #[test]
+    fn embedding_config_errors_on_invalid_embedding_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_context(tmp.path());
+        std::fs::write(
+            ctx.tempyr_dir.join("config.toml"),
+            "[embedding]\ndimensions = \"oops\"\n",
+        )
+        .unwrap();
+
+        let err = ctx.embedding_config().unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Failed to parse [embedding] section")
+        );
     }
 }

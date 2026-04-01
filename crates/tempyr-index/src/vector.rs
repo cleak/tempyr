@@ -79,9 +79,11 @@ impl Index {
     ) -> Result<Vec<VectorSearchResult>> {
         let sql = if node_type_filter.is_some() {
             "SELECT ec.node_id, ec.embedding FROM embedding_cache ec \
-             JOIN nodes n ON n.id = ec.node_id WHERE n.node_type = ?1"
+             JOIN nodes n ON n.id = ec.node_id AND n.content_hash = ec.content_hash \
+             WHERE n.node_type = ?1"
         } else {
-            "SELECT ec.node_id, ec.embedding FROM embedding_cache ec"
+            "SELECT ec.node_id, ec.embedding FROM embedding_cache ec \
+             JOIN nodes n ON n.id = ec.node_id AND n.content_hash = ec.content_hash"
         };
 
         let mut stmt = self.conn.prepare(sql)?;
@@ -125,21 +127,22 @@ impl Index {
 
     /// Count cached embeddings, optionally limited to a node type.
     pub fn embedding_count_for_node_type(&self, node_type_filter: Option<&str>) -> Result<usize> {
-        let count = if let Some(node_type) = node_type_filter {
-            self.conn
-                .query_row(
-                    "SELECT COUNT(*) FROM embedding_cache ec \
-                     JOIN nodes n ON n.id = ec.node_id WHERE n.node_type = ?1",
-                    [node_type],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0)
+        if let Some(node_type) = node_type_filter {
+            Ok(self.conn.query_row(
+                "SELECT COUNT(*) FROM embedding_cache ec \
+                 JOIN nodes n ON n.id = ec.node_id AND n.content_hash = ec.content_hash \
+                 WHERE n.node_type = ?1",
+                [node_type],
+                |row| row.get(0),
+            )?)
         } else {
-            self.conn
-                .query_row("SELECT COUNT(*) FROM embedding_cache", [], |row| row.get(0))
-                .unwrap_or(0)
-        };
-        Ok(count)
+            Ok(self.conn.query_row(
+                "SELECT COUNT(*) FROM embedding_cache ec \
+                 JOIN nodes n ON n.id = ec.node_id AND n.content_hash = ec.content_hash",
+                [],
+                |row| row.get(0),
+            )?)
+        }
     }
 
     /// Remove embeddings for nodes no longer in the index.
@@ -364,6 +367,31 @@ mod tests {
         assert_eq!(
             index.embedding_count_for_node_type(Some("task")).unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn test_embedding_count_and_search_ignore_stale_hashes() {
+        let index = make_index();
+
+        index.conn.execute(
+            "INSERT INTO nodes (id, node_type, file_path, content_hash, body_text, title) VALUES ('f1', 'feature', 'f.md', 'current', '', '')",
+            [],
+        ).unwrap();
+        index.store_embedding("f1", "stale", &[1.0, 0.0]).unwrap();
+
+        assert_eq!(index.embedding_count().unwrap(), 0);
+        assert_eq!(
+            index
+                .embedding_count_for_node_type(Some("feature"))
+                .unwrap(),
+            0
+        );
+        assert!(
+            index
+                .vector_search(&[1.0, 0.0], 10, Some("feature"))
+                .unwrap()
+                .is_empty()
         );
     }
 

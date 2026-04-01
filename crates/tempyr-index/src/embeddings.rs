@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 #[cfg(feature = "local-embeddings")]
 use std::sync::Mutex;
@@ -529,6 +529,8 @@ pub struct EmbeddingStore {
 }
 
 impl EmbeddingStore {
+    const SQLITE_BATCH_SIZE: usize = 900;
+
     pub fn open_or_create(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -590,6 +592,35 @@ impl EmbeddingStore {
         }
     }
 
+    fn get_embeddings_batch(&self, content_hashes: &[String]) -> Result<HashMap<String, Vec<f32>>> {
+        let mut embeddings = HashMap::new();
+        if content_hashes.is_empty() {
+            return Ok(embeddings);
+        }
+
+        for chunk in content_hashes.chunks(Self::SQLITE_BATCH_SIZE) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT content_hash, embedding FROM embeddings WHERE content_hash IN ({placeholders})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                let content_hash: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((content_hash, blob))
+            })?;
+
+            for row in rows {
+                let (content_hash, blob) = row?;
+                embeddings.insert(content_hash, blob_to_embedding(&blob));
+            }
+        }
+
+        Ok(embeddings)
+    }
+
     pub fn count(&self) -> Result<usize> {
         let count: usize = self
             .conn
@@ -602,13 +633,19 @@ impl EmbeddingStore {
         index: &Index,
         node_type_filter: Option<&str>,
     ) -> Result<usize> {
-        let mut count = 0;
-        for (_, content_hash) in index.node_ids_and_content_hashes(node_type_filter)? {
-            if self.has_embedding(&content_hash)? {
-                count += 1;
-            }
-        }
-        Ok(count)
+        let nodes = index.node_ids_and_content_hashes(node_type_filter)?;
+        let unique_hashes = nodes
+            .iter()
+            .map(|(_, content_hash)| content_hash.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let embeddings = self.get_embeddings_batch(&unique_hashes)?;
+
+        Ok(nodes
+            .iter()
+            .filter(|(_, content_hash)| embeddings.contains_key(content_hash))
+            .count())
     }
 
     pub fn vector_search(
@@ -618,12 +655,21 @@ impl EmbeddingStore {
         max_results: usize,
         node_type_filter: Option<&str>,
     ) -> Result<Vec<VectorSearchResult>> {
+        let nodes = index.node_ids_and_content_hashes(node_type_filter)?;
+        let unique_hashes = nodes
+            .iter()
+            .map(|(_, content_hash)| content_hash.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let embeddings = self.get_embeddings_batch(&unique_hashes)?;
+
         let mut results = Vec::new();
-        for (node_id, content_hash) in index.node_ids_and_content_hashes(node_type_filter)? {
-            if let Some(embedding) = self.get_embedding(&content_hash)? {
+        for (node_id, content_hash) in nodes {
+            if let Some(embedding) = embeddings.get(&content_hash) {
                 results.push(VectorSearchResult {
                     node_id,
-                    similarity: cosine_similarity(query_embedding, &embedding),
+                    similarity: cosine_similarity(query_embedding, embedding),
                 });
             }
         }
@@ -860,5 +906,66 @@ reverse = "dependency_of"
 
         assert_eq!(stats.embedded, 1);
         assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn count_embeddings_for_index_counts_all_nodes_sharing_a_cached_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let index = Index::create_in_memory().unwrap();
+
+        index
+            .conn
+            .execute(
+                "INSERT INTO nodes (id, node_type, file_path, content_hash, body_text, title) VALUES ('feat-a', 'feature', 'a.md', 'shared', '', '')",
+                [],
+            )
+            .unwrap();
+        index
+            .conn
+            .execute(
+                "INSERT INTO nodes (id, node_type, file_path, content_hash, body_text, title) VALUES ('feat-b', 'feature', 'b.md', 'shared', '', '')",
+                [],
+            )
+            .unwrap();
+        store.store_embedding("shared", &[1.0, 0.0]).unwrap();
+
+        assert_eq!(store.count_embeddings_for_index(&index, None).unwrap(), 2);
+    }
+
+    #[test]
+    fn vector_search_returns_all_nodes_sharing_a_cached_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let index = Index::create_in_memory().unwrap();
+
+        index
+            .conn
+            .execute(
+                "INSERT INTO nodes (id, node_type, file_path, content_hash, body_text, title) VALUES ('feat-a', 'feature', 'a.md', 'shared', '', '')",
+                [],
+            )
+            .unwrap();
+        index
+            .conn
+            .execute(
+                "INSERT INTO nodes (id, node_type, file_path, content_hash, body_text, title) VALUES ('feat-b', 'feature', 'b.md', 'shared', '', '')",
+                [],
+            )
+            .unwrap();
+        store.store_embedding("shared", &[1.0, 0.0]).unwrap();
+
+        let results = store.vector_search(&index, &[1.0, 0.0], 10, None).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].similarity, 1.0);
+        assert_eq!(results[1].similarity, 1.0);
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.node_id.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["feat-a", "feat-b"])
+        );
     }
 }

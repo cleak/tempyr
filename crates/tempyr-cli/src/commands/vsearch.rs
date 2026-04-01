@@ -2,6 +2,13 @@ use crate::config::ProjectContext;
 use tempyr_index::embeddings::{self, EmbeddingStore, InputType};
 use tempyr_index::indexer::Index;
 
+fn should_use_legacy_embeddings(
+    store_embedding_count: usize,
+    legacy_embedding_count: usize,
+) -> bool {
+    legacy_embedding_count > 0 && legacy_embedding_count >= store_embedding_count
+}
+
 pub fn run(
     ctx: &ProjectContext,
     query: &str,
@@ -22,8 +29,9 @@ pub fn run(
     // Check if embeddings exist
     let store_embedding_count = store.count_embeddings_for_index(&index, node_type)?;
     let legacy_embedding_count = index.embedding_count_for_node_type(node_type)?;
-    let use_legacy_index_embeddings = store_embedding_count == 0 && legacy_embedding_count > 0;
-    if store_embedding_count == 0 && !use_legacy_index_embeddings {
+    let use_legacy_index_embeddings =
+        should_use_legacy_embeddings(store_embedding_count, legacy_embedding_count);
+    if store_embedding_count == 0 && legacy_embedding_count == 0 {
         anyhow::bail!(
             "No embeddings found. Run `tempyr index rebuild` with an embedding \
              API key set (VOYAGE_API_KEY or GEMINI_API_KEY)."
@@ -68,4 +76,24 @@ pub fn run(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_use_legacy_embeddings;
+
+    #[test]
+    fn prefers_legacy_when_shared_store_is_empty() {
+        assert!(should_use_legacy_embeddings(0, 3));
+    }
+
+    #[test]
+    fn prefers_legacy_when_coverage_is_equal() {
+        assert!(should_use_legacy_embeddings(2, 2));
+    }
+
+    #[test]
+    fn prefers_shared_store_when_it_has_more_coverage() {
+        assert!(!should_use_legacy_embeddings(3, 2));
+    }
 }
