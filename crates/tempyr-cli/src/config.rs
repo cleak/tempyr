@@ -213,4 +213,22 @@ allowed_edges = []
                 .contains("Failed to parse [embedding] section")
         );
     }
+
+    #[test]
+    fn embedding_config_errors_on_unknown_embedding_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_context(tmp.path());
+        std::fs::write(
+            ctx.tempyr_dir.join("config.toml"),
+            "[embedding]\nprovidr = \"voyage\"\n",
+        )
+        .unwrap();
+
+        let err = ctx.embedding_config().unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Failed to parse [embedding] section")
+        );
+    }
 }

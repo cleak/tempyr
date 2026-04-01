@@ -6,7 +6,7 @@ fn should_use_legacy_embeddings(
     store_embedding_count: usize,
     legacy_embedding_count: usize,
 ) -> bool {
-    legacy_embedding_count > 0 && legacy_embedding_count >= store_embedding_count
+    legacy_embedding_count > 0 && legacy_embedding_count > store_embedding_count
 }
 
 pub fn run(
@@ -88,8 +88,8 @@ mod tests {
     }
 
     #[test]
-    fn prefers_legacy_when_coverage_is_equal() {
-        assert!(should_use_legacy_embeddings(2, 2));
+    fn prefers_shared_store_when_coverage_is_equal() {
+        assert!(!should_use_legacy_embeddings(2, 2));
     }
 
     #[test]

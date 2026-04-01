@@ -402,6 +402,7 @@ impl Default for EmbeddingConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EmbeddingConfigPartial {
     pub provider: Option<String>,
     pub model: Option<String>,
