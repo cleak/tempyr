@@ -55,17 +55,20 @@ impl InterviewPhase {
 /// Returns the next phase if a transition should happen, None otherwise.
 pub fn check_phase_transition(session: &InterviewSession) -> Option<InterviewPhase> {
     let answers_in_phase = |phase: InterviewPhase| -> usize {
-        session.answered.iter().filter(|qa| qa.phase == phase).count()
+        session
+            .answered
+            .iter()
+            .filter(|qa| qa.phase == phase)
+            .count()
     };
 
     match session.phase {
         InterviewPhase::Discovery => {
             // Discovery → Product: root has a body (problem statement) and at least
             // one existing graph node is linked for context
-            let has_body = !session.root_node.body.trim().is_empty()
-                && session.root_node.body.len() > 20; // more than just a title
-            let has_context = !session.graph_context.is_empty()
-                || !session.answered.is_empty(); // at least one interaction
+            let has_body =
+                !session.root_node.body.trim().is_empty() && session.root_node.body.len() > 20; // more than just a title
+            let has_context = !session.graph_context.is_empty() || !session.answered.is_empty(); // at least one interaction
 
             // Fallback: if no existing context found after 2 turns, advance anyway
             // (the graph is probably empty / this is a new domain)
@@ -81,8 +84,8 @@ pub fn check_phase_transition(session: &InterviewSession) -> Option<InterviewPha
         InterviewPhase::Product => {
             // Product → Technical: at least one persona, one success metric, and a clear
             // problem statement exist
-            let has_persona = session.has_node_of_type("persona")
-                || session.has_edge_type_from_root("serves");
+            let has_persona =
+                session.has_node_of_type("persona") || session.has_edge_type_from_root("serves");
             let has_metric = session.has_node_of_type("metric")
                 || session.has_edge_type_from_root("measured_by");
             let has_problem = session.root_node.body.len() > 50; // substantive body
@@ -96,8 +99,8 @@ pub fn check_phase_transition(session: &InterviewSession) -> Option<InterviewPha
 
         InterviewPhase::Technical => {
             // Technical → Decomposition: at least one component or architecture decision
-            let has_component = session.has_node_of_type("component")
-                || session.has_edge_type_from_root("uses");
+            let has_component =
+                session.has_node_of_type("component") || session.has_edge_type_from_root("uses");
             let has_decision = session.has_node_of_type("decision")
                 || session.has_edge_type_from_root("depends_on");
 
@@ -164,23 +167,36 @@ pub fn progress_summary(session: &InterviewSession) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{InterviewSession, TentativeNode, TentativeEdge, EdgeSource};
+    use crate::session::{InterviewSession, TentativeNode};
     use std::collections::HashMap;
 
     #[test]
     fn test_phase_ordering() {
-        assert_eq!(InterviewPhase::Discovery.next(), Some(InterviewPhase::Product));
-        assert_eq!(InterviewPhase::Product.next(), Some(InterviewPhase::Technical));
-        assert_eq!(InterviewPhase::Technical.next(), Some(InterviewPhase::Decomposition));
-        assert_eq!(InterviewPhase::Decomposition.next(), Some(InterviewPhase::Review));
+        assert_eq!(
+            InterviewPhase::Discovery.next(),
+            Some(InterviewPhase::Product)
+        );
+        assert_eq!(
+            InterviewPhase::Product.next(),
+            Some(InterviewPhase::Technical)
+        );
+        assert_eq!(
+            InterviewPhase::Technical.next(),
+            Some(InterviewPhase::Decomposition)
+        );
+        assert_eq!(
+            InterviewPhase::Decomposition.next(),
+            Some(InterviewPhase::Review)
+        );
         assert_eq!(InterviewPhase::Review.next(), None);
     }
 
     #[test]
     fn test_discovery_to_product_transition() {
         let mut session = InterviewSession::new(
-            "feature", "feat-a",
-            "# Session Replay\n\n## Problem\n\nEngineers need to see what happened during sessions to debug funnel issues.\n"
+            "feature",
+            "feat-a",
+            "# Session Replay\n\n## Problem\n\nEngineers need to see what happened during sessions to debug funnel issues.\n",
         );
 
         // Not yet: no context
@@ -189,14 +205,18 @@ mod tests {
         // Add some context
         session.graph_context.push("epic-observability".to_string());
 
-        assert_eq!(check_phase_transition(&session), Some(InterviewPhase::Product));
+        assert_eq!(
+            check_phase_transition(&session),
+            Some(InterviewPhase::Product)
+        );
     }
 
     #[test]
     fn test_product_to_technical_transition() {
         let mut session = InterviewSession::new(
-            "feature", "feat-a",
-            "# Feature\n\n## Problem\n\nA real problem statement that is long enough to pass the threshold check.\n"
+            "feature",
+            "feat-a",
+            "# Feature\n\n## Problem\n\nA real problem statement that is long enough to pass the threshold check.\n",
         );
         session.phase = InterviewPhase::Product;
 
@@ -228,12 +248,16 @@ mod tests {
             source_qa: vec![],
         });
 
-        assert_eq!(check_phase_transition(&session), Some(InterviewPhase::Technical));
+        assert_eq!(
+            check_phase_transition(&session),
+            Some(InterviewPhase::Technical)
+        );
     }
 
     #[test]
     fn test_technical_to_decomposition_transition() {
-        let mut session = InterviewSession::new("feature", "feat-a", "# A\n\nLong enough body for checks.\n");
+        let mut session =
+            InterviewSession::new("feature", "feat-a", "# A\n\nLong enough body for checks.\n");
         session.phase = InterviewPhase::Technical;
 
         assert!(check_phase_transition(&session).is_none());
@@ -249,7 +273,10 @@ mod tests {
             source_qa: vec![],
         });
 
-        assert_eq!(check_phase_transition(&session), Some(InterviewPhase::Decomposition));
+        assert_eq!(
+            check_phase_transition(&session),
+            Some(InterviewPhase::Decomposition)
+        );
     }
 
     #[test]
@@ -270,14 +297,18 @@ mod tests {
             source_qa: vec![],
         });
 
-        assert_eq!(check_phase_transition(&session), Some(InterviewPhase::Review));
+        assert_eq!(
+            check_phase_transition(&session),
+            Some(InterviewPhase::Review)
+        );
     }
 
     #[test]
     fn test_try_advance_phase() {
         let mut session = InterviewSession::new(
-            "feature", "feat-a",
-            "# Feature\n\nA long enough problem statement for the body check.\n"
+            "feature",
+            "feat-a",
+            "# Feature\n\nA long enough problem statement for the body check.\n",
         );
         session.graph_context.push("existing-node".to_string());
 
@@ -302,25 +333,34 @@ mod tests {
     #[test]
     fn test_discovery_fallback_after_two_answers() {
         let mut session = InterviewSession::new(
-            "feature", "feat-a",
-            "# Feature\n\nA long enough problem statement for the body check.\n"
+            "feature",
+            "feat-a",
+            "# Feature\n\nA long enough problem statement for the body check.\n",
         );
         // No graph_context — simulates empty/new graph
         assert!(session.graph_context.is_empty());
 
         // Record 2 answers in Discovery phase (session starts in Discovery)
-        session.record_answer("What is the problem?", "Users can't debug sessions.", vec![]);
+        session.record_answer(
+            "What is the problem?",
+            "Users can't debug sessions.",
+            vec![],
+        );
         session.record_answer("Any prior art?", "Nothing in the graph yet.", vec![]);
 
         // Fallback should trigger: 2 answers + empty graph_context → advance to Product
-        assert_eq!(check_phase_transition(&session), Some(InterviewPhase::Product));
+        assert_eq!(
+            check_phase_transition(&session),
+            Some(InterviewPhase::Product)
+        );
     }
 
     #[test]
     fn test_technical_fallback_after_three_answers() {
         let mut session = InterviewSession::new(
-            "feature", "feat-a",
-            "# Feature\n\nA long enough problem statement for the body check.\n"
+            "feature",
+            "feat-a",
+            "# Feature\n\nA long enough problem statement for the body check.\n",
         );
         session.phase = InterviewPhase::Technical;
 
@@ -333,14 +373,18 @@ mod tests {
         session.record_answer("Performance needs?", "Sub-second queries.", vec![]);
 
         // Fallback should trigger: 3 answers in Technical → advance to Decomposition
-        assert_eq!(check_phase_transition(&session), Some(InterviewPhase::Decomposition));
+        assert_eq!(
+            check_phase_transition(&session),
+            Some(InterviewPhase::Decomposition)
+        );
     }
 
     #[test]
     fn test_decomposition_fallback_after_two_answers() {
         let mut session = InterviewSession::new(
-            "feature", "feat-a",
-            "# Feature\n\nA long enough problem statement for the body check.\n"
+            "feature",
+            "feat-a",
+            "# Feature\n\nA long enough problem statement for the body check.\n",
         );
         session.phase = InterviewPhase::Decomposition;
 
@@ -348,10 +392,17 @@ mod tests {
         assert!(check_phase_transition(&session).is_none());
 
         // Record 2 answers in the Decomposition phase
-        session.record_answer("What are the subtasks?", "Index rebuild and query engine.", vec![]);
+        session.record_answer(
+            "What are the subtasks?",
+            "Index rebuild and query engine.",
+            vec![],
+        );
         session.record_answer("Any dependencies?", "Query depends on index.", vec![]);
 
         // Fallback should trigger: 2 answers in Decomposition → advance to Review
-        assert_eq!(check_phase_transition(&session), Some(InterviewPhase::Review));
+        assert_eq!(
+            check_phase_transition(&session),
+            Some(InterviewPhase::Review)
+        );
     }
 }

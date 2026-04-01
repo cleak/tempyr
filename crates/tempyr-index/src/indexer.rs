@@ -195,15 +195,13 @@ impl Index {
             .conn
             .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))?;
 
-        let fts_entries: usize = self.conn.query_row(
-            "SELECT COUNT(*) FROM nodes_fts",
-            [],
-            |row| row.get(0),
-        )?;
+        let fts_entries: usize =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM nodes_fts", [], |row| row.get(0))?;
 
-        let mut stmt = self
-            .conn
-            .prepare("SELECT node_type, COUNT(*) FROM nodes GROUP BY node_type ORDER BY node_type")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT node_type, COUNT(*) FROM nodes GROUP BY node_type ORDER BY node_type",
+        )?;
         let nodes_by_type = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
@@ -231,6 +229,29 @@ impl Index {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// List node IDs and content hashes for vector-store backed operations.
+    pub fn node_ids_and_content_hashes(
+        &self,
+        node_type_filter: Option<&str>,
+    ) -> Result<Vec<(String, String)>> {
+        let sql = if node_type_filter.is_some() {
+            "SELECT id, content_hash FROM nodes WHERE node_type = ?1"
+        } else {
+            "SELECT id, content_hash FROM nodes"
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = if let Some(node_type) = node_type_filter {
+            stmt.query_map([node_type], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        Ok(rows)
     }
 
     /// Get the body text of a node from the index.
@@ -285,10 +306,10 @@ use serde_json as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use tempyr_core::graph::Graph;
     use tempyr_core::node::parse_node;
     use tempyr_core::schema::Schema;
-    use std::path::{Path, PathBuf};
 
     fn make_schema() -> Schema {
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -354,5 +375,41 @@ mod tests {
         let hash = index.get_content_hash("feat-a").unwrap();
         assert!(hash.is_some());
         assert!(index.get_content_hash("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_node_ids_and_content_hashes() {
+        let graph = make_test_graph();
+        let index = Index::create_in_memory().unwrap();
+        index.rebuild(&graph).unwrap();
+
+        let mut all_rows = index.node_ids_and_content_hashes(None).unwrap();
+        all_rows.sort();
+
+        let mut expected_all = vec![
+            (
+                "epic-a".to_string(),
+                graph.get_node("epic-a").unwrap().content_hash.clone(),
+            ),
+            (
+                "feat-a".to_string(),
+                graph.get_node("feat-a").unwrap().content_hash.clone(),
+            ),
+            (
+                "task-a".to_string(),
+                graph.get_node("task-a").unwrap().content_hash.clone(),
+            ),
+        ];
+        expected_all.sort();
+        assert_eq!(all_rows, expected_all);
+
+        let feature_rows = index.node_ids_and_content_hashes(Some("feature")).unwrap();
+        assert_eq!(
+            feature_rows,
+            vec![(
+                "feat-a".to_string(),
+                graph.get_node("feat-a").unwrap().content_hash.clone(),
+            )]
+        );
     }
 }

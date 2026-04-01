@@ -30,7 +30,7 @@ use tempyr_linear::mapping::StatusMapper;
 use tempyr_linear::queries::WorkflowState;
 use tempyr_linear::state::SyncState;
 
-// ── Parameter structs ───────────────────────────────────────────────────
+// Parameter structs
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GraphSearchParams {
@@ -223,17 +223,31 @@ pub struct LinearDryRunParams {
     pub dry_run: Option<bool>,
 }
 
-// ── Schema defaults ─────────────────────────────────────────────────────
+// Schema defaults
 
-fn default_2() -> u64 { 2 }
-fn default_10() -> u64 { 10 }
-fn default_50() -> u64 { 50 }
-fn default_8000() -> u64 { 8000 }
-fn default_feature() -> String { "feature".to_string() }
-fn default_draft() -> String { "draft".to_string() }
-fn default_confidence() -> f64 { 0.9 }
+fn default_2() -> u64 {
+    2
+}
+fn default_10() -> u64 {
+    10
+}
+fn default_50() -> u64 {
+    50
+}
+fn default_8000() -> u64 {
+    8000
+}
+fn default_feature() -> String {
+    "feature".to_string()
+}
+fn default_draft() -> String {
+    "draft".to_string()
+}
+fn default_confidence() -> f64 {
+    0.9
+}
 
-// ── Helpers ─────────────────────────────────────────────────────────────
+// Helpers
 
 fn find_project() -> Result<(PathBuf, PathBuf, Schema), String> {
     let root = tempyr_core::project::find_project_root().ok_or_else(|| {
@@ -244,6 +258,26 @@ fn find_project() -> Result<(PathBuf, PathBuf, Schema), String> {
     let schema = Schema::load(&schema_path).map_err(|e| e.to_string())?;
     let graph_dir = root.join("graph");
     Ok((graph_dir, gf_dir, schema))
+}
+
+fn index_layout(
+    graph_dir: &Path,
+    gf_dir: &Path,
+) -> Result<tempyr_core::project::IndexLayout, String> {
+    let root = graph_dir
+        .parent()
+        .ok_or_else(|| "Failed to resolve project root from graph dir".to_string())?;
+    tempyr_core::project::IndexLayout::resolve(root, graph_dir, gf_dir).map_err(|e| e.to_string())
+}
+
+fn open_optional_index(graph_dir: &Path, gf_dir: &Path) -> Result<Option<Index>, String> {
+    let layout = index_layout(graph_dir, gf_dir)?;
+    match layout.current_index_path().map_err(|e| e.to_string())? {
+        Some(path) => Index::open(&path)
+            .map(Some)
+            .map_err(|e| format!("Index: {e}")),
+        None => Ok(None),
+    }
 }
 
 fn sessions_dir(gf_dir: &Path) -> PathBuf {
@@ -357,7 +391,7 @@ fn build_status_mapper_from_config(config: &LinearConfig) -> StatusMapper {
     StatusMapper::new(states)
 }
 
-// ── Server ──────────────────────────────────────────────────────────────
+// Server
 
 #[derive(Clone)]
 pub struct TempyrServer {
@@ -371,8 +405,7 @@ impl TempyrServer {
             tool_router: Self::tool_router(),
         }
     }
-
-    // ── Graph query tools ───────────────────────────────────────────────
+    // Graph query tools
 
     #[tool(
         name = "graph_search",
@@ -380,8 +413,15 @@ impl TempyrServer {
     )]
     fn graph_search(&self, Parameters(p): Parameters<GraphSearchParams>) -> Result<String, String> {
         let max_results = p.max_results.unwrap_or(10) as usize;
-        let (_, gf_dir, _) = find_project()?;
-        let index = Index::open(&gf_dir.join("index.db")).map_err(|e| format!("Index: {e}"))?;
+        let (graph_dir, gf_dir, _) = find_project()?;
+        let index_path = index_layout(&graph_dir, &gf_dir)?
+            .current_index_path()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                "Index not found for current graph snapshot. Run `tempyr index rebuild` first."
+                    .to_string()
+            })?;
+        let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
 
         let filter = MetadataFilter {
             node_type: p.node_type.as_deref(),
@@ -410,12 +450,19 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_list",
-        description = "List graph nodes by metadata filters. Unlike graph_search, no search query is needed — filters on type, status, and owner directly."
+        description = "List graph nodes by metadata filters. Unlike graph_search, no search query is needed - filters on type, status, and owner directly."
     )]
     fn graph_list(&self, Parameters(p): Parameters<GraphListParams>) -> Result<String, String> {
         let max_results = p.max_results.unwrap_or(50) as usize;
-        let (_, gf_dir, _) = find_project()?;
-        let index = Index::open(&gf_dir.join("index.db")).map_err(|e| format!("Index: {e}"))?;
+        let (graph_dir, gf_dir, _) = find_project()?;
+        let index_path = index_layout(&graph_dir, &gf_dir)?
+            .current_index_path()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                "Index not found for current graph snapshot. Run `tempyr index rebuild` first."
+                    .to_string()
+            })?;
+        let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
 
         let filter = MetadataFilter {
             node_type: p.node_type.as_deref(),
@@ -458,15 +505,28 @@ impl TempyrServer {
             .map(|r| ops::resolve_node_id(&graph_dir, r).map_err(|e| e.to_string()))
             .transpose()?;
         let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
-        let index = Index::open(&gf_dir.join("index.db")).map_err(|e| format!("Index: {e}"))?;
+        let index_path = index_layout(&graph_dir, &gf_dir)?
+            .current_index_path()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                "Index not found for current graph snapshot. Run `tempyr index rebuild` first."
+                    .to_string()
+            })?;
+        let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
 
         let config = RetrievalConfig {
             token_budget: budget,
             ..RetrievalConfig::standard()
         };
-        let results =
-            hybrid_retrieve(&index, &graph, &p.query, resolved_root.as_deref(), &config)
-                .map_err(|e| e.to_string())?;
+        let results = hybrid_retrieve(
+            &index,
+            &graph,
+            &p.query,
+            resolved_root.as_deref(),
+            &config,
+            None,
+        )
+        .map_err(|e| e.to_string())?;
 
         let mut output = String::new();
         for r in &results {
@@ -494,8 +554,7 @@ impl TempyrServer {
     ) -> Result<String, String> {
         let depth = p.depth.unwrap_or(2) as usize;
         let (graph_dir, _, schema) = find_project()?;
-        let resolved =
-            ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
+        let resolved = ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
         let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
 
         let results = bfs(&graph, &resolved, depth, None);
@@ -524,8 +583,7 @@ impl TempyrServer {
         Parameters(p): Parameters<GraphGetNodeParams>,
     ) -> Result<String, String> {
         let (graph_dir, _, _) = find_project()?;
-        let resolved =
-            ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
+        let resolved = ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
         let path = ops::find_node_file(&graph_dir, &resolved).map_err(|e| e.to_string())?;
         std::fs::read_to_string(&path).map_err(|e| e.to_string())
     }
@@ -550,8 +608,7 @@ impl TempyrServer {
         }))
         .map_err(|e| e.to_string())
     }
-
-    // ── Graph mutation tools ────────────────────────────────────────────
+    // Graph mutation tools
 
     #[tool(
         name = "graph_add_node",
@@ -588,8 +645,7 @@ impl TempyrServer {
         Parameters(p): Parameters<GraphUpdateNodeParams>,
     ) -> Result<String, String> {
         let (graph_dir, _, schema) = find_project()?;
-        let resolved =
-            ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
+        let resolved = ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
         let path = ops::update_node(
             &graph_dir,
             &resolved,
@@ -676,13 +732,9 @@ impl TempyrServer {
         name = "graph_render",
         description = "Render a document (PRD, TDD) from a root node"
     )]
-    fn graph_render(
-        &self,
-        Parameters(p): Parameters<GraphRenderParams>,
-    ) -> Result<String, String> {
+    fn graph_render(&self, Parameters(p): Parameters<GraphRenderParams>) -> Result<String, String> {
         let (graph_dir, gf_dir, schema) = find_project()?;
-        let root_id =
-            ops::resolve_node_id(&graph_dir, &p.root_node).map_err(|e| e.to_string())?;
+        let root_id = ops::resolve_node_id(&graph_dir, &p.root_node).map_err(|e| e.to_string())?;
         let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
 
         let filter = if p.include_history.unwrap_or(false) {
@@ -693,8 +745,7 @@ impl TempyrServer {
 
         let local_path = gf_dir.join("render").join(format!("{}.toml", p.template));
         if local_path.exists() {
-            tempyr_render::render(&graph, &local_path, &root_id, &filter)
-                .map_err(|e| e.to_string())
+            tempyr_render::render(&graph, &local_path, &root_id, &filter).map_err(|e| e.to_string())
         } else {
             let template_toml = match p.template.as_str() {
                 "prd" => include_str!("../../../templates/prd.toml"),
@@ -706,8 +757,7 @@ impl TempyrServer {
                 .map_err(|e| e.to_string())
         }
     }
-
-    // ── Interview tools ─────────────────────────────────────────────────
+    // Interview tools
 
     #[tool(
         name = "interview_start",
@@ -724,20 +774,18 @@ impl TempyrServer {
 
         let mut existing_ids = Vec::new();
         let mut context_rich = Vec::new();
-        let index_path = gf_dir.join("index.db");
-        if index_path.exists() {
-            if let Ok(index) = Index::open(&index_path) {
-                if let Ok(results) = index.search_fts_filtered(&p.brain_dump, None, 20) {
-                    for r in &results {
-                        existing_ids.push(r.node_id.clone());
-                        context_rich.push(ExistingNodeSummary {
-                            id: r.node_id.clone(),
-                            title: r.title.clone(),
-                            node_type: r.node_type.clone(),
-                            summary: r.snippet.clone(),
-                        });
-                    }
-                }
+        if let Some(index) = open_optional_index(&graph_dir, &gf_dir)? {
+            let results = index
+                .search_fts_filtered(&p.brain_dump, None, 20)
+                .map_err(|e| format!("Index search: {e}"))?;
+            for r in &results {
+                existing_ids.push(r.node_id.clone());
+                context_rich.push(ExistingNodeSummary {
+                    id: r.node_id.clone(),
+                    title: r.title.clone(),
+                    node_type: r.node_type.clone(),
+                    summary: r.snippet.clone(),
+                });
             }
         }
 
@@ -852,23 +900,39 @@ impl TempyrServer {
         };
         all_warnings.extend(validation_warnings);
 
-        let index_path = gf_dir.join("index.db");
-        if index_path.exists() {
-            if let Err(e) = (|| -> std::result::Result<(), String> {
+        if let Ok(layout) = index_layout(&graph_dir, &gf_dir)
+            && let Err(e) = (|| -> std::result::Result<(), String> {
+                let index_path = layout
+                    .ensure_active_index_seeded()
+                    .map_err(|e| e.to_string())?;
                 let schema2 =
                     Schema::load(&gf_dir.join("schema.toml")).map_err(|e| e.to_string())?;
-                let graph = Graph::load_from_directory(&graph_dir, schema2)
+                let graph =
+                    Graph::load_from_directory(&graph_dir, schema2).map_err(|e| e.to_string())?;
+                if index_path.exists() {
+                    let index = Index::open(&index_path).map_err(|e| e.to_string())?;
+                    index
+                        .incremental_update(&graph)
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    if let Some(parent) = index_path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                    let index = Index::create(&index_path).map_err(|e| e.to_string())?;
+                    index.rebuild(&graph).map_err(|e| e.to_string())?;
+                }
+                layout
+                    .write_active_snapshot_key()
                     .map_err(|e| e.to_string())?;
-                let index = Index::open(&index_path).map_err(|e| e.to_string())?;
-                index
-                    .incremental_update(&graph)
+                layout
+                    .publish_active_snapshot()
                     .map_err(|e| e.to_string())?;
                 Ok(())
-            })() {
-                all_warnings.push(format!(
-                    "Index update failed (run 'tempyr index rebuild'): {e}"
-                ));
-            }
+            })()
+        {
+            all_warnings.push(format!(
+                "Index update failed (run 'tempyr index rebuild'): {e}"
+            ));
         }
 
         serde_json::to_string_pretty(&json!({
@@ -1046,8 +1110,7 @@ impl TempyrServer {
         }))
         .map_err(|e| e.to_string())
     }
-
-    // ── Linear tools ────────────────────────────────────────────────────
+    // Linear tools
 
     #[tool(
         name = "linear_push",
@@ -1064,7 +1127,6 @@ impl TempyrServer {
         let node_id = resolved_node_id.as_deref();
         let graph =
             Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
-        let index = Index::open(&gf_dir.join("index.db")).ok();
         let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
         let status_mapper = build_status_mapper_from_config(&config);
 
@@ -1086,10 +1148,10 @@ impl TempyrServer {
 
             for id in &nodes {
                 if let Some(entry) = sync_state.get_by_node_id(id) {
-                    if let Some(node) = graph.get_node(id) {
-                        if node.content_hash != entry.content_hash_at_sync {
-                            would_update += 1;
-                        }
+                    if let Some(node) = graph.get_node(id)
+                        && node.content_hash != entry.content_hash_at_sync
+                    {
+                        would_update += 1;
                     }
                 } else {
                     would_create += 1;
@@ -1104,67 +1166,68 @@ impl TempyrServer {
             .map_err(|e| e.to_string());
         }
 
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
-            if let Some(id) = node_id {
-                let node = graph
-                    .get_node(id)
-                    .ok_or_else(|| format!("Node not found: {id}"))?;
-                let entry = tempyr_linear::push::push_node(
-                    &client,
-                    node,
-                    &graph,
-                    index.as_ref(),
-                    &schema,
-                    &config,
-                    &mut sync_state,
-                    &status_mapper,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
-                let action = match entry.action {
-                    tempyr_linear::push::PushAction::Created => "created",
-                    tempyr_linear::push::PushAction::Updated => "updated",
-                };
-                serde_json::to_string_pretty(&json!({
-                    "action": action,
-                    "node_id": entry.node_id,
-                    "linear_id": entry.linear_id,
-                    "linear_identifier": entry.linear_identifier,
-                }))
-                .map_err(|e| e.to_string())
-            } else {
-                let result = tempyr_linear::push::push_all(
-                    &client,
-                    &graph,
-                    index.as_ref(),
-                    &schema,
-                    &config,
-                    &mut sync_state,
-                    &status_mapper,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-                sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
-                serde_json::to_string_pretty(&json!({
-                    "created": result.created.len(),
-                    "updated": result.updated.len(),
-                    "skipped": result.skipped.len(),
-                    "errors": result.errors,
-                }))
-                .map_err(|e| e.to_string())
-            }
-        }))
+        let index = open_optional_index(&graph_dir, &gf_dir)?;
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                if let Some(id) = node_id {
+                    let node = graph
+                        .get_node(id)
+                        .ok_or_else(|| format!("Node not found: {id}"))?;
+                    let entry = tempyr_linear::push::push_node(
+                        &client,
+                        node,
+                        &graph,
+                        index.as_ref(),
+                        &schema,
+                        &config,
+                        &mut sync_state,
+                        &status_mapper,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
+                    let action = match entry.action {
+                        tempyr_linear::push::PushAction::Created => "created",
+                        tempyr_linear::push::PushAction::Updated => "updated",
+                    };
+                    serde_json::to_string_pretty(&json!({
+                        "action": action,
+                        "node_id": entry.node_id,
+                        "linear_id": entry.linear_id,
+                        "linear_identifier": entry.linear_identifier,
+                    }))
+                    .map_err(|e| e.to_string())
+                } else {
+                    let result = tempyr_linear::push::push_all(
+                        &client,
+                        &graph,
+                        index.as_ref(),
+                        &schema,
+                        &config,
+                        &mut sync_state,
+                        &status_mapper,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
+                    serde_json::to_string_pretty(&json!({
+                        "created": result.created.len(),
+                        "updated": result.updated.len(),
+                        "skipped": result.skipped.len(),
+                        "errors": result.errors,
+                    }))
+                    .map_err(|e| e.to_string())
+                }
+            })
+        })
     }
 
     #[tool(
         name = "linear_pull",
         description = "Pull changes from Linear into the graph. Updates node statuses based on Linear issue state changes."
     )]
-    fn linear_pull(
-        &self,
-        Parameters(p): Parameters<LinearDryRunParams>,
-    ) -> Result<String, String> {
+    fn linear_pull(&self, Parameters(p): Parameters<LinearDryRunParams>) -> Result<String, String> {
         let dry_run = p.dry_run.unwrap_or(false);
         let (client, config, gf_dir, graph_dir, schema) = build_linear_deps()?;
         let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
@@ -1179,44 +1242,42 @@ impl TempyrServer {
             .map_err(|e| e.to_string());
         }
 
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
-            let result = tempyr_linear::pull::pull(
-                &client,
-                &graph_dir,
-                &schema,
-                &config,
-                &mut sync_state,
-                &status_mapper,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-            sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let result = tempyr_linear::pull::pull(
+                    &client,
+                    &graph_dir,
+                    &schema,
+                    &config,
+                    &mut sync_state,
+                    &status_mapper,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
 
-            serde_json::to_string_pretty(&json!({
-                "created": result.created,
-                "updated": result.updated,
-                "status_changed": result.status_changed.len(),
-                "conflicts": result.conflicts.len(),
-                "warnings": result.warnings,
-                "errors": result.errors,
-            }))
-            .map_err(|e| e.to_string())
-        }))
+                serde_json::to_string_pretty(&json!({
+                    "created": result.created,
+                    "updated": result.updated,
+                    "status_changed": result.status_changed.len(),
+                    "conflicts": result.conflicts.len(),
+                    "warnings": result.warnings,
+                    "errors": result.errors,
+                }))
+                .map_err(|e| e.to_string())
+            })
+        })
     }
 
     #[tool(
         name = "linear_sync",
         description = "Bidirectional sync: push local graph changes to Linear, then pull remote changes back."
     )]
-    fn linear_sync(
-        &self,
-        Parameters(p): Parameters<LinearDryRunParams>,
-    ) -> Result<String, String> {
+    fn linear_sync(&self, Parameters(p): Parameters<LinearDryRunParams>) -> Result<String, String> {
         let dry_run = p.dry_run.unwrap_or(false);
         let (client, config, gf_dir, graph_dir, schema) = build_linear_deps()?;
         let graph =
             Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
-        let index = Index::open(&gf_dir.join("index.db")).ok();
         let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
         let status_mapper = build_status_mapper_from_config(&config);
 
@@ -1230,36 +1291,40 @@ impl TempyrServer {
             .map_err(|e| e.to_string());
         }
 
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(async {
-            let result = tempyr_linear::sync::sync(
-                &client,
-                &graph_dir,
-                &graph,
-                index.as_ref(),
-                &schema,
-                &config,
-                &mut sync_state,
-                &status_mapper,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-            sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
+        let index = open_optional_index(&graph_dir, &gf_dir)?;
 
-            serde_json::to_string_pretty(&json!({
-                "push": {
-                    "created": result.push.created.len(),
-                    "updated": result.push.updated.len(),
-                    "errors": result.push.errors.len(),
-                },
-                "pull": {
-                    "created": result.pull.created.len(),
-                    "updated": result.pull.updated.len(),
-                    "conflicts": result.pull.conflicts.len(),
-                    "errors": result.pull.errors.len(),
-                }
-            }))
-            .map_err(|e| e.to_string())
-        }))
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let result = tempyr_linear::sync::sync(
+                    &client,
+                    &graph_dir,
+                    &graph,
+                    index.as_ref(),
+                    &schema,
+                    &config,
+                    &mut sync_state,
+                    &status_mapper,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
+
+                serde_json::to_string_pretty(&json!({
+                    "push": {
+                        "created": result.push.created.len(),
+                        "updated": result.push.updated.len(),
+                        "errors": result.push.errors.len(),
+                    },
+                    "pull": {
+                        "created": result.pull.created.len(),
+                        "updated": result.pull.updated.len(),
+                        "conflicts": result.pull.conflicts.len(),
+                        "errors": result.pull.errors.len(),
+                    }
+                }))
+                .map_err(|e| e.to_string())
+            })
+        })
     }
 
     #[tool(

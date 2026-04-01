@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::str::FromStr;
 
 use serde::Deserialize;
 
-use crate::{TempyrError, Result};
+use crate::{Result, TempyrError};
 
 /// The full schema definition loaded from schema.toml.
 #[derive(Debug, Clone)]
@@ -85,11 +86,110 @@ impl Schema {
     /// Load a schema from a TOML file.
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        Self::from_str(&content)
+        content.parse()
     }
 
-    /// Parse a schema from a TOML string.
-    pub fn from_str(content: &str) -> Result<Self> {
+    /// Get the reverse edge type for a given edge type.
+    pub fn reverse_edge_type(&self, edge_type: &str) -> Option<&str> {
+        self.edge_types.get(edge_type).map(|et| et.reverse.as_str())
+    }
+
+    /// Get the directory name for a node type.
+    pub fn directory_for_type(&self, node_type: &str) -> Option<&str> {
+        self.node_types
+            .get(node_type)
+            .map(|nt| nt.directory.as_str())
+    }
+
+    /// Find the node type name for a given directory name.
+    pub fn type_for_directory(&self, directory: &str) -> Option<&str> {
+        self.node_types
+            .iter()
+            .find(|(_, nt)| nt.directory == directory)
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// Validate that an edge type is allowed from source_type to target_type.
+    ///
+    /// An edge is valid if:
+    /// 1. It's explicitly listed in the source type's allowed_edges, OR
+    /// 2. The reverse direction is explicitly allowed (i.e., target_type has
+    ///    reverse(edge_type) -> source_type in its allowed_edges). This handles
+    ///    implicit reverses like note's `relates_to -> *`.
+    pub fn validate_edge(
+        &self,
+        source_type: &str,
+        edge_type: &str,
+        target_type: &str,
+    ) -> Result<()> {
+        // Check the edge type exists
+        if !self.edge_types.contains_key(edge_type) {
+            return Err(TempyrError::Schema(format!(
+                "Unknown edge type: '{edge_type}'"
+            )));
+        }
+
+        // Check the source node type exists
+        let source_def = self
+            .node_types
+            .get(source_type)
+            .ok_or_else(|| TempyrError::Schema(format!("Unknown node type: '{source_type}'")))?;
+
+        // Check the edge is explicitly allowed for this source type -> target type
+        let forward_allowed = source_def
+            .allowed_edges
+            .iter()
+            .any(|ae| ae.edge_type == edge_type && (ae.target == target_type || ae.target == "*"));
+
+        if forward_allowed {
+            return Ok(());
+        }
+
+        // Check if this is a valid implicit reverse: target_type -> reverse(edge_type) -> source_type
+        if let Some(reverse_type) = self.reverse_edge_type(edge_type)
+            && let Some(target_def) = self.node_types.get(target_type)
+        {
+            let reverse_allowed = target_def.allowed_edges.iter().any(|ae| {
+                ae.edge_type == reverse_type && (ae.target == source_type || ae.target == "*")
+            });
+            if reverse_allowed {
+                return Ok(());
+            }
+        }
+
+        Err(TempyrError::Schema(format!(
+            "Edge type '{edge_type}' is not allowed from '{source_type}' to '{target_type}'"
+        )))
+    }
+
+    /// Validate that a status is allowed for a given node type.
+    pub fn validate_status(&self, node_type: &str, status: &str) -> Result<()> {
+        let node_def = self
+            .node_types
+            .get(node_type)
+            .ok_or_else(|| TempyrError::Schema(format!("Unknown node type: '{node_type}'")))?;
+
+        // If allowed_statuses is empty, any status is ok (e.g., persona, insight, note)
+        if node_def.allowed_statuses.is_empty() {
+            return Ok(());
+        }
+
+        if !node_def.allowed_statuses.contains(&status.to_string()) {
+            return Err(TempyrError::Schema(format!(
+                "Status '{status}' is not allowed for node type '{node_type}'. \
+                 Allowed: {:?}",
+                node_def.allowed_statuses
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+impl FromStr for Schema {
+    type Err = TempyrError;
+
+    fn from_str(content: &str) -> Result<Self> {
         let raw: raw::SchemaFile = toml::from_str(content)?;
 
         let node_types = raw
@@ -132,98 +232,6 @@ impl Schema {
             node_types,
             edge_types,
         })
-    }
-
-    /// Get the reverse edge type for a given edge type.
-    pub fn reverse_edge_type(&self, edge_type: &str) -> Option<&str> {
-        self.edge_types.get(edge_type).map(|et| et.reverse.as_str())
-    }
-
-    /// Get the directory name for a node type.
-    pub fn directory_for_type(&self, node_type: &str) -> Option<&str> {
-        self.node_types.get(node_type).map(|nt| nt.directory.as_str())
-    }
-
-    /// Find the node type name for a given directory name.
-    pub fn type_for_directory(&self, directory: &str) -> Option<&str> {
-        self.node_types
-            .iter()
-            .find(|(_, nt)| nt.directory == directory)
-            .map(|(name, _)| name.as_str())
-    }
-
-    /// Validate that an edge type is allowed from source_type to target_type.
-    ///
-    /// An edge is valid if:
-    /// 1. It's explicitly listed in the source type's allowed_edges, OR
-    /// 2. The reverse direction is explicitly allowed (i.e., target_type has
-    ///    reverse(edge_type) → source_type in its allowed_edges). This handles
-    ///    implicit reverses like note's `relates_to → *`.
-    pub fn validate_edge(
-        &self,
-        source_type: &str,
-        edge_type: &str,
-        target_type: &str,
-    ) -> Result<()> {
-        // Check the edge type exists
-        if !self.edge_types.contains_key(edge_type) {
-            return Err(TempyrError::Schema(format!(
-                "Unknown edge type: '{edge_type}'"
-            )));
-        }
-
-        // Check the source node type exists
-        let source_def = self.node_types.get(source_type).ok_or_else(|| {
-            TempyrError::Schema(format!("Unknown node type: '{source_type}'"))
-        })?;
-
-        // Check the edge is explicitly allowed for this source type -> target type
-        let forward_allowed = source_def.allowed_edges.iter().any(|ae| {
-            ae.edge_type == edge_type && (ae.target == target_type || ae.target == "*")
-        });
-
-        if forward_allowed {
-            return Ok(());
-        }
-
-        // Check if this is a valid implicit reverse: target_type -> reverse(edge_type) -> source_type
-        if let Some(reverse_type) = self.reverse_edge_type(edge_type)
-            && let Some(target_def) = self.node_types.get(target_type)
-        {
-            let reverse_allowed = target_def.allowed_edges.iter().any(|ae| {
-                ae.edge_type == reverse_type
-                    && (ae.target == source_type || ae.target == "*")
-            });
-            if reverse_allowed {
-                return Ok(());
-            }
-        }
-
-        Err(TempyrError::Schema(format!(
-            "Edge type '{edge_type}' is not allowed from '{source_type}' to '{target_type}'"
-        )))
-    }
-
-    /// Validate that a status is allowed for a given node type.
-    pub fn validate_status(&self, node_type: &str, status: &str) -> Result<()> {
-        let node_def = self.node_types.get(node_type).ok_or_else(|| {
-            TempyrError::Schema(format!("Unknown node type: '{node_type}'"))
-        })?;
-
-        // If allowed_statuses is empty, any status is ok (e.g., persona, insight, note)
-        if node_def.allowed_statuses.is_empty() {
-            return Ok(());
-        }
-
-        if !node_def.allowed_statuses.contains(&status.to_string()) {
-            return Err(TempyrError::Schema(format!(
-                "Status '{status}' is not allowed for node type '{node_type}'. \
-                 Allowed: {:?}",
-                node_def.allowed_statuses
-            )));
-        }
-
-        Ok(())
     }
 }
 
@@ -282,8 +290,16 @@ mod tests {
         // feature -> persona via serves is valid
         assert!(schema.validate_edge("feature", "serves", "persona").is_ok());
         // note -> anything via relates_to is valid (wildcard target)
-        assert!(schema.validate_edge("note", "relates_to", "feature").is_ok());
-        assert!(schema.validate_edge("note", "relates_to", "decision").is_ok());
+        assert!(
+            schema
+                .validate_edge("note", "relates_to", "feature")
+                .is_ok()
+        );
+        assert!(
+            schema
+                .validate_edge("note", "relates_to", "decision")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -291,7 +307,11 @@ mod tests {
         let schema = load_default_schema();
 
         // feature -> persona via child_of is NOT valid
-        assert!(schema.validate_edge("feature", "child_of", "persona").is_err());
+        assert!(
+            schema
+                .validate_edge("feature", "child_of", "persona")
+                .is_err()
+        );
         // epic -> task via child_of is NOT valid (epic -> feature, not task)
         assert!(schema.validate_edge("epic", "child_of", "task").is_err());
     }
@@ -299,7 +319,11 @@ mod tests {
     #[test]
     fn test_schema_validate_edge_unknown_type() {
         let schema = load_default_schema();
-        assert!(schema.validate_edge("feature", "fake_edge", "epic").is_err());
+        assert!(
+            schema
+                .validate_edge("feature", "fake_edge", "epic")
+                .is_err()
+        );
     }
 
     #[test]
@@ -308,7 +332,10 @@ mod tests {
 
         assert_eq!(schema.directory_for_type("feature"), Some("features"));
         assert_eq!(schema.directory_for_type("epic"), Some("epics"));
-        assert_eq!(schema.directory_for_type("open_question"), Some("questions"));
+        assert_eq!(
+            schema.directory_for_type("open_question"),
+            Some("questions")
+        );
         assert_eq!(schema.directory_for_type("nonexistent"), None);
     }
 
@@ -325,10 +352,22 @@ mod tests {
     fn test_schema_validate_edge_implicit_reverse() {
         let schema = load_default_schema();
 
-        // note has relates_to → *, so any type should be able to have relates_to → note
-        assert!(schema.validate_edge("feature", "relates_to", "note").is_ok());
-        assert!(schema.validate_edge("decision", "relates_to", "note").is_ok());
-        assert!(schema.validate_edge("persona", "relates_to", "note").is_ok());
+        // note has relates_to -> *, so any type should be able to have relates_to -> note
+        assert!(
+            schema
+                .validate_edge("feature", "relates_to", "note")
+                .is_ok()
+        );
+        assert!(
+            schema
+                .validate_edge("decision", "relates_to", "note")
+                .is_ok()
+        );
+        assert!(
+            schema
+                .validate_edge("persona", "relates_to", "note")
+                .is_ok()
+        );
     }
 
     /// Verify that every allowed_edge has a valid reverse: either explicitly listed
@@ -351,13 +390,12 @@ mod tests {
                     continue;
                 }
 
-                // Check: target_type → reverse_type → source_type is valid
+                // Check: target_type -> reverse_type -> source_type is valid
                 let result = schema.validate_edge(&ae.target, reverse_type, source_type);
                 if result.is_err() {
                     missing.push(format!(
                         "{} --{}--> {} requires {} --{}--> {} (not in schema)",
-                        source_type, ae.edge_type, ae.target,
-                        ae.target, reverse_type, source_type
+                        source_type, ae.edge_type, ae.target, ae.target, reverse_type, source_type
                     ));
                 }
             }
@@ -378,7 +416,7 @@ mod tests {
         assert!(schema.validate_status("feature", "active").is_ok());
         assert!(schema.validate_status("feature", "invalid_status").is_err());
 
-        // persona has no allowed_statuses — any status is ok
+        // persona has no allowed_statuses - any status is ok
         assert!(schema.validate_status("persona", "whatever").is_ok());
     }
 }

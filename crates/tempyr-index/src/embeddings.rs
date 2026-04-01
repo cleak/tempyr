@@ -1,8 +1,16 @@
 use async_trait::async_trait;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+#[cfg(feature = "local-embeddings")]
+use std::sync::Mutex;
+use std::time::Duration;
 
-use crate::Result;
 use crate::IndexError;
+use crate::Result;
+use crate::indexer::Index;
+use crate::vector::{VectorSearchResult, blob_to_embedding, cosine_similarity, embedding_to_blob};
 
 /// Trait for embedding providers. Implementations call external APIs or local models.
 #[async_trait]
@@ -24,7 +32,7 @@ pub enum InputType {
     Document,
 }
 
-// ─── Voyage AI ──────────────────────────────────────────
+// Voyage AI
 
 pub struct VoyageClient {
     api_key: String,
@@ -134,7 +142,7 @@ impl EmbeddingProvider for VoyageClient {
     }
 }
 
-// ─── Google Gemini ──────────────────────────────────────
+// Google Gemini
 
 pub struct GeminiClient {
     api_key: String,
@@ -155,9 +163,7 @@ impl GeminiClient {
 
     pub fn from_env(model: &str, dimensions: usize) -> Result<Self> {
         let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
-            IndexError::General(
-                "GEMINI_API_KEY environment variable not set.".to_string(),
-            )
+            IndexError::General("GEMINI_API_KEY environment variable not set.".to_string())
         })?;
         Ok(Self::new(&api_key, model, dimensions))
     }
@@ -228,9 +234,7 @@ impl EmbeddingProvider for GeminiClient {
                     .map(|text| GeminiSingleRequest {
                         model: model_path.clone(),
                         content: GeminiContent {
-                            parts: vec![GeminiPart {
-                                text: text.clone(),
-                            }],
+                            parts: vec![GeminiPart { text: text.clone() }],
                         },
                         task_type: task_type.to_string(),
                         output_dimensionality: Some(self.dimensions),
@@ -272,7 +276,7 @@ impl EmbeddingProvider for GeminiClient {
 
             Ok(all_embeddings)
         } else {
-            // Single text — use single endpoint
+            // Single text - use single endpoint
             let body = GeminiSingleRequest {
                 model: model_path,
                 content: GeminiContent {
@@ -324,11 +328,11 @@ impl EmbeddingProvider for GeminiClient {
     }
 }
 
-// ─── Local fastembed fallback ───────────────────────────
+// Local fastembed fallback
 
 #[cfg(feature = "local-embeddings")]
 pub struct FastembedClient {
-    model: fastembed::TextEmbedding,
+    model: Mutex<fastembed::TextEmbedding>,
     dims: usize,
 }
 
@@ -342,7 +346,10 @@ impl FastembedClient {
         )
         .map_err(|e| IndexError::General(format!("Failed to load fastembed model: {e}")))?;
 
-        Ok(Self { model, dims: 384 })
+        Ok(Self {
+            model: Mutex::new(model),
+            dims: 384,
+        })
     }
 }
 
@@ -354,9 +361,12 @@ impl EmbeddingProvider for FastembedClient {
             return Ok(Vec::new());
         }
 
-        let embeddings = self
+        let mut model = self
             .model
-            .embed(texts.to_vec(), None)
+            .lock()
+            .map_err(|_| IndexError::General("Fastembed model lock poisoned".to_string()))?;
+        let embeddings = model
+            .embed(texts, None)
             .map_err(|e| IndexError::General(format!("Fastembed error: {e}")))?;
 
         Ok(embeddings)
@@ -371,7 +381,7 @@ impl EmbeddingProvider for FastembedClient {
     }
 }
 
-// ─── Provider factory ───────────────────────────────────
+// Provider factory
 
 /// Embedding provider configuration from config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,25 +395,112 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             provider: "voyage".to_string(),
-            model: Some("voyage-4".to_string()),
-            dimensions: Some(1024),
+            model: None,
+            dimensions: None,
         }
     }
 }
 
-/// Create an embedding provider from configuration.
-pub fn create_provider(config: &EmbeddingConfig) -> Result<Box<dyn EmbeddingProvider>> {
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingConfigPartial {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub dimensions: Option<usize>,
+}
+
+impl EmbeddingConfig {
+    pub fn apply_partial(&mut self, partial: EmbeddingConfigPartial) {
+        if let Some(provider) = partial.provider {
+            self.provider = provider;
+            self.model = None;
+            self.dimensions = None;
+        }
+        if let Some(model) = partial.model {
+            self.model = Some(model);
+        }
+        if let Some(dimensions) = partial.dimensions {
+            self.dimensions = Some(dimensions);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedEmbeddingConfig {
+    pub provider: String,
+    pub model: Option<String>,
+    pub dimensions: usize,
+}
+
+const VOYAGE_MODEL: &str = "voyage-4";
+const VOYAGE_DIMENSIONS: usize = 1024;
+const GEMINI_MODEL: &str = "gemini-embedding-001";
+const GEMINI_DIMENSIONS: usize = 768;
+const LOCAL_MODEL: &str = "all-MiniLM-L6-v2";
+const LOCAL_DIMENSIONS: usize = 384;
+
+pub fn resolve_embedding_config(config: &EmbeddingConfig) -> Result<ResolvedEmbeddingConfig> {
     match config.provider.as_str() {
-        "voyage" => {
-            let model = config.model.as_deref().unwrap_or("voyage-4");
-            let dims = config.dimensions.unwrap_or(1024);
-            Ok(Box::new(VoyageClient::from_env(model, dims)?))
+        "voyage" => Ok(ResolvedEmbeddingConfig {
+            provider: "voyage".to_string(),
+            model: Some(
+                config
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| VOYAGE_MODEL.to_string()),
+            ),
+            dimensions: config.dimensions.unwrap_or(VOYAGE_DIMENSIONS),
+        }),
+        "gemini" => Ok(ResolvedEmbeddingConfig {
+            provider: "gemini".to_string(),
+            model: Some(
+                config
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| GEMINI_MODEL.to_string()),
+            ),
+            dimensions: config.dimensions.unwrap_or(GEMINI_DIMENSIONS),
+        }),
+        "local" => {
+            if let Some(model) = config.model.as_deref()
+                && model != LOCAL_MODEL
+            {
+                return Err(IndexError::General(format!(
+                    "Local embeddings only support model '{LOCAL_MODEL}', got '{model}'"
+                )));
+            }
+            if let Some(dimensions) = config.dimensions
+                && dimensions != LOCAL_DIMENSIONS
+            {
+                return Err(IndexError::General(format!(
+                    "Local embeddings only support {LOCAL_DIMENSIONS} dimensions, got {dimensions}"
+                )));
+            }
+
+            Ok(ResolvedEmbeddingConfig {
+                provider: "local".to_string(),
+                model: Some(LOCAL_MODEL.to_string()),
+                dimensions: LOCAL_DIMENSIONS,
+            })
         }
-        "gemini" => {
-            let model = config.model.as_deref().unwrap_or("gemini-embedding-001");
-            let dims = config.dimensions.unwrap_or(768);
-            Ok(Box::new(GeminiClient::from_env(model, dims)?))
-        }
+        other => Err(IndexError::General(format!(
+            "Unknown embedding provider: '{other}'. Use 'voyage', 'gemini', or 'local'."
+        ))),
+    }
+}
+
+pub fn create_provider_from_resolved(
+    config: &ResolvedEmbeddingConfig,
+) -> Result<Box<dyn EmbeddingProvider>> {
+    match config.provider.as_str() {
+        "voyage" => Ok(Box::new(VoyageClient::from_env(
+            config.model.as_deref().unwrap_or(VOYAGE_MODEL),
+            config.dimensions,
+        )?)),
+        "gemini" => Ok(Box::new(GeminiClient::from_env(
+            config.model.as_deref().unwrap_or(GEMINI_MODEL),
+            config.dimensions,
+        )?)),
         #[cfg(feature = "local-embeddings")]
         "local" => Ok(Box::new(FastembedClient::new()?)),
         #[cfg(not(feature = "local-embeddings"))]
@@ -418,28 +515,191 @@ pub fn create_provider(config: &EmbeddingConfig) -> Result<Box<dyn EmbeddingProv
     }
 }
 
-// ─── Embed graph nodes ──────────────────────────────────
+/// Create an embedding provider from configuration.
+pub fn create_provider(config: &EmbeddingConfig) -> Result<Box<dyn EmbeddingProvider>> {
+    let resolved = resolve_embedding_config(config)?;
+    create_provider_from_resolved(&resolved)
+}
 
-use crate::indexer::Index;
+// Embed graph nodes
+
 use tempyr_core::graph::Graph;
+
+pub struct EmbeddingStore {
+    conn: Connection,
+}
+
+impl EmbeddingStore {
+    const SQLITE_BATCH_SIZE: usize = 900;
+
+    pub fn open_or_create(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                IndexError::General(format!("Failed to create embeddings dir: {e}"))
+            })?;
+        }
+
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        let store = Self { conn };
+        store.create_tables()?;
+        Ok(store)
+    }
+
+    fn create_tables(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS embeddings (
+                content_hash TEXT PRIMARY KEY,
+                embedding    BLOB NOT NULL
+            );
+            ",
+        )?;
+        Ok(())
+    }
+
+    pub fn has_embedding(&self, content_hash: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM embeddings WHERE content_hash = ?1",
+            [content_hash],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn store_embedding(&self, content_hash: &str, embedding: &[f32]) -> Result<()> {
+        let blob = embedding_to_blob(embedding);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO embeddings (content_hash, embedding) VALUES (?1, ?2)",
+            rusqlite::params![content_hash, blob],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_embedding(&self, content_hash: &str) -> Result<Option<Vec<f32>>> {
+        let result = self.conn.query_row(
+            "SELECT embedding FROM embeddings WHERE content_hash = ?1",
+            [content_hash],
+            |row| {
+                let blob: Vec<u8> = row.get(0)?;
+                Ok(blob)
+            },
+        );
+
+        match result {
+            Ok(blob) => Ok(Some(blob_to_embedding(&blob))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn get_embeddings_batch(&self, content_hashes: &[String]) -> Result<HashMap<String, Vec<f32>>> {
+        let mut embeddings = HashMap::new();
+        if content_hashes.is_empty() {
+            return Ok(embeddings);
+        }
+
+        for chunk in content_hashes.chunks(Self::SQLITE_BATCH_SIZE) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT content_hash, embedding FROM embeddings WHERE content_hash IN ({placeholders})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                let content_hash: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((content_hash, blob))
+            })?;
+
+            for row in rows {
+                let (content_hash, blob) = row?;
+                embeddings.insert(content_hash, blob_to_embedding(&blob));
+            }
+        }
+
+        Ok(embeddings)
+    }
+
+    pub fn count(&self) -> Result<usize> {
+        let count: usize = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))?;
+        Ok(count)
+    }
+
+    pub fn count_embeddings_for_index(
+        &self,
+        index: &Index,
+        node_type_filter: Option<&str>,
+    ) -> Result<usize> {
+        let nodes = index.node_ids_and_content_hashes(node_type_filter)?;
+        let unique_hashes = nodes
+            .iter()
+            .map(|(_, content_hash)| content_hash.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let embeddings = self.get_embeddings_batch(&unique_hashes)?;
+
+        Ok(nodes
+            .iter()
+            .filter(|(_, content_hash)| embeddings.contains_key(content_hash))
+            .count())
+    }
+
+    pub fn vector_search(
+        &self,
+        index: &Index,
+        query_embedding: &[f32],
+        max_results: usize,
+        node_type_filter: Option<&str>,
+    ) -> Result<Vec<VectorSearchResult>> {
+        let nodes = index.node_ids_and_content_hashes(node_type_filter)?;
+        let unique_hashes = nodes
+            .iter()
+            .map(|(_, content_hash)| content_hash.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let embeddings = self.get_embeddings_batch(&unique_hashes)?;
+
+        let mut results = Vec::new();
+        for (node_id, content_hash) in nodes {
+            if let Some(embedding) = embeddings.get(&content_hash) {
+                results.push(VectorSearchResult {
+                    node_id,
+                    similarity: cosine_similarity(query_embedding, embedding),
+                });
+            }
+        }
+
+        results.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(max_results);
+        Ok(results)
+    }
+}
 
 /// Embed all nodes in the graph, using the cache to skip unchanged nodes.
 pub async fn embed_graph(
-    index: &Index,
+    store: &EmbeddingStore,
     graph: &Graph,
     provider: &dyn EmbeddingProvider,
 ) -> Result<EmbedStats> {
     let mut to_embed: Vec<(String, String, String)> = Vec::new(); // (id, hash, text)
+    let mut seen_hashes = HashSet::new();
 
     for node in graph.nodes.values() {
-        let needs_embedding = !index.has_valid_embedding(node.id(), &node.content_hash)?;
+        let needs_embedding = seen_hashes.insert(node.content_hash.clone())
+            && !store.has_embedding(&node.content_hash)?;
         if needs_embedding {
             let text = format!("{}\n\n{}", node.title(), node.body.trim());
-            to_embed.push((
-                node.id().to_string(),
-                node.content_hash.clone(),
-                text,
-            ));
+            to_embed.push((node.id().to_string(), node.content_hash.clone(), text));
         }
     }
 
@@ -456,14 +716,18 @@ pub async fn embed_graph(
     // Batch embed
     let texts: Vec<String> = to_embed.iter().map(|(_, _, t)| t.clone()).collect();
     let embeddings = provider.embed(&texts, InputType::Document).await?;
-
-    // Store in cache
-    for ((id, hash, _), embedding) in to_embed.iter().zip(embeddings.iter()) {
-        index.store_embedding(id, hash, embedding)?;
+    if embeddings.len() != texts.len() {
+        return Err(IndexError::General(format!(
+            "Embedding provider returned {} vectors for {} texts",
+            embeddings.len(),
+            texts.len()
+        )));
     }
 
-    // Prune embeddings for removed nodes
-    index.prune_embeddings()?;
+    // Store in cache
+    for ((_, hash, _), embedding) in to_embed.iter().zip(embeddings.iter()) {
+        store.store_embedding(hash, embedding)?;
+    }
 
     Ok(EmbedStats {
         embedded: texts.len(),
@@ -486,5 +750,223 @@ impl std::fmt::Display for EmbedStats {
             "Embedded {} nodes ({} cached, {} dimensions)",
             self.embedded, self.skipped, self.dimensions
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    use tempyr_core::node::parse_node;
+    use tempyr_core::schema::Schema;
+
+    fn make_schema() -> Schema {
+        r#"
+[meta]
+version = "1"
+description = "test"
+
+[node_types.feature]
+description = "Feature"
+directory = "features"
+required_fields = []
+optional_fields = ["status", "owner"]
+allowed_statuses = ["draft"]
+allowed_edges = []
+
+[edge_types.depends_on]
+reverse = "dependency_of"
+"#
+        .parse()
+        .unwrap()
+    }
+
+    fn make_graph() -> Graph {
+        let mut graph = Graph::new(make_schema());
+        let node = parse_node(
+            "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Session Replay\n\nCapture sessions.\n",
+            PathBuf::from("graph/features/feat-replay.md"),
+        )
+        .unwrap();
+        graph.add_node(node);
+        graph
+    }
+
+    struct FixedProvider {
+        embeddings: Vec<Vec<f32>>,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for FixedProvider {
+        async fn embed(&self, _texts: &[String], _input_type: InputType) -> Result<Vec<Vec<f32>>> {
+            Ok(self.embeddings.clone())
+        }
+
+        fn dimensions(&self) -> usize {
+            self.embeddings.first().map_or(0, Vec::len)
+        }
+
+        fn name(&self) -> &str {
+            "fixed"
+        }
+    }
+
+    #[test]
+    fn embed_graph_rejects_mismatched_provider_output_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let graph = make_graph();
+        let provider = FixedProvider {
+            embeddings: Vec::new(),
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(embed_graph(&store, &graph, &provider))
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Embedding provider returned 0 vectors for 1 texts")
+        );
+    }
+
+    #[test]
+    fn count_embeddings_for_index_ignores_unrelated_cache_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let graph = make_graph();
+        let index = Index::create_in_memory().unwrap();
+        index.rebuild(&graph).unwrap();
+
+        let content_hash = graph.get_node("feat-replay").unwrap().content_hash.clone();
+        store.store_embedding("unrelated", &[0.0, 1.0]).unwrap();
+        store.store_embedding(&content_hash, &[1.0, 0.0]).unwrap();
+
+        assert_eq!(store.count().unwrap(), 2);
+        assert_eq!(store.count_embeddings_for_index(&index, None).unwrap(), 1);
+    }
+
+    #[test]
+    fn resolve_embedding_config_applies_provider_defaults() {
+        let mut config = EmbeddingConfig::default();
+        config.apply_partial(EmbeddingConfigPartial {
+            provider: Some("gemini".to_string()),
+            ..Default::default()
+        });
+
+        let resolved = resolve_embedding_config(&config).unwrap();
+
+        assert_eq!(resolved.provider, "gemini");
+        assert_eq!(resolved.model.as_deref(), Some(GEMINI_MODEL));
+        assert_eq!(resolved.dimensions, GEMINI_DIMENSIONS);
+    }
+
+    #[test]
+    fn resolve_embedding_config_rejects_invalid_local_dimensions() {
+        let config = EmbeddingConfig {
+            provider: "local".to_string(),
+            model: None,
+            dimensions: Some(1024),
+        };
+
+        let err = resolve_embedding_config(&config).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Local embeddings only support 384 dimensions")
+        );
+    }
+
+    #[test]
+    fn embed_graph_dedupes_duplicate_content_hashes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let schema = make_schema();
+        let mut graph = Graph::new(schema);
+        let node_a = parse_node(
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Shared Title\n\nSame body.\n",
+            PathBuf::from("graph/features/feat-a.md"),
+        )
+        .unwrap();
+        let node_b = parse_node(
+            "---\nid: feat-b\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Shared Title\n\nSame body.\n",
+            PathBuf::from("graph/features/feat-b.md"),
+        )
+        .unwrap();
+        graph.add_node(node_a);
+        graph.add_node(node_b);
+
+        let provider = FixedProvider {
+            embeddings: vec![vec![1.0, 0.0]],
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let stats = rt.block_on(embed_graph(&store, &graph, &provider)).unwrap();
+
+        assert_eq!(stats.embedded, 1);
+        assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn count_embeddings_for_index_counts_all_nodes_sharing_a_cached_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let index = Index::create_in_memory().unwrap();
+
+        index
+            .conn
+            .execute(
+                "INSERT INTO nodes (id, node_type, file_path, content_hash, body_text, title) VALUES ('feat-a', 'feature', 'a.md', 'shared', '', '')",
+                [],
+            )
+            .unwrap();
+        index
+            .conn
+            .execute(
+                "INSERT INTO nodes (id, node_type, file_path, content_hash, body_text, title) VALUES ('feat-b', 'feature', 'b.md', 'shared', '', '')",
+                [],
+            )
+            .unwrap();
+        store.store_embedding("shared", &[1.0, 0.0]).unwrap();
+
+        assert_eq!(store.count_embeddings_for_index(&index, None).unwrap(), 2);
+    }
+
+    #[test]
+    fn vector_search_returns_all_nodes_sharing_a_cached_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let index = Index::create_in_memory().unwrap();
+
+        index
+            .conn
+            .execute(
+                "INSERT INTO nodes (id, node_type, file_path, content_hash, body_text, title) VALUES ('feat-a', 'feature', 'a.md', 'shared', '', '')",
+                [],
+            )
+            .unwrap();
+        index
+            .conn
+            .execute(
+                "INSERT INTO nodes (id, node_type, file_path, content_hash, body_text, title) VALUES ('feat-b', 'feature', 'b.md', 'shared', '', '')",
+                [],
+            )
+            .unwrap();
+        store.store_embedding("shared", &[1.0, 0.0]).unwrap();
+
+        let results = store.vector_search(&index, &[1.0, 0.0], 10, None).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].similarity, 1.0);
+        assert_eq!(results[1].similarity, 1.0);
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.node_id.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["feat-a", "feat-b"])
+        );
     }
 }

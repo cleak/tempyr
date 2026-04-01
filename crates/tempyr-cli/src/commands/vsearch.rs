@@ -1,6 +1,13 @@
 use crate::config::ProjectContext;
-use tempyr_index::embeddings::{self, EmbeddingConfig, InputType};
+use tempyr_index::embeddings::{self, EmbeddingStore, InputType};
 use tempyr_index::indexer::Index;
+
+fn should_use_legacy_embeddings(
+    store_embedding_count: usize,
+    legacy_embedding_count: usize,
+) -> bool {
+    legacy_embedding_count > 0 && legacy_embedding_count > store_embedding_count
+}
 
 pub fn run(
     ctx: &ProjectContext,
@@ -9,16 +16,22 @@ pub fn run(
     node_type: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let index_path = ctx.index_path();
-    if !index_path.exists() {
-        anyhow::bail!("Index not found. Run `tempyr index rebuild` first.");
-    }
-
+    let index_path = ctx.current_index_path()?;
     let index = Index::open(&index_path)?;
+    let resolved = ctx.resolved_embedding_config()?;
+    let store_path = ctx.embedding_store_path(
+        &resolved.provider,
+        resolved.model.as_deref(),
+        Some(resolved.dimensions),
+    );
+    let store = EmbeddingStore::open_or_create(&store_path)?;
 
     // Check if embeddings exist
-    let emb_count = index.embedding_count()?;
-    if emb_count == 0 {
+    let store_embedding_count = store.count_embeddings_for_index(&index, node_type)?;
+    let legacy_embedding_count = index.embedding_count_for_node_type(node_type)?;
+    let use_legacy_index_embeddings =
+        should_use_legacy_embeddings(store_embedding_count, legacy_embedding_count);
+    if store_embedding_count == 0 && legacy_embedding_count == 0 {
         anyhow::bail!(
             "No embeddings found. Run `tempyr index rebuild` with an embedding \
              API key set (VOYAGE_API_KEY or GEMINI_API_KEY)."
@@ -26,8 +39,7 @@ pub fn run(
     }
 
     // Embed the query
-    let config = load_embedding_config(ctx);
-    let provider = embeddings::create_provider(&config)?;
+    let provider = embeddings::create_provider_from_resolved(&resolved)?;
 
     let rt = tokio::runtime::Runtime::new()?;
     let query_embeddings = rt.block_on(provider.embed(&[query.to_string()], InputType::Query))?;
@@ -36,15 +48,22 @@ pub fn run(
         anyhow::bail!("Failed to embed query");
     }
 
-    let results = index.vector_search(&query_embeddings[0], max_results, node_type)?;
+    let results = if use_legacy_index_embeddings {
+        index.vector_search(&query_embeddings[0], max_results, node_type)?
+    } else {
+        store.vector_search(&index, &query_embeddings[0], max_results, node_type)?
+    };
 
     if json {
-        let json_results: Vec<_> = results.iter().map(|r| {
-            serde_json::json!({
-                "node_id": r.node_id,
-                "similarity": r.similarity,
+        let json_results: Vec<_> = results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "node_id": r.node_id,
+                    "similarity": r.similarity,
+                })
             })
-        }).collect();
+            .collect();
         println!("{}", serde_json::to_string_pretty(&json_results)?);
     } else {
         if results.is_empty() {
@@ -59,16 +78,22 @@ pub fn run(
     Ok(())
 }
 
-fn load_embedding_config(ctx: &ProjectContext) -> EmbeddingConfig {
-    let config_path = ctx.tempyr_dir.join("config.toml");
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
-        if let Ok(table) = content.parse::<toml::Table>() {
-            if let Some(emb) = table.get("embedding") {
-                if let Ok(config) = emb.clone().try_into::<EmbeddingConfig>() {
-                    return config;
-                }
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::should_use_legacy_embeddings;
+
+    #[test]
+    fn prefers_legacy_when_shared_store_is_empty() {
+        assert!(should_use_legacy_embeddings(0, 3));
     }
-    EmbeddingConfig::default()
+
+    #[test]
+    fn prefers_shared_store_when_coverage_is_equal() {
+        assert!(!should_use_legacy_embeddings(2, 2));
+    }
+
+    #[test]
+    fn prefers_shared_store_when_it_has_more_coverage() {
+        assert!(!should_use_legacy_embeddings(3, 2));
+    }
 }

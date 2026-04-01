@@ -1,17 +1,17 @@
 use std::collections::{HashMap, HashSet};
 
+use serde::Serialize;
 use tempyr_core::graph::Graph;
 use tempyr_core::id;
 use tempyr_core::schema::Schema;
-use serde::Serialize;
 
-use crate::gaps::{detect_gaps, detect_gaps_with_graph, Gap};
+use crate::Result;
+use crate::gaps::{Gap, detect_gaps, detect_gaps_with_graph};
 use crate::phases;
 use crate::session::{
-    DuplicateCandidate, EdgeSource, ExistingNodeSummary, InterviewSession,
-    Progress, TentativeEdge, TentativeNode,
+    DuplicateCandidate, EdgeSource, ExistingNodeSummary, InterviewSession, Progress, TentativeEdge,
+    TentativeNode,
 };
-use crate::Result;
 
 /// The result of starting an interview.
 #[derive(Debug, Serialize)]
@@ -98,7 +98,8 @@ pub fn add_proposed_node(
     let actual_id = if id::is_hybrid_id(id) {
         id.to_string()
     } else {
-        let existing: HashSet<String> = session.tentative_nodes
+        let existing: HashSet<String> = session
+            .tentative_nodes
             .iter()
             .filter_map(|n| id::parse_node_id(&n.id).map(|p| p.suffix))
             .collect();
@@ -309,8 +310,8 @@ fn first_line(text: &str) -> &str {
 mod tests {
     use super::*;
     use crate::phases::InterviewPhase;
-    use tempyr_core::schema::Schema;
     use std::path::Path;
+    use tempyr_core::schema::Schema;
 
     fn make_schema() -> Schema {
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -324,7 +325,10 @@ mod tests {
 
     #[test]
     fn test_slugify() {
-        assert_eq!(slugify("Session Replay for Users"), "session-replay-for-users");
+        assert_eq!(
+            slugify("Session Replay for Users"),
+            "session-replay-for-users"
+        );
         assert_eq!(slugify("  Hello  World  "), "hello-world");
         assert_eq!(slugify("# My Feature"), "my-feature");
     }
@@ -367,7 +371,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.session.graph_context.contains(&"epic-observability".to_string()));
+        assert!(
+            result
+                .session
+                .graph_context
+                .contains(&"epic-observability".to_string())
+        );
         // Should advance past Discovery since we have context and a body
         assert_eq!(result.session.phase, InterviewPhase::Product);
     }
@@ -375,7 +384,7 @@ mod tests {
     #[test]
     fn test_add_proposed_node_fills_gap() {
         let schema = make_schema();
-        let mut result = interview_start(
+        let result = interview_start(
             "Session replay for debugging",
             "feature",
             &schema,
@@ -387,7 +396,12 @@ mod tests {
         let mut session = result.session;
 
         // Should have a persona gap
-        assert!(session.remaining_gaps.iter().any(|g| g.node_type_needed == "persona"));
+        assert!(
+            session
+                .remaining_gaps
+                .iter()
+                .any(|g| g.node_type_needed == "persona")
+        );
 
         // Add a persona
         let update = add_proposed_node(
@@ -405,27 +419,54 @@ mod tests {
         let root_id = session.root_node.id.clone();
         let persona_id = update.new_nodes[0].clone();
         add_proposed_edge(&mut session, &root_id, &persona_id, "serves", &schema);
-        assert!(!session.remaining_gaps.iter().any(|g| g.node_type_needed == "persona"));
+        assert!(
+            !session
+                .remaining_gaps
+                .iter()
+                .any(|g| g.node_type_needed == "persona")
+        );
     }
 
     #[test]
     fn test_add_proposed_edge() {
         let schema = make_schema();
-        let result = interview_start("A feature idea", "feature", &schema, &["ctx".to_string()], &HashSet::new()).unwrap();
+        let result = interview_start(
+            "A feature idea",
+            "feature",
+            &schema,
+            &["ctx".to_string()],
+            &HashSet::new(),
+        )
+        .unwrap();
         let mut session = result.session;
 
         let root_id = session.root_node.id.clone();
-        let update = add_proposed_node(&mut session, "persona-x", "persona", "", "# X\n", 0.8, &schema);
+        let update = add_proposed_node(
+            &mut session,
+            "persona-x",
+            "persona",
+            "",
+            "# X\n",
+            0.8,
+            &schema,
+        );
         let persona_id = update.new_nodes[0].clone();
 
-        let update = add_proposed_edge(&mut session, &root_id, &persona_id, "serves", &schema);
+        let _update = add_proposed_edge(&mut session, &root_id, &persona_id, "serves", &schema);
         assert!(session.has_edge_type_from_root("serves"));
     }
 
     #[test]
     fn test_record_answer_and_reanalyze() {
         let schema = make_schema();
-        let result = interview_start("A feature", "feature", &schema, &["ctx".to_string()], &HashSet::new()).unwrap();
+        let result = interview_start(
+            "A feature",
+            "feature",
+            &schema,
+            &["ctx".to_string()],
+            &HashSet::new(),
+        )
+        .unwrap();
         let mut session = result.session;
 
         let update = record_answer(
@@ -449,7 +490,8 @@ mod tests {
             &schema,
             &["ctx".to_string()],
             &HashSet::new(),
-        ).unwrap();
+        )
+        .unwrap();
         let mut session = result.session;
 
         // Should be in Product phase (has context + body)
@@ -457,13 +499,29 @@ mod tests {
 
         // Add persona + edge
         let root_id = session.root_node.id.clone();
-        let persona_update = add_proposed_node(&mut session, "persona-eng", "persona", "", "# Eng\n", 0.9, &schema);
+        let persona_update = add_proposed_node(
+            &mut session,
+            "persona-eng",
+            "persona",
+            "",
+            "# Eng\n",
+            0.9,
+            &schema,
+        );
         let persona_id = persona_update.new_nodes[0].clone();
         add_proposed_edge(&mut session, &root_id, &persona_id, "serves", &schema);
 
         // Add metric — this should trigger Product → Technical since we now have
         // persona + metric + substantive body
-        let update = add_proposed_node(&mut session, "metric-mttr", "metric", "proposed", "# Reduce MTTR\n", 0.8, &schema);
+        let update = add_proposed_node(
+            &mut session,
+            "metric-mttr",
+            "metric",
+            "proposed",
+            "# Reduce MTTR\n",
+            0.8,
+            &schema,
+        );
         let metric_id = update.new_nodes[0].clone();
         add_proposed_edge(&mut session, &root_id, &metric_id, "measured_by", &schema);
 
@@ -502,11 +560,7 @@ edges: []
 
 A platform engineer.
 ";
-        std::fs::write(
-            personas_dir.join("persona-platform-eng.md"),
-            node_content,
-        )
-        .unwrap();
+        std::fs::write(personas_dir.join("persona-platform-eng.md"), node_content).unwrap();
 
         let graph = Graph::load_from_directory(&graph_dir, schema).unwrap();
 
@@ -552,11 +606,7 @@ edges: []
 
 A platform engineer.
 ";
-        std::fs::write(
-            personas_dir.join("persona-platform-eng.md"),
-            node_content,
-        )
-        .unwrap();
+        std::fs::write(personas_dir.join("persona-platform-eng.md"), node_content).unwrap();
 
         let graph = Graph::load_from_directory(&graph_dir, schema).unwrap();
 

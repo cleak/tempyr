@@ -58,11 +58,7 @@ pub fn bfs(
 
 /// BFS traversal returning nodes with scores based on hop distance.
 /// Scores: hop 0 = 1.0, hop 1 = 0.8, hop 2 = 0.5 (per spec section 3.6).
-pub fn bfs_scored(
-    graph: &Graph,
-    root_id: &str,
-    max_depth: usize,
-) -> Vec<(String, f64)> {
+pub fn bfs_scored(graph: &Graph, root_id: &str, max_depth: usize) -> Vec<(String, f64)> {
     let results = bfs(graph, root_id, max_depth, None);
     results
         .into_iter()
@@ -109,14 +105,6 @@ mod tests {
         graph.add_node(node);
     }
 
-    fn add_task(graph: &mut Graph, id: &str, edges_yaml: &str) {
-        let content = format!(
-            "---\nid: {id}\ntype: task\nstatus: backlog\nedges:\n{edges_yaml}---\n# {id}\n"
-        );
-        let node = parse_node(&content, PathBuf::from(format!("{id}.md"))).unwrap();
-        graph.add_node(node);
-    }
-
     #[test]
     fn test_bfs_basic() {
         // A -> B -> C (chain of 3)
@@ -138,7 +126,11 @@ mod tests {
     #[test]
     fn test_bfs_with_edge_filter() {
         let mut graph = Graph::new(make_test_schema());
-        add_feature(&mut graph, "a", "  - target: b\n    type: depends_on\n  - target: c\n    type: serves\n");
+        add_feature(
+            &mut graph,
+            "a",
+            "  - target: b\n    type: depends_on\n  - target: c\n    type: serves\n",
+        );
         add_feature(&mut graph, "b", "");
 
         // Create a persona node for "c" since serves targets persona

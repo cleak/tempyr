@@ -137,8 +137,7 @@ pub fn install_all(root: &Path, force: bool) -> anyhow::Result<Vec<InstallResult
 
     for def in MANAGED_FILES {
         let status = check_file(root, def, &manifest)?;
-        let (outcome, written_hash, tempyr_hash) =
-            write_file(root, def, status, force)?;
+        let (outcome, written_hash, tempyr_hash) = write_file(root, def, status, force)?;
 
         new_manifest_files.push(ManagedFile {
             path: def.path.to_string(),
@@ -180,15 +179,17 @@ fn check_file(
     let embedded_hash = hash(def.content);
 
     let on_disk = if file_path.exists() {
-        Some(std::fs::read_to_string(&file_path)
-            .with_context(|| format!("Failed to read {}", def.path))?)
+        Some(
+            std::fs::read_to_string(&file_path)
+                .with_context(|| format!("Failed to read {}", def.path))?,
+        )
     } else {
         None
     };
 
-    let manifest_entry = manifest.as_ref().and_then(|m| {
-        m.files.iter().find(|f| f.path == def.path)
-    });
+    let manifest_entry = manifest
+        .as_ref()
+        .and_then(|m| m.files.iter().find(|f| f.path == def.path));
 
     match (on_disk, manifest_entry) {
         // File doesn't exist on disk.
@@ -336,8 +337,8 @@ fn load_manifest(root: &Path) -> anyhow::Result<Option<Manifest>> {
     if !path.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| "Failed to read .tempyr/managed.toml")?;
+    let content =
+        std::fs::read_to_string(&path).with_context(|| "Failed to read .tempyr/managed.toml")?;
     let manifest: Manifest =
         toml::from_str(&content).with_context(|| "Failed to parse .tempyr/managed.toml")?;
     Ok(Some(manifest))
@@ -356,17 +357,17 @@ fn save_manifest(root: &Path, manifest: &Manifest) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn is_tempyr_hook(entry: &serde_json::Value) -> bool {
-    if let Some(matcher) = entry.get("matcher").and_then(|m| m.as_str()) {
-        if matcher.contains("mcp__tempyr__") {
-            return true;
-        }
+    if let Some(matcher) = entry.get("matcher").and_then(|m| m.as_str())
+        && matcher.contains("mcp__tempyr__")
+    {
+        return true;
     }
     if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
         for hook in hooks {
-            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
-                if cmd.contains("tempyr ") {
-                    return true;
-                }
+            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
+                && cmd.contains("tempyr ")
+            {
+                return true;
             }
         }
     }
@@ -456,7 +457,11 @@ mod tests {
         let tempyr = r#"{"hooks":{"PostToolUse":[{"matcher":"mcp__tempyr__graph_add_node","hooks":[{"type":"command","command":"tempyr validate --json"}]}]}}"#;
         let result = merge_settings("", tempyr).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        let arr = parsed.pointer("/hooks/PostToolUse").unwrap().as_array().unwrap();
+        let arr = parsed
+            .pointer("/hooks/PostToolUse")
+            .unwrap()
+            .as_array()
+            .unwrap();
         assert_eq!(arr.len(), 1);
         assert!(is_tempyr_hook(&arr[0]));
     }
@@ -474,7 +479,11 @@ mod tests {
         let tempyr = r#"{"hooks":{"PostToolUse":[{"matcher":"mcp__tempyr__graph_add_node|mcp__tempyr__graph_update_node","hooks":[{"type":"command","command":"tempyr validate --json"},{"type":"command","command":"tempyr index update --json"}]}]}}"#;
         let result = merge_settings(existing, tempyr).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        let arr = parsed.pointer("/hooks/PostToolUse").unwrap().as_array().unwrap();
+        let arr = parsed
+            .pointer("/hooks/PostToolUse")
+            .unwrap()
+            .as_array()
+            .unwrap();
 
         // User's eslint hook preserved, old tempyr hook removed, new tempyr hook added.
         assert_eq!(arr.len(), 2);
@@ -518,10 +527,7 @@ mod tests {
         assert_eq!(deserialized.tempyr_version, manifest.tempyr_version);
         assert_eq!(deserialized.files.len(), 2);
         assert_eq!(deserialized.files[0].strategy, Strategy::Merge);
-        assert_eq!(
-            deserialized.files[0].tempyr_hash,
-            Some("def".to_string())
-        );
+        assert_eq!(deserialized.files[0].tempyr_hash, Some("def".to_string()));
         assert_eq!(deserialized.files[1].strategy, Strategy::Overwrite);
         assert!(deserialized.files[1].tempyr_hash.is_none());
     }

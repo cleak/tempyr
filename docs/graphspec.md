@@ -18,7 +18,7 @@ Tempyr is a file-based knowledge graph system with hybrid retrieval (structural 
 
 1. **Files are the source of truth.** Every node is a `.md` file with YAML frontmatter. Git provides versioning, branching, and collaboration. No database is authoritative — all indices are derived and rebuildable.
 2. **Documents are views, not artifacts.** A PRD is a traversal query that collects feature, persona, constraint, metric, decision, and risk nodes and assembles them using a rendering template. A TDD follows different edges from the same root.
-3. **Hybrid retrieval.** Structured graph traversal for known relationships, vector similarity for semantic discovery, BM25 for exact keyword matching. All three indices live in a single derived SQLite database.
+3. **Hybrid retrieval.** Structured graph traversal for known relationships, vector similarity for semantic discovery, BM25 for exact keyword matching. Structural and FTS data live in derived SQLite indices, while embeddings are cached separately by content hash and may be shared across worktrees.
 4. **The interview is the product.** The AI doesn't generate documents — it interviews the user, proposes graph nodes and edges in real time, and commits them on approval. Every answer enriches the graph.
 5. **Zero infrastructure.** No servers, no Docker, no Java. `git clone` + `tempyr index rebuild` and you're running on any machine. The only external dependency at runtime is an LLM API for embeddings and the interview flow.
 
@@ -27,7 +27,7 @@ Tempyr is a file-based knowledge graph system with hybrid retrieval (structural 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Source of truth | Markdown + YAML frontmatter in git | Human-readable, diffable, portable, Claude Code native |
-| Index storage | SQLite + FTS5 + sqlite-vec (single `.db` file) | Embedded, zero-config, rebuildable from files |
+| Index storage | Snapshot-specific SQLite indices plus shared embedding cache | Embedded, zero-config, rebuildable from files, worktree-friendly |
 | Language | Rust | Performance, single binary, author's primary language |
 | Primary frontend | Claude Code via MCP server | Conversation IS the UI, no custom frontend to maintain |
 | Secondary frontend | CLI (same Rust binary) | Standalone queries, scripting, CI validation |
@@ -476,7 +476,7 @@ relates_to = { reverse = "relates_to", description = "Symmetric weak association
 
 ### 3.5 SQLite Index Schema
 
-A single file `.tempyr/index.db` contains all derived indices. It is gitignored and can be fully rebuilt from source files at any time via `tempyr index rebuild`.
+Derived indices are rebuildable cache artifacts. The structural index for a graph snapshot lives in a SQLite database, and embedding vectors may be stored in a separate shared cache keyed by content hash so identical worktrees can reuse them. Older projects may still use `.tempyr/index.db` as a legacy fallback, but it is no longer the only storage layout.
 
 ```sql
 -- Structural index
@@ -522,12 +522,12 @@ CREATE VIRTUAL TABLE nodes_fts USING fts5(
     tokenize='porter unicode61'
 );
 
--- Vector similarity search index (sqlite-vec)
+-- Legacy vector similarity search index (sqlite-vec compatibility path)
 CREATE VIRTUAL TABLE nodes_vec USING vec0(
     embedding float[1536]            -- dimension matches embedding model
 );
 
--- Embedding cache: only re-embed when content_hash changes
+-- Legacy embedding cache inside the index DB (compatibility fallback)
 CREATE TABLE embedding_cache (
     node_id      TEXT PRIMARY KEY,
     content_hash TEXT NOT NULL,

@@ -33,9 +33,9 @@ pub fn render(
     let tmpl = template::RenderTemplate::load(template_path)?;
 
     // Validate root type
-    let root = graph.get_node(root_id).ok_or_else(|| {
-        RenderError::General(format!("Root node not found: '{root_id}'"))
-    })?;
+    let root = graph
+        .get_node(root_id)
+        .ok_or_else(|| RenderError::General(format!("Root node not found: '{root_id}'")))?;
 
     if !tmpl.meta.root_types.contains(&root.node_type().to_string()) {
         return Err(RenderError::General(format!(
@@ -65,11 +65,11 @@ pub fn render_from_str(
     root_id: &str,
     temporal_filter: &TemporalFilter,
 ) -> Result<String> {
-    let tmpl = template::RenderTemplate::from_str(template_toml)?;
+    let tmpl: template::RenderTemplate = template_toml.parse()?;
 
-    let root = graph.get_node(root_id).ok_or_else(|| {
-        RenderError::General(format!("Root node not found: '{root_id}'"))
-    })?;
+    let root = graph
+        .get_node(root_id)
+        .ok_or_else(|| RenderError::General(format!("Root node not found: '{root_id}'")))?;
 
     if !tmpl.meta.root_types.contains(&root.node_type().to_string()) {
         return Err(RenderError::General(format!(
@@ -93,10 +93,10 @@ pub fn render_from_str(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use tempyr_core::graph::Graph;
     use tempyr_core::node::parse_node;
     use tempyr_core::schema::Schema;
-    use std::path::{Path, PathBuf};
 
     fn make_schema() -> Schema {
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -156,7 +156,13 @@ A recording agent captures DOM snapshots.
             .unwrap()
             .join("templates/prd.toml");
 
-        let result = render(&graph, &template_path, "feat-replay", &TemporalFilter::current()).unwrap();
+        let result = render(
+            &graph,
+            &template_path,
+            "feat-replay",
+            &TemporalFilter::current(),
+        )
+        .unwrap();
 
         assert!(result.contains("Product Requirements Document: Session Replay"));
         assert!(result.contains("## Overview"));
@@ -178,7 +184,12 @@ A recording agent captures DOM snapshots.
             .join("templates/prd.toml");
 
         // Try to render a PRD from a persona (should fail)
-        let result = render(&graph, &template_path, "persona-eng", &TemporalFilter::current());
+        let result = render(
+            &graph,
+            &template_path,
+            "persona-eng",
+            &TemporalFilter::current(),
+        );
         assert!(result.is_err());
     }
 
@@ -195,7 +206,13 @@ output_format = "markdown"
 heading = "Overview"
 source = "root"
 "#;
-        let result = render_from_str(&graph, template_toml, "feat-replay", &TemporalFilter::current()).unwrap();
+        let result = render_from_str(
+            &graph,
+            template_toml,
+            "feat-replay",
+            &TemporalFilter::current(),
+        )
+        .unwrap();
         assert!(result.contains("Simple Doc: Session Replay"));
         assert!(result.contains("## Overview"));
     }
