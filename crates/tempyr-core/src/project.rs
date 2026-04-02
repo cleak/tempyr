@@ -550,6 +550,9 @@ fn short_path_hash(path: &Path) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{LazyLock, Mutex};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn finds_direct_project_root() {
@@ -678,6 +681,7 @@ mod tests {
 
     #[test]
     fn load_project_env_prefers_env_local_within_direct_project() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         fs::create_dir(root.join(".tempyr")).unwrap();
@@ -704,6 +708,7 @@ mod tests {
 
     #[test]
     fn load_project_env_finds_project_from_graph_dir_start() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         fs::create_dir(root.join(".tempyr")).unwrap();
@@ -720,6 +725,7 @@ mod tests {
 
     #[test]
     fn load_project_env_uses_anchor_before_redirect_target() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
 
         let real_root = tmp.path().join("knowledge-base");

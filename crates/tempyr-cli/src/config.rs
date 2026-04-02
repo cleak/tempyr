@@ -141,6 +141,7 @@ impl ProjectContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn test_schema() -> Schema {
         r#"
@@ -162,9 +163,32 @@ allowed_edges = []
         .unwrap()
     }
 
+    fn write_test_schema(tempyr_dir: &Path) {
+        fs::create_dir_all(tempyr_dir).unwrap();
+        fs::write(
+            tempyr_dir.join("schema.toml"),
+            r#"
+[meta]
+version = "1"
+description = "test"
+
+[node_types.feature]
+description = "Feature"
+directory = "features"
+required_fields = []
+optional_fields = []
+allowed_statuses = ["draft"]
+allowed_edges = []
+
+[edge_types]
+"#,
+        )
+        .unwrap();
+    }
+
     fn make_context(root: &Path) -> ProjectContext {
         let tempyr_dir = root.join(".tempyr");
-        std::fs::create_dir_all(&tempyr_dir).unwrap();
+        fs::create_dir_all(&tempyr_dir).unwrap();
 
         ProjectContext {
             root: root.to_path_buf(),
@@ -239,32 +263,32 @@ allowed_edges = []
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let tempyr_dir = root.join(".tempyr");
-        std::fs::create_dir_all(root.join("graph")).unwrap();
-        std::fs::create_dir_all(&tempyr_dir).unwrap();
-        std::fs::write(
-            tempyr_dir.join("schema.toml"),
-            r#"
-[meta]
-version = "1"
-description = "test"
-
-[node_types.feature]
-description = "Feature"
-directory = "features"
-required_fields = []
-optional_fields = []
-allowed_statuses = ["draft"]
-allowed_edges = []
-
-[edge_types]
-"#,
-        )
-        .unwrap();
+        fs::create_dir_all(root.join("graph")).unwrap();
+        write_test_schema(&tempyr_dir);
 
         let ctx = ProjectContext::find(Some(root.join("graph").as_path())).unwrap();
 
         assert_eq!(ctx.root, root);
         assert_eq!(ctx.graph_dir, root.join("graph"));
         assert_eq!(ctx.tempyr_dir, tempyr_dir);
+    }
+
+    #[test]
+    fn find_uses_graph_dir_override_through_redirect_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real_root = tmp.path().join("knowledge-base");
+        let tempyr_dir = real_root.join(".tempyr");
+        write_test_schema(&tempyr_dir);
+
+        let work_root = tmp.path().join("main-project");
+        let graph_override = work_root.join("graph");
+        fs::create_dir_all(&graph_override).unwrap();
+        fs::write(work_root.join(".tempyr-redirect"), "../knowledge-base\n").unwrap();
+
+        let ctx = ProjectContext::find(Some(graph_override.as_path())).unwrap();
+
+        assert_eq!(ctx.root, fs::canonicalize(&real_root).unwrap());
+        assert_eq!(ctx.graph_dir, graph_override);
+        assert_eq!(ctx.tempyr_dir, fs::canonicalize(tempyr_dir).unwrap());
     }
 }
