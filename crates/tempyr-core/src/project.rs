@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRoots {
+    pub anchor_root: PathBuf,
+    pub project_root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitDirs {
     pub git_dir: PathBuf,
     pub common_dir: PathBuf,
@@ -251,11 +257,22 @@ impl IndexLayout {
 /// Redirect paths are resolved relative to the directory containing the redirect file.
 /// Only one level of redirect is followed (no chaining).
 pub fn find_project_root() -> Option<PathBuf> {
-    find_project_root_from(std::env::current_dir().ok()?)
+    find_project_roots().map(|roots| roots.project_root)
+}
+
+/// Same as [`find_project_root`] but also returns the directory where the project marker
+/// (`.tempyr/` or `.tempyr-redirect`) was discovered.
+pub fn find_project_roots() -> Option<ProjectRoots> {
+    find_project_roots_from(std::env::current_dir().ok()?)
 }
 
 /// Same as [`find_project_root`] but starting from a given directory.
 pub fn find_project_root_from(start: PathBuf) -> Option<PathBuf> {
+    find_project_roots_from(start).map(|roots| roots.project_root)
+}
+
+/// Same as [`find_project_roots`] but starting from a given directory.
+pub fn find_project_roots_from(start: PathBuf) -> Option<ProjectRoots> {
     let mut dir = start;
     loop {
         // Check for redirect file first
@@ -264,18 +281,70 @@ pub fn find_project_root_from(start: PathBuf) -> Option<PathBuf> {
             && let Some(target) = read_redirect(&redirect_path, &dir)
             && target.join(".tempyr").is_dir()
         {
-            return Some(target);
+            return Some(ProjectRoots {
+                anchor_root: dir.clone(),
+                project_root: target,
+            });
         }
 
         // Check for direct .tempyr/ directory
         if dir.join(".tempyr").is_dir() {
-            return Some(dir);
+            return Some(ProjectRoots {
+                anchor_root: dir.clone(),
+                project_root: dir,
+            });
         }
 
         if !dir.pop() {
             return None;
         }
     }
+}
+
+/// Load repo-local dotenv files for the current tempyr project without overwriting any
+/// variables that are already present in the process environment.
+///
+/// Loading order preserves intuitive precedence:
+/// 1. Existing process environment
+/// 2. `.env.local` in the invocation project root
+/// 3. `.env` in the invocation project root
+/// 4. `.env.local` in the resolved tempyr root (for redirect setups)
+/// 5. `.env` in the resolved tempyr root (for redirect setups)
+pub fn load_project_env() -> io::Result<Vec<PathBuf>> {
+    let Some(start) = std::env::current_dir().ok() else {
+        return Ok(Vec::new());
+    };
+    load_project_env_from(start)
+}
+
+/// Same as [`load_project_env`] but starting from a specific directory.
+pub fn load_project_env_from(start: PathBuf) -> io::Result<Vec<PathBuf>> {
+    let Some(roots) = find_project_roots_from(start) else {
+        return Ok(Vec::new());
+    };
+
+    let mut loaded = load_env_dir(&roots.anchor_root)?;
+    if roots.project_root != roots.anchor_root {
+        loaded.extend(load_env_dir(&roots.project_root)?);
+    }
+    Ok(loaded)
+}
+
+fn load_env_dir(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut loaded = Vec::new();
+    for filename in [".env.local", ".env"] {
+        let path = dir.join(filename);
+        if !path.is_file() {
+            continue;
+        }
+
+        // `from_path` preserves variables that are already set, so earlier files and the
+        // existing process environment keep their precedence.
+        dotenvy::from_path(&path)
+            .map_err(|err| io::Error::other(format!("Failed to load {}: {err}", path.display())))?;
+        loaded.push(path);
+    }
+    Ok(loaded)
 }
 
 /// Read a `.tempyr-redirect` file and resolve the path it contains.
@@ -481,6 +550,9 @@ fn short_path_hash(path: &Path) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{LazyLock, Mutex};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn finds_direct_project_root() {
@@ -521,6 +593,23 @@ mod tests {
         let found = find_project_root_from(work_root);
         let expected = fs::canonicalize(&real_root).unwrap();
         assert_eq!(found, Some(expected));
+    }
+
+    #[test]
+    fn finds_anchor_and_project_root_for_redirect_file() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let real_root = tmp.path().join("knowledge-base");
+        fs::create_dir_all(real_root.join(".tempyr")).unwrap();
+
+        let work_root = tmp.path().join("main-project");
+        fs::create_dir(&work_root).unwrap();
+        fs::write(work_root.join(".tempyr-redirect"), "../knowledge-base\n").unwrap();
+
+        let roots = find_project_roots_from(work_root.clone()).unwrap();
+
+        assert_eq!(roots.anchor_root, work_root);
+        assert_eq!(roots.project_root, fs::canonicalize(&real_root).unwrap());
     }
 
     #[test]
@@ -588,6 +677,84 @@ mod tests {
         let dirs = resolve_git_dirs(&worktree).unwrap();
         assert_eq!(dirs.git_dir, fs::canonicalize(&private).unwrap());
         assert_eq!(dirs.common_dir, fs::canonicalize(&common).unwrap());
+    }
+
+    #[test]
+    fn load_project_env_prefers_env_local_within_direct_project() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        fs::create_dir(root.join(".tempyr")).unwrap();
+
+        let local_var = format!("TEMPYR_TEST_LOCAL_{}", rand::random::<u64>());
+        let base_var = format!("TEMPYR_TEST_BASE_{}", rand::random::<u64>());
+        fs::write(
+            root.join(".env"),
+            format!("{local_var}=from-dotenv\n{base_var}=from-dotenv\n"),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".env.local"),
+            format!("{local_var}=from-dotenv-local\n"),
+        )
+        .unwrap();
+
+        let loaded = load_project_env_from(root).unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(std::env::var(&local_var).unwrap(), "from-dotenv-local");
+        assert_eq!(std::env::var(&base_var).unwrap(), "from-dotenv");
+    }
+
+    #[test]
+    fn load_project_env_finds_project_from_graph_dir_start() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        fs::create_dir(root.join(".tempyr")).unwrap();
+        fs::create_dir(root.join("graph")).unwrap();
+
+        let graph_var = format!("TEMPYR_TEST_GRAPH_DIR_{}", rand::random::<u64>());
+        fs::write(root.join(".env"), format!("{graph_var}=from-dotenv\n")).unwrap();
+
+        let loaded = load_project_env_from(root.join("graph")).unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(std::env::var(&graph_var).unwrap(), "from-dotenv");
+    }
+
+    #[test]
+    fn load_project_env_uses_anchor_before_redirect_target() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+
+        let real_root = tmp.path().join("knowledge-base");
+        fs::create_dir_all(real_root.join(".tempyr")).unwrap();
+        let work_root = tmp.path().join("main-project");
+        fs::create_dir(&work_root).unwrap();
+        fs::write(work_root.join(".tempyr-redirect"), "../knowledge-base\n").unwrap();
+
+        let shared_var = format!("TEMPYR_TEST_SHARED_{}", rand::random::<u64>());
+        let root_only_var = format!("TEMPYR_TEST_ROOT_ONLY_{}", rand::random::<u64>());
+        fs::write(
+            work_root.join(".env"),
+            format!("{shared_var}=from-anchor\n"),
+        )
+        .unwrap();
+        fs::write(
+            real_root.join(".env"),
+            format!("{shared_var}=from-redirect-target\n{root_only_var}=from-redirect-target\n"),
+        )
+        .unwrap();
+
+        let loaded = load_project_env_from(work_root).unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(std::env::var(&shared_var).unwrap(), "from-anchor");
+        assert_eq!(
+            std::env::var(&root_only_var).unwrap(),
+            "from-redirect-target"
+        );
     }
 
     #[test]
