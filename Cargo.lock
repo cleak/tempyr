@@ -2937,6 +2937,7 @@ dependencies = [
  "tempyr-index",
  "tempyr-interview",
  "tempyr-linear",
+ "tempyr-mcp",
  "tempyr-render",
  "tokio",
  "toml",
@@ -3013,6 +3014,7 @@ dependencies = [
 name = "tempyr-mcp"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "rmcp",
  "schemars",
  "serde",

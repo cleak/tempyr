@@ -41,7 +41,7 @@ The project is a **Rust workspace** with seven crates:
 | `tempyr-render` | Document rendering: TOML template parsing, graph collection, markdown output |
 | `tempyr-linear` | Linear integration: push/pull sync, status mapping, context generation |
 | `tempyr-cli` | CLI binary (`tempyr`): clap-based, all user-facing commands |
-| `tempyr-mcp` | MCP server binary: exposes graph operations as tools for Claude Code |
+| `tempyr-mcp` | MCP server library used by `tempyr --mcp`: exposes graph operations as tools for Claude Code |
 
 Crate dependency order: `core` <- `index` <- `interview`/`render`/`linear` <- `cli`/`mcp`.
 

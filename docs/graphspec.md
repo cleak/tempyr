@@ -144,9 +144,9 @@ tempyr/                              # Rust workspace root
 │   │   ├── src/
 │   │   │   └── main.rs
 │   │   └── Cargo.toml
-│   └── tempyr-mcp/             # MCP server binary
+│   └── tempyr-mcp/             # MCP server library (used by `tempyr --mcp`)
 │       ├── src/
-│       │   └── main.rs
+│       │   └── lib.rs
 │       └── Cargo.toml
 ├── schema/
 │   └── default-schema.toml          # Default schema shipped with the tool
@@ -1036,8 +1036,7 @@ COMMANDS:
     import <file>           Import unstructured text and propose nodes
 
     # ─── MCP Server ──────────────────────────
-    serve                   Start the MCP server (for Claude Code / other clients)
-      --port <port>         TCP port (default: stdio for MCP)
+    --mcp                   Start the MCP server on stdio (for Claude Code / other clients)
 
 OPTIONS:
     --graph-dir <path>      Path to graph directory (default: ./graph)
@@ -1239,8 +1238,7 @@ auto_advance_phases = true              # auto-transition when gaps are filled
 session_timeout_hours = 168             # sessions expire after 7 days
 
 [mcp]
-transport = "stdio"                     # stdio | tcp
-# tcp_port = 3000                      # only if transport = tcp
+transport = "stdio"                     # stdio transport for `tempyr --mcp`
 ```
 
 ---
@@ -1267,7 +1265,7 @@ transport = "stdio"                     # stdio | tcp
 
 **Deliverables**:
 - `tempyr-core`: Node/edge parsing, schema validation, in-memory graph construction
-- `tempyr-mcp`: MCP server with tools: `graph_get_node`, `graph_add_node`, `graph_add_edge`, `graph_search` (basic grep-based before FTS5), `graph_validate`, `graph_traverse`
+- `tempyr-mcp` library, launched via `tempyr --mcp`: MCP server with tools `graph_get_node`, `graph_add_node`, `graph_add_edge`, `graph_search` (basic grep-based before FTS5), `graph_validate`, `graph_traverse`
 - Basic `interview_start` and `interview_answer` (gap detection against schema, LLM calls for extraction)
 - `interview_commit` writes files
 - Session persistence to JSON files
@@ -1429,7 +1427,7 @@ an edge, both source and target files must be updated.
 
 These are decisions that should be made during implementation, not before:
 
-1. **MCP transport**: Should the MCP server use stdio (simplest, works with Claude Code directly) or TCP (supports multiple clients simultaneously)? Start with stdio, add TCP later if needed.
+1. **MCP transport**: Keep the MCP server stdio-only in v1 via `tempyr --mcp`. Revisit TCP only if multi-client support becomes necessary.
 
 2. **Embedding model choice**: Anthropic's voyage-3 vs OpenAI's text-embedding-3-small vs a local model via `fastembed-rs`. Start with API-based, switch to local if latency or cost becomes an issue.
 
