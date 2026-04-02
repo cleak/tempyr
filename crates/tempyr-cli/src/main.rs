@@ -3,7 +3,7 @@ mod config;
 
 use clap::{Parser, Subcommand};
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "tempyr", about = "File-based knowledge graph for AI-assisted design")]
@@ -359,11 +359,10 @@ fn mcp_args_error() -> anyhow::Error {
     )
 }
 
-#[tokio::main]
-async fn main() {
-    let result = match detect_launch_mode_from_args(std::env::args_os()) {
-        LaunchMode::Cli => run(Cli::parse()),
-        LaunchMode::Mcp => tempyr_mcp::serve_stdio().await,
+fn main() {
+    let result: anyhow::Result<()> = match detect_launch_mode_from_args(std::env::args_os()) {
+        LaunchMode::Cli => run_cli_mode(),
+        LaunchMode::Mcp => run_mcp_mode(),
         LaunchMode::InvalidMcpArgs => Err(mcp_args_error()),
     };
 
@@ -371,6 +370,29 @@ async fn main() {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
+}
+
+fn run_cli_mode() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    load_cli_project_env(cli.graph_dir.as_deref())?;
+    run(cli)
+}
+
+fn run_mcp_mode() -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(tempyr_mcp::serve_stdio())
+}
+
+fn load_cli_project_env(graph_dir: Option<&Path>) -> anyhow::Result<()> {
+    match graph_dir {
+        Some(graph_dir) => {
+            tempyr_core::project::load_project_env_from(graph_dir.to_path_buf())?;
+        }
+        None => {
+            tempyr_core::project::load_project_env()?;
+        }
+    }
+    Ok(())
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {

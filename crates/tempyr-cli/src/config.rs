@@ -21,7 +21,9 @@ pub struct ProjectContext {
 impl ProjectContext {
     /// Find the project root and load the schema.
     pub fn find(graph_dir_override: Option<&Path>) -> anyhow::Result<Self> {
-        let root = project::find_project_root()
+        let root = graph_dir_override
+            .map(|graph_dir| project::find_project_root_from(graph_dir.to_path_buf()))
+            .unwrap_or_else(project::find_project_root)
             .ok_or_else(|| anyhow::anyhow!("Not a tempyr project (no .tempyr/ or .tempyr-redirect found). Run `tempyr init` first."))?;
 
         let tempyr_dir = root.join(".tempyr");
@@ -230,5 +232,39 @@ allowed_edges = []
             err.to_string()
                 .contains("Failed to parse [embedding] section")
         );
+    }
+
+    #[test]
+    fn find_uses_graph_dir_override_to_resolve_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let tempyr_dir = root.join(".tempyr");
+        std::fs::create_dir_all(root.join("graph")).unwrap();
+        std::fs::create_dir_all(&tempyr_dir).unwrap();
+        std::fs::write(
+            tempyr_dir.join("schema.toml"),
+            r#"
+[meta]
+version = "1"
+description = "test"
+
+[node_types.feature]
+description = "Feature"
+directory = "features"
+required_fields = []
+optional_fields = []
+allowed_statuses = ["draft"]
+allowed_edges = []
+
+[edge_types]
+"#,
+        )
+        .unwrap();
+
+        let ctx = ProjectContext::find(Some(root.join("graph").as_path())).unwrap();
+
+        assert_eq!(ctx.root, root);
+        assert_eq!(ctx.graph_dir, root.join("graph"));
+        assert_eq!(ctx.tempyr_dir, tempyr_dir);
     }
 }
