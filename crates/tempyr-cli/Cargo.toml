@@ -13,6 +13,7 @@ tempyr-index = { path = "../tempyr-index" }
 tempyr-interview = { path = "../tempyr-interview" }
 tempyr-render = { path = "../tempyr-render" }
 tempyr-linear = { path = "../tempyr-linear" }
+tempyr-mcp = { path = "../tempyr-mcp" }
 anyhow = "1"
 blake3 = { workspace = true }
 clap = { workspace = true }

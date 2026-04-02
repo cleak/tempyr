@@ -3,11 +3,8 @@ name = "tempyr-mcp"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "tempyr-mcp"
-path = "src/main.rs"
-
 [dependencies]
+anyhow = "1"
 tempyr-core = { path = "../tempyr-core" }
 tempyr-index = { path = "../tempyr-index" }
 tempyr-interview = { path = "../tempyr-interview" }

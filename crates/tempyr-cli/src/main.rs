@@ -2,6 +2,7 @@ mod commands;
 mod config;
 
 use clap::{Parser, Subcommand};
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -325,10 +326,48 @@ pub enum LinearAction {
     },
 }
 
-fn main() {
-    let cli = Cli::parse();
+#[derive(Debug, PartialEq, Eq)]
+enum LaunchMode {
+    Cli,
+    Mcp,
+    InvalidMcpArgs,
+}
 
-    if let Err(e) = run(cli) {
+fn detect_launch_mode_from_args<I, S>(args: I) -> LaunchMode
+where
+    I: IntoIterator<Item = S>,
+    S: Into<OsString>,
+{
+    let mut args = args.into_iter().map(Into::into);
+    let _program = args.next();
+
+    match args.next() {
+        Some(arg) if arg == OsStr::new("--mcp") => {
+            if args.next().is_none() {
+                LaunchMode::Mcp
+            } else {
+                LaunchMode::InvalidMcpArgs
+            }
+        }
+        _ => LaunchMode::Cli,
+    }
+}
+
+fn mcp_args_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "`--mcp` must be the first and only argument. Launch the MCP server with `tempyr --mcp`."
+    )
+}
+
+#[tokio::main]
+async fn main() {
+    let result = match detect_launch_mode_from_args(std::env::args_os()) {
+        LaunchMode::Cli => run(Cli::parse()),
+        LaunchMode::Mcp => tempyr_mcp::serve_stdio().await,
+        LaunchMode::InvalidMcpArgs => Err(mcp_args_error()),
+    };
+
+    if let Err(e) = result {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
@@ -460,5 +499,42 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Commands::Update { check, force } => commands::update::run(check, force),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LaunchMode, detect_launch_mode_from_args};
+
+    #[test]
+    fn detect_mcp_mode_when_flag_is_first_arg() {
+        assert_eq!(
+            detect_launch_mode_from_args(["tempyr", "--mcp"]),
+            LaunchMode::Mcp
+        );
+    }
+
+    #[test]
+    fn detect_cli_mode_for_normal_commands() {
+        assert_eq!(
+            detect_launch_mode_from_args(["tempyr", "validate"]),
+            LaunchMode::Cli
+        );
+    }
+
+    #[test]
+    fn reject_extra_args_after_mcp_flag() {
+        assert_eq!(
+            detect_launch_mode_from_args(["tempyr", "--mcp", "validate"]),
+            LaunchMode::InvalidMcpArgs
+        );
+    }
+
+    #[test]
+    fn keep_cli_mode_for_existing_global_flags() {
+        assert_eq!(
+            detect_launch_mode_from_args(["tempyr", "--json", "validate"]),
+            LaunchMode::Cli
+        );
     }
 }

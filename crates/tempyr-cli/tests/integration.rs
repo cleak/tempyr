@@ -1,6 +1,9 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+use std::process::{Command as ProcessCommand, Stdio};
+use std::thread;
+use std::time::Duration;
 use tempfile::TempDir;
 
 fn tempyr() -> Command {
@@ -48,6 +51,40 @@ fn test_init_fails_if_already_initialized() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("Already initialized"));
+}
+
+#[test]
+fn test_mcp_flag_rejects_extra_args() {
+    let tmp = TempDir::new().unwrap();
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["--mcp", "validate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`--mcp` must be the first and only argument"));
+}
+
+#[test]
+fn test_mcp_mode_starts_on_stdio() {
+    let tempyr_bin = assert_cmd::cargo::cargo_bin("tempyr");
+    let mut child = ProcessCommand::new(tempyr_bin)
+        .arg("--mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(300));
+
+    if let Some(status) = child.try_wait().unwrap() {
+        panic!("tempyr --mcp exited early with status {status}");
+    }
+
+    child.kill().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.stdout.is_empty());
 }
 
 #[test]

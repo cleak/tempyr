@@ -1359,6 +1359,12 @@ impl TempyrServer {
     }
 }
 
+impl Default for TempyrServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for TempyrServer {
     fn get_info(&self) -> ServerInfo {
