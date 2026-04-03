@@ -17,6 +17,8 @@ tempyr-mcp = { path = "../tempyr-mcp" }
 anyhow = "1"
 blake3 = { workspace = true }
 clap = { workspace = true }
+crossterm = "0.28"
+ratatui = "0.29"
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

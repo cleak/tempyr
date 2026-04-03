@@ -12,6 +12,7 @@ pub mod linear_cmd;
 pub mod list;
 pub mod managed;
 pub mod migrate;
+pub mod onboarding;
 pub mod rename;
 pub mod render_cmd;
 pub mod search;

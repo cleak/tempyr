@@ -17,26 +17,37 @@ const TEMPYR_VERSION: &str = env!("CARGO_PKG_VERSION");
 // ---------------------------------------------------------------------------
 
 struct ManagedFileDef {
+    artifact: ManagedArtifact,
     path: &'static str,
     content: &'static str,
     strategy: Strategy,
     description: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ManagedArtifact {
+    ClaudeHooks,
+    ClaudeSkill,
+    ClaudeAgent,
+}
+
 const MANAGED_FILES: &[ManagedFileDef] = &[
     ManagedFileDef {
+        artifact: ManagedArtifact::ClaudeHooks,
         path: ".claude/settings.json",
         content: TEMPYR_HOOKS_JSON,
         strategy: Strategy::Merge,
         description: "Claude Code hooks for validation and indexing",
     },
     ManagedFileDef {
+        artifact: ManagedArtifact::ClaudeSkill,
         path: ".claude/skills/tempyr-interview/SKILL.md",
         content: SKILL_INTERVIEW_MD,
         strategy: Strategy::Overwrite,
         description: "interview skill definition",
     },
     ManagedFileDef {
+        artifact: ManagedArtifact::ClaudeAgent,
         path: ".claude/agents/tempyr-extractor.md",
         content: AGENT_EXTRACTOR_MD,
         strategy: Strategy::Overwrite,
@@ -48,13 +59,13 @@ const MANAGED_FILES: &[ManagedFileDef] = &[
 // Manifest types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub tempyr_version: String,
     pub files: Vec<ManagedFile>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedFile {
     pub path: String,
     pub strategy: Strategy,
@@ -128,23 +139,34 @@ pub fn check_all(root: &Path) -> anyhow::Result<Vec<UpdateReport>> {
     Ok(reports)
 }
 
-/// Install/update all managed files and write the manifest.
-/// If `force` is false, files detected as user-modified are skipped.
-pub fn install_all(root: &Path, force: bool) -> anyhow::Result<Vec<InstallResult>> {
+pub fn install_selected(
+    root: &Path,
+    force: bool,
+    artifacts: &[ManagedArtifact],
+) -> anyhow::Result<Vec<InstallResult>> {
     let manifest = load_manifest(root)?;
     let mut results = Vec::new();
-    let mut new_manifest_files = Vec::new();
+    let mut new_manifest_files = manifest
+        .as_ref()
+        .map(|m| m.files.clone())
+        .unwrap_or_default();
 
-    for def in MANAGED_FILES {
+    for def in MANAGED_FILES
+        .iter()
+        .filter(|def| artifacts.contains(&def.artifact))
+    {
         let status = check_file(root, def, &manifest)?;
         let (outcome, written_hash, tempyr_hash) = write_file(root, def, status, force)?;
 
-        new_manifest_files.push(ManagedFile {
-            path: def.path.to_string(),
-            strategy: def.strategy,
-            written_hash,
-            tempyr_hash,
-        });
+        upsert_manifest_entry(
+            &mut new_manifest_files,
+            ManagedFile {
+                path: def.path.to_string(),
+                strategy: def.strategy,
+                written_hash,
+                tempyr_hash,
+            },
+        );
 
         results.push(InstallResult {
             path: def.path,
@@ -160,6 +182,20 @@ pub fn install_all(root: &Path, force: bool) -> anyhow::Result<Vec<InstallResult
     save_manifest(root, &new_manifest)?;
 
     Ok(results)
+}
+
+/// Install/update all managed files and write the manifest.
+/// If `force` is false, files detected as user-modified are skipped.
+pub fn install_all(root: &Path, force: bool) -> anyhow::Result<Vec<InstallResult>> {
+    install_selected(
+        root,
+        force,
+        &[
+            ManagedArtifact::ClaudeHooks,
+            ManagedArtifact::ClaudeSkill,
+            ManagedArtifact::ClaudeAgent,
+        ],
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +386,17 @@ fn save_manifest(root: &Path, manifest: &Manifest) -> anyhow::Result<()> {
         toml::to_string_pretty(manifest).with_context(|| "Failed to serialize manifest")?;
     std::fs::write(&path, content).with_context(|| "Failed to write .tempyr/managed.toml")?;
     Ok(())
+}
+
+fn upsert_manifest_entry(entries: &mut Vec<ManagedFile>, entry: ManagedFile) {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|existing| existing.path == entry.path)
+    {
+        *existing = entry;
+    } else {
+        entries.push(entry);
+    }
 }
 
 // ---------------------------------------------------------------------------
