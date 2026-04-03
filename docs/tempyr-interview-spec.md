@@ -241,7 +241,7 @@ name: tempyr-extractor
 description: >
   Extracts structured graph nodes from natural language input.
   Used by the interview skill for processing brain dumps and answers.
-model: claude-sonnet-4-20250514
+model: claude-sonnet-4-6
 skills:
   - tempyr-extraction-schema
 allowed-tools:

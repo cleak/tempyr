@@ -1221,7 +1221,7 @@ batch_size = 50                         # embeddings per API call
 
 [llm]
 provider = "anthropic"
-model = "claude-sonnet-4-20250514"      # for extraction tasks in interview
+model = "claude-sonnet-4-6"             # for extraction tasks in interview
 temperature = 0.1                       # low temp for structured extraction
 
 [retrieval]
