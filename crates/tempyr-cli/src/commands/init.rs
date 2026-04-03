@@ -136,11 +136,7 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
 
     let claude_artifacts = selected_claude_artifacts(selections);
     if !claude_artifacts.is_empty() {
-        let results = managed::install_selected(
-            root,
-            false,
-            &claude_artifacts,
-        )?;
+        let results = managed::install_selected(root, false, &claude_artifacts)?;
         summary.extend(render_managed_results(&results));
     }
 
@@ -287,13 +283,13 @@ fn render_managed_results(results: &[managed::InstallResult]) -> Vec<String> {
 fn selected_claude_artifacts(selections: &OnboardingSelections) -> Vec<ManagedArtifact> {
     let mut artifacts = Vec::new();
     if selections.install_claude_hooks {
-        artifacts.push(ManagedArtifact::ClaudeHooks);
+        artifacts.push(ManagedArtifact::Hooks);
     }
     if selections.install_claude_skill {
-        artifacts.push(ManagedArtifact::ClaudeSkill);
+        artifacts.push(ManagedArtifact::Skill);
     }
     if selections.install_claude_agent {
-        artifacts.push(ManagedArtifact::ClaudeAgent);
+        artifacts.push(ManagedArtifact::Agent);
     }
     artifacts
 }

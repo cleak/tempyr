@@ -26,28 +26,28 @@ struct ManagedFileDef {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManagedArtifact {
-    ClaudeHooks,
-    ClaudeSkill,
-    ClaudeAgent,
+    Hooks,
+    Skill,
+    Agent,
 }
 
 const MANAGED_FILES: &[ManagedFileDef] = &[
     ManagedFileDef {
-        artifact: ManagedArtifact::ClaudeHooks,
+        artifact: ManagedArtifact::Hooks,
         path: ".claude/settings.json",
         content: TEMPYR_HOOKS_JSON,
         strategy: Strategy::Merge,
         description: "Claude Code hooks for validation and indexing",
     },
     ManagedFileDef {
-        artifact: ManagedArtifact::ClaudeSkill,
+        artifact: ManagedArtifact::Skill,
         path: ".claude/skills/tempyr-interview/SKILL.md",
         content: SKILL_INTERVIEW_MD,
         strategy: Strategy::Overwrite,
         description: "interview skill definition",
     },
     ManagedFileDef {
-        artifact: ManagedArtifact::ClaudeAgent,
+        artifact: ManagedArtifact::Agent,
         path: ".claude/agents/tempyr-extractor.md",
         content: AGENT_EXTRACTOR_MD,
         strategy: Strategy::Overwrite,
@@ -155,18 +155,31 @@ pub fn install_selected(
         .iter()
         .filter(|def| artifacts.contains(&def.artifact))
     {
+        let previous_entry = manifest
+            .as_ref()
+            .and_then(|m| m.files.iter().find(|entry| entry.path == def.path))
+            .cloned();
         let status = check_file(root, def, &manifest)?;
         let (outcome, written_hash, tempyr_hash) = write_file(root, def, status, force)?;
 
-        upsert_manifest_entry(
-            &mut new_manifest_files,
-            ManagedFile {
-                path: def.path.to_string(),
-                strategy: def.strategy,
-                written_hash,
-                tempyr_hash,
-            },
-        );
+        match outcome {
+            WriteOutcome::Skipped => {
+                // Keep the last Tempyr-written manifest entry intact so later runs
+                // continue to detect the on-disk file as user-modified.
+                if let Some(entry) = previous_entry {
+                    upsert_manifest_entry(&mut new_manifest_files, entry);
+                }
+            }
+            _ => upsert_manifest_entry(
+                &mut new_manifest_files,
+                ManagedFile {
+                    path: def.path.to_string(),
+                    strategy: def.strategy,
+                    written_hash,
+                    tempyr_hash,
+                },
+            ),
+        }
 
         results.push(InstallResult {
             path: def.path,
@@ -191,9 +204,9 @@ pub fn install_all(root: &Path, force: bool) -> anyhow::Result<Vec<InstallResult
         root,
         force,
         &[
-            ManagedArtifact::ClaudeHooks,
-            ManagedArtifact::ClaudeSkill,
-            ManagedArtifact::ClaudeAgent,
+            ManagedArtifact::Hooks,
+            ManagedArtifact::Skill,
+            ManagedArtifact::Agent,
         ],
     )
 }
@@ -267,15 +280,12 @@ fn check_file(
                 }
                 Strategy::Merge => {
                     let tempyr_content_hash = hash(def.content);
-                    match &entry.tempyr_hash {
-                        Some(th) if *th == tempyr_content_hash => Ok(FileStatus::UpToDate),
-                        _ => {
-                            if on_disk_hash == entry.written_hash {
-                                Ok(FileStatus::Stale)
-                            } else {
-                                Ok(FileStatus::UserModified)
-                            }
-                        }
+                    if on_disk_hash != entry.written_hash {
+                        Ok(FileStatus::UserModified)
+                    } else if entry.tempyr_hash.as_deref() == Some(tempyr_content_hash.as_str()) {
+                        Ok(FileStatus::UpToDate)
+                    } else {
+                        Ok(FileStatus::Stale)
                     }
                 }
             }
@@ -308,16 +318,11 @@ fn write_file(
             Ok((WriteOutcome::Unchanged, written_hash, tempyr_hash))
         }
         FileStatus::UserModified if !force => {
-            // Preserve user changes; keep existing hashes from disk.
+            // Preserve user changes. The caller preserves any existing manifest
+            // entry so later runs still detect this file as user-modified.
             let content = std::fs::read_to_string(&file_path)?;
             let written_hash = hash(&content);
-            let tempyr_hash = if def.strategy == Strategy::Merge {
-                // Keep the old tempyr_hash since we didn't update.
-                None
-            } else {
-                None
-            };
-            Ok((WriteOutcome::Skipped, written_hash, tempyr_hash))
+            Ok((WriteOutcome::Skipped, written_hash, None))
         }
         _ => {
             // Create parent directories.
@@ -689,5 +694,81 @@ mod tests {
                 r.path
             );
         }
+    }
+
+    #[test]
+    fn test_skip_preserves_manifest_for_user_modified_overwrite_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".tempyr")).unwrap();
+        install_all(dir.path(), false).unwrap();
+
+        let before_manifest = load_manifest(dir.path()).unwrap().unwrap();
+        let def = &MANAGED_FILES[1]; // SKILL.md
+        let before_entry = before_manifest
+            .files
+            .iter()
+            .find(|entry| entry.path == def.path)
+            .unwrap()
+            .clone();
+
+        let file_path = dir.path().join(def.path);
+        std::fs::write(&file_path, "user edited this").unwrap();
+
+        let results = install_selected(dir.path(), false, &[ManagedArtifact::Skill]).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].outcome, WriteOutcome::Skipped);
+
+        let after_manifest = load_manifest(dir.path()).unwrap().unwrap();
+        let after_entry = after_manifest
+            .files
+            .iter()
+            .find(|entry| entry.path == def.path)
+            .unwrap();
+        assert_eq!(after_entry.written_hash, before_entry.written_hash);
+        assert_eq!(after_entry.tempyr_hash, before_entry.tempyr_hash);
+
+        let after_manifest = Some(after_manifest);
+        assert_eq!(
+            check_file(dir.path(), def, &after_manifest).unwrap(),
+            FileStatus::UserModified
+        );
+    }
+
+    #[test]
+    fn test_skip_preserves_manifest_for_user_modified_merge_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".tempyr")).unwrap();
+        install_all(dir.path(), false).unwrap();
+
+        let before_manifest = load_manifest(dir.path()).unwrap().unwrap();
+        let def = &MANAGED_FILES[0]; // settings.json
+        let before_entry = before_manifest
+            .files
+            .iter()
+            .find(|entry| entry.path == def.path)
+            .unwrap()
+            .clone();
+
+        let file_path = dir.path().join(def.path);
+        std::fs::write(&file_path, "{\"hooks\":{},\"user\":true}\n").unwrap();
+
+        let results = install_selected(dir.path(), false, &[ManagedArtifact::Hooks]).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].outcome, WriteOutcome::Skipped);
+
+        let after_manifest = load_manifest(dir.path()).unwrap().unwrap();
+        let after_entry = after_manifest
+            .files
+            .iter()
+            .find(|entry| entry.path == def.path)
+            .unwrap();
+        assert_eq!(after_entry.written_hash, before_entry.written_hash);
+        assert_eq!(after_entry.tempyr_hash, before_entry.tempyr_hash);
+
+        let after_manifest = Some(after_manifest);
+        assert_eq!(
+            check_file(dir.path(), def, &after_manifest).unwrap(),
+            FileStatus::UserModified
+        );
     }
 }

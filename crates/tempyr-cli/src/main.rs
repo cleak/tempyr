@@ -36,10 +36,10 @@ pub enum Commands {
     /// Initialize a new graph in the current directory
     Init {
         /// Force the interactive ratatui onboarding flow
-        #[arg(long)]
+        #[arg(long, conflicts_with = "no_wizard")]
         wizard: bool,
         /// Skip interactive onboarding even in a terminal
-        #[arg(long)]
+        #[arg(long, conflicts_with = "wizard")]
         no_wizard: bool,
     },
 
@@ -602,7 +602,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LaunchMode, detect_launch_mode_from_args};
+    use super::{Cli, LaunchMode, detect_launch_mode_from_args};
+    use clap::Parser;
 
     #[test]
     fn detect_mcp_mode_when_flag_is_first_arg() {
@@ -634,5 +635,10 @@ mod tests {
             detect_launch_mode_from_args(["tempyr", "--json", "validate"]),
             LaunchMode::Cli
         );
+    }
+
+    #[test]
+    fn init_rejects_conflicting_wizard_flags() {
+        assert!(Cli::try_parse_from(["tempyr", "init", "--wizard", "--no-wizard"]).is_err());
     }
 }

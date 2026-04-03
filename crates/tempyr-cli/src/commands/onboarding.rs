@@ -99,9 +99,7 @@ impl ExistingDocMode {
             Self::ClaudeCode => {
                 "Tempyr leaves existing docs untouched and writes a Claude Code merge prompt."
             }
-            Self::Codex => {
-                "Tempyr leaves existing docs untouched and writes a Codex merge prompt."
-            }
+            Self::Codex => "Tempyr leaves existing docs untouched and writes a Codex merge prompt.",
             Self::Manual => {
                 "Tempyr leaves docs untouched and writes manual snippets under .tempyr/onboarding/."
             }
@@ -275,9 +273,8 @@ pub fn run(existing_docs: ExistingDocs) -> anyhow::Result<Option<OnboardingSelec
             continue;
         }
 
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
-            _ => {}
+        if is_cancel_key(state.current_page(), key.code) {
+            return Ok(None);
         }
 
         match state.current_page() {
@@ -298,6 +295,10 @@ pub fn run(existing_docs: ExistingDocs) -> anyhow::Result<Option<OnboardingSelec
     }
 }
 
+fn is_cancel_key(page: Page, key: KeyCode) -> bool {
+    matches!(key, KeyCode::Esc) || (page != Page::ApiKey && matches!(key, KeyCode::Char('q')))
+}
+
 fn handle_welcome(state: &mut WizardState, key: KeyCode) {
     if matches!(key, KeyCode::Enter | KeyCode::Right | KeyCode::Char('n')) {
         state.next_page();
@@ -309,7 +310,9 @@ fn handle_core_setup(state: &mut WizardState, key: KeyCode) {
 
     match key {
         KeyCode::Up | KeyCode::Char('k') => state.core_index = state.core_index.saturating_sub(1),
-        KeyCode::Down | KeyCode::Char('j') => state.core_index = (state.core_index + 1).min(MAX_INDEX),
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.core_index = (state.core_index + 1).min(MAX_INDEX)
+        }
         KeyCode::Left | KeyCode::Char('h') => {
             if state.core_index == 0 {
                 let current = provider_index(state.selections.provider);
@@ -340,8 +343,8 @@ fn handle_core_setup(state: &mut WizardState, key: KeyCode) {
 
 fn handle_api_key(state: &mut WizardState, key: KeyCode) {
     match key {
-        KeyCode::Enter | KeyCode::Right | KeyCode::Char('n') => state.next_page(),
-        KeyCode::Left | KeyCode::Char('b') => state.prev_page(),
+        KeyCode::Enter | KeyCode::Right => state.next_page(),
+        KeyCode::Left => state.prev_page(),
         KeyCode::Backspace => {
             state.api_key_input.pop();
         }
@@ -357,7 +360,9 @@ fn handle_agent_integrations(state: &mut WizardState, key: KeyCode) {
 
     match key {
         KeyCode::Up | KeyCode::Char('k') => state.agent_index = state.agent_index.saturating_sub(1),
-        KeyCode::Down | KeyCode::Char('j') => state.agent_index = (state.agent_index + 1).min(MAX_INDEX),
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.agent_index = (state.agent_index + 1).min(MAX_INDEX)
+        }
         KeyCode::Char(' ') => toggle_agent_checkbox(state),
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('n') => state.next_page(),
         KeyCode::Left | KeyCode::Backspace | KeyCode::Char('b') => state.prev_page(),
@@ -549,7 +554,7 @@ fn current_footer(state: &WizardState) -> &'static str {
             "Up/Down: move  Left/Right: change provider  Space: toggle option  Enter: continue"
         }
         Page::ApiKey => {
-            "Type to enter the key  Enter: continue  Backspace/Left: back  q/Esc: cancel"
+            "Type to enter the key  Backspace: delete  Enter/Right: continue  Left: back  Esc: cancel"
         }
         Page::AgentIntegrations | Page::ExistingDocs => {
             "Up/Down: move  Space: toggle/select  Enter: continue  Backspace/Left: back"
@@ -638,7 +643,11 @@ fn render_core_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardS
         Line::from("Local note: local embeddings only work when this binary was built with"),
         Line::from("`--features local-embeddings`."),
     ])
-    .block(Block::default().borders(Borders::ALL).title(" Provider details "))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Provider details "),
+    )
     .wrap(Wrap { trim: true });
     frame.render_widget(detail, columns[1]);
 }
@@ -822,7 +831,10 @@ fn render_review(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardState
             Span::raw(state.selections.provider.label()),
         ]),
         Line::from(vec![
-            Span::styled("Core setup: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Core setup: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw(enabled_list(&[
                 (
                     "write key",
@@ -833,9 +845,15 @@ fn render_review(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardState
                     "env template",
                     state.selections.create_env_local_from_template,
                 ),
-                ("validate provider", state.selections.validate_provider_setup),
+                (
+                    "validate provider",
+                    state.selections.validate_provider_setup,
+                ),
                 ("index rebuild", state.selections.run_index_rebuild),
-                ("render overrides", state.selections.install_render_overrides),
+                (
+                    "render overrides",
+                    state.selections.install_render_overrides,
+                ),
             ])),
         ]),
         Line::from(vec![
@@ -921,5 +939,32 @@ impl Drop for TerminalGuard {
         let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_shortcut_is_disabled_while_typing_api_key() {
+        assert!(is_cancel_key(Page::Welcome, KeyCode::Char('q')));
+        assert!(is_cancel_key(Page::ApiKey, KeyCode::Esc));
+        assert!(!is_cancel_key(Page::ApiKey, KeyCode::Char('q')));
+    }
+
+    #[test]
+    fn api_key_page_accepts_navigation_letters_as_input() {
+        let mut state = WizardState::new(ExistingDocs {
+            claude_md: false,
+            agents_md: false,
+        });
+
+        handle_api_key(&mut state, KeyCode::Char('n'));
+        handle_api_key(&mut state, KeyCode::Char('b'));
+        handle_api_key(&mut state, KeyCode::Char('q'));
+
+        assert_eq!(state.api_key_input, "nbq");
+        assert_eq!(state.page_index, 0);
     }
 }
