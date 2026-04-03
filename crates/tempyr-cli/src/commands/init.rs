@@ -331,7 +331,7 @@ dimensions = {dimensions}
 
 [llm]
 provider = "anthropic"
-model = "claude-sonnet-4-6"
+model = "claude-opus-4-6"
 temperature = 0.1
 
 [retrieval]
