@@ -52,13 +52,7 @@ impl VoyageClient {
     }
 
     pub fn from_env(model: &str, dimensions: usize) -> Result<Self> {
-        let api_key = std::env::var("VOYAGE_API_KEY").map_err(|_| {
-            IndexError::General(
-                "VOYAGE_API_KEY environment variable not set. \
-                 Set it or switch to local embeddings with [embedding] provider = \"local\" in config.toml"
-                    .to_string(),
-            )
-        })?;
+        let api_key = read_required_api_key("VOYAGE_API_KEY")?;
         Ok(Self::new(&api_key, model, dimensions))
     }
 }
@@ -162,9 +156,7 @@ impl GeminiClient {
     }
 
     pub fn from_env(model: &str, dimensions: usize) -> Result<Self> {
-        let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| {
-            IndexError::General("GEMINI_API_KEY environment variable not set.".to_string())
-        })?;
+        let api_key = read_required_api_key("GEMINI_API_KEY")?;
         Ok(Self::new(&api_key, model, dimensions))
     }
 }
@@ -438,6 +430,66 @@ const GEMINI_MODEL: &str = "gemini-embedding-001";
 const GEMINI_DIMENSIONS: usize = 768;
 const LOCAL_MODEL: &str = "all-MiniLM-L6-v2";
 const LOCAL_DIMENSIONS: usize = 384;
+const PLACEHOLDER_API_KEYS: &[&str] = &[
+    "api-key",
+    "api_key",
+    "changeme",
+    "change-me",
+    "change_me",
+    "example",
+    "key",
+    "paste-key-here",
+    "replace-me",
+    "replace_me",
+    "replace-with-real-key",
+    "token",
+    "xxx",
+    "your-api-key",
+    "your_api_key",
+];
+
+pub fn provider_api_key_env_var(provider: &str) -> Option<&'static str> {
+    match provider {
+        "voyage" => Some("VOYAGE_API_KEY"),
+        "gemini" => Some("GEMINI_API_KEY"),
+        _ => None,
+    }
+}
+
+pub fn validate_api_key_value(env_var: &str, value: &str) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(IndexError::General(format!(
+            "{env_var} is empty. Fill it in with a real API key in .env.local or your shell environment before using hosted embeddings."
+        )));
+    }
+
+    let normalized = trimmed
+        .trim_matches(|c| matches!(c, '"' | '\'' | '<' | '>'))
+        .to_ascii_lowercase();
+    let looks_like_placeholder = PLACEHOLDER_API_KEYS.contains(&normalized.as_str())
+        || normalized.contains("example.com")
+        || normalized.ends_with("_here")
+        || normalized.ends_with("-here")
+        || normalized.ends_with(" here");
+    if looks_like_placeholder {
+        return Err(IndexError::General(format!(
+            "{env_var} still looks like a placeholder. Replace it with a real API key before using hosted embeddings."
+        )));
+    }
+
+    Ok(())
+}
+
+fn read_required_api_key(env_var: &'static str) -> Result<String> {
+    let api_key = std::env::var(env_var).map_err(|_| {
+        IndexError::General(format!(
+            "{env_var} environment variable not set. Set it in .env.local or your shell environment, or switch to local embeddings with [embedding] provider = \"local\" in config.toml."
+        ))
+    })?;
+    validate_api_key_value(env_var, &api_key)?;
+    Ok(api_key)
+}
 
 pub fn resolve_embedding_config(config: &EmbeddingConfig) -> Result<ResolvedEmbeddingConfig> {
     match config.provider.as_str() {
@@ -968,5 +1020,24 @@ reverse = "dependency_of"
                 .collect::<HashSet<_>>(),
             HashSet::from(["feat-a", "feat-b"])
         );
+    }
+
+    #[test]
+    fn validate_api_key_value_rejects_blank_and_placeholder_values() {
+        let blank = validate_api_key_value("VOYAGE_API_KEY", "  ").unwrap_err();
+        assert!(blank.to_string().contains("VOYAGE_API_KEY is empty"));
+
+        let placeholder = validate_api_key_value("GEMINI_API_KEY", "changeme").unwrap_err();
+        assert!(
+            placeholder
+                .to_string()
+                .contains("GEMINI_API_KEY still looks like a placeholder")
+        );
+    }
+
+    #[test]
+    fn validate_api_key_value_accepts_realistic_token_shapes() {
+        validate_api_key_value("VOYAGE_API_KEY", "pa-1234567890abcdef").unwrap();
+        validate_api_key_value("GEMINI_API_KEY", "AIzaSyA-LongerLookingKey123").unwrap();
     }
 }

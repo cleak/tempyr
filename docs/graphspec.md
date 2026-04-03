@@ -1221,7 +1221,7 @@ batch_size = 50                         # embeddings per API call
 
 [llm]
 provider = "anthropic"
-model = "claude-sonnet-4-20250514"      # for extraction tasks in interview
+model = "claude-opus-4-6"               # for extraction tasks in interview
 temperature = 0.1                       # low temp for structured extraction
 
 [retrieval]
@@ -1431,7 +1431,7 @@ These are decisions that should be made during implementation, not before:
 
 2. **Embedding model choice**: Anthropic's voyage-3 vs OpenAI's text-embedding-3-small vs a local model via `fastembed-rs`. Start with API-based, switch to local if latency or cost becomes an issue.
 
-3. **Interview LLM model**: Should extraction use the same model as the user's Claude Code session (likely Opus) or a cheaper model (Sonnet)? Sonnet at temperature 0.1 is probably sufficient for structured extraction and significantly cheaper.
+3. **Interview LLM model**: Default to Opus for extraction quality. Revisit Sonnet only if cost or latency becomes a meaningful issue in practice.
 
 4. **Session persistence format**: JSON files in `.tempyr/sessions/` is the simple answer. Could also use SQLite. JSON is more debuggable during early development.
 

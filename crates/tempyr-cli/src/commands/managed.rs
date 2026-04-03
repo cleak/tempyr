@@ -17,26 +17,38 @@ const TEMPYR_VERSION: &str = env!("CARGO_PKG_VERSION");
 // ---------------------------------------------------------------------------
 
 struct ManagedFileDef {
+    artifact: ManagedArtifact,
     path: &'static str,
     content: &'static str,
     strategy: Strategy,
     description: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedArtifact {
+    Hooks,
+    Skill,
+    Agent,
+}
+
 const MANAGED_FILES: &[ManagedFileDef] = &[
     ManagedFileDef {
+        artifact: ManagedArtifact::Hooks,
         path: ".claude/settings.json",
         content: TEMPYR_HOOKS_JSON,
         strategy: Strategy::Merge,
         description: "Claude Code hooks for validation and indexing",
     },
     ManagedFileDef {
+        artifact: ManagedArtifact::Skill,
         path: ".claude/skills/tempyr-interview/SKILL.md",
         content: SKILL_INTERVIEW_MD,
         strategy: Strategy::Overwrite,
         description: "interview skill definition",
     },
     ManagedFileDef {
+        artifact: ManagedArtifact::Agent,
         path: ".claude/agents/tempyr-extractor.md",
         content: AGENT_EXTRACTOR_MD,
         strategy: Strategy::Overwrite,
@@ -48,13 +60,15 @@ const MANAGED_FILES: &[ManagedFileDef] = &[
 // Manifest types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub tempyr_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_artifacts: Option<Vec<ManagedArtifact>>,
     pub files: Vec<ManagedFile>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedFile {
     pub path: String,
     pub strategy: Strategy,
@@ -116,7 +130,7 @@ pub fn check_all(root: &Path) -> anyhow::Result<Vec<UpdateReport>> {
     let manifest = load_manifest(root)?;
     let mut reports = Vec::new();
 
-    for def in MANAGED_FILES {
+    for def in selected_defs(&manifest) {
         let status = check_file(root, def, &manifest)?;
         reports.push(UpdateReport {
             path: def.path,
@@ -128,23 +142,62 @@ pub fn check_all(root: &Path) -> anyhow::Result<Vec<UpdateReport>> {
     Ok(reports)
 }
 
-/// Install/update all managed files and write the manifest.
-/// If `force` is false, files detected as user-modified are skipped.
-pub fn install_all(root: &Path, force: bool) -> anyhow::Result<Vec<InstallResult>> {
+pub fn install_selected(
+    root: &Path,
+    force: bool,
+    artifacts: &[ManagedArtifact],
+) -> anyhow::Result<Vec<InstallResult>> {
+    let selected_artifacts = canonical_artifacts(artifacts);
+    if selected_artifacts.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let manifest = load_manifest(root)?;
     let mut results = Vec::new();
-    let mut new_manifest_files = Vec::new();
+    let mut new_manifest_files = manifest
+        .as_ref()
+        .map(|m| {
+            m.files
+                .iter()
+                .filter(|entry| {
+                    managed_file_def_for_path(&entry.path)
+                        .map(|def| selected_artifacts.contains(&def.artifact))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
 
-    for def in MANAGED_FILES {
+    for def in selected_artifacts
+        .iter()
+        .filter_map(|artifact| managed_file_def(*artifact))
+    {
+        let previous_entry = manifest
+            .as_ref()
+            .and_then(|m| m.files.iter().find(|entry| entry.path == def.path))
+            .cloned();
         let status = check_file(root, def, &manifest)?;
         let (outcome, written_hash, tempyr_hash) = write_file(root, def, status, force)?;
 
-        new_manifest_files.push(ManagedFile {
-            path: def.path.to_string(),
-            strategy: def.strategy,
-            written_hash,
-            tempyr_hash,
-        });
+        match outcome {
+            WriteOutcome::Skipped => {
+                // Keep the last Tempyr-written manifest entry intact so later runs
+                // continue to detect the on-disk file as user-modified.
+                if let Some(entry) = previous_entry {
+                    upsert_manifest_entry(&mut new_manifest_files, entry);
+                }
+            }
+            _ => upsert_manifest_entry(
+                &mut new_manifest_files,
+                ManagedFile {
+                    path: def.path.to_string(),
+                    strategy: def.strategy,
+                    written_hash,
+                    tempyr_hash,
+                },
+            ),
+        }
 
         results.push(InstallResult {
             path: def.path,
@@ -155,11 +208,26 @@ pub fn install_all(root: &Path, force: bool) -> anyhow::Result<Vec<InstallResult
 
     let new_manifest = Manifest {
         tempyr_version: TEMPYR_VERSION.to_string(),
+        managed_artifacts: Some(selected_artifacts),
         files: new_manifest_files,
     };
     save_manifest(root, &new_manifest)?;
 
     Ok(results)
+}
+
+/// Install/update all managed files and write the manifest.
+/// If `force` is false, files detected as user-modified are skipped.
+pub fn install_all(root: &Path, force: bool) -> anyhow::Result<Vec<InstallResult>> {
+    install_selected(
+        root,
+        force,
+        &[
+            ManagedArtifact::Hooks,
+            ManagedArtifact::Skill,
+            ManagedArtifact::Agent,
+        ],
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +236,35 @@ pub fn install_all(root: &Path, force: bool) -> anyhow::Result<Vec<InstallResult
 
 fn hash(content: &str) -> String {
     blake3::hash(content.as_bytes()).to_hex().to_string()
+}
+
+fn all_artifacts() -> Vec<ManagedArtifact> {
+    MANAGED_FILES.iter().map(|def| def.artifact).collect()
+}
+
+fn canonical_artifacts(artifacts: &[ManagedArtifact]) -> Vec<ManagedArtifact> {
+    MANAGED_FILES
+        .iter()
+        .filter_map(|def| artifacts.contains(&def.artifact).then_some(def.artifact))
+        .collect()
+}
+
+fn managed_file_def(artifact: ManagedArtifact) -> Option<&'static ManagedFileDef> {
+    MANAGED_FILES.iter().find(|def| def.artifact == artifact)
+}
+
+fn managed_file_def_for_path(path: &str) -> Option<&'static ManagedFileDef> {
+    MANAGED_FILES.iter().find(|def| def.path == path)
+}
+
+fn selected_defs(manifest: &Option<Manifest>) -> Vec<&'static ManagedFileDef> {
+    let artifacts = manifest
+        .as_ref()
+        .and_then(|manifest| manifest.managed_artifacts.as_deref())
+        .map(canonical_artifacts)
+        .unwrap_or_else(all_artifacts);
+
+    artifacts.into_iter().filter_map(managed_file_def).collect()
 }
 
 fn check_file(
@@ -231,15 +328,12 @@ fn check_file(
                 }
                 Strategy::Merge => {
                     let tempyr_content_hash = hash(def.content);
-                    match &entry.tempyr_hash {
-                        Some(th) if *th == tempyr_content_hash => Ok(FileStatus::UpToDate),
-                        _ => {
-                            if on_disk_hash == entry.written_hash {
-                                Ok(FileStatus::Stale)
-                            } else {
-                                Ok(FileStatus::UserModified)
-                            }
-                        }
+                    if on_disk_hash != entry.written_hash {
+                        Ok(FileStatus::UserModified)
+                    } else if entry.tempyr_hash.as_deref() == Some(tempyr_content_hash.as_str()) {
+                        Ok(FileStatus::UpToDate)
+                    } else {
+                        Ok(FileStatus::Stale)
                     }
                 }
             }
@@ -272,16 +366,11 @@ fn write_file(
             Ok((WriteOutcome::Unchanged, written_hash, tempyr_hash))
         }
         FileStatus::UserModified if !force => {
-            // Preserve user changes; keep existing hashes from disk.
+            // Preserve user changes. The caller preserves any existing manifest
+            // entry so later runs still detect this file as user-modified.
             let content = std::fs::read_to_string(&file_path)?;
             let written_hash = hash(&content);
-            let tempyr_hash = if def.strategy == Strategy::Merge {
-                // Keep the old tempyr_hash since we didn't update.
-                None
-            } else {
-                None
-            };
-            Ok((WriteOutcome::Skipped, written_hash, tempyr_hash))
+            Ok((WriteOutcome::Skipped, written_hash, None))
         }
         _ => {
             // Create parent directories.
@@ -350,6 +439,17 @@ fn save_manifest(root: &Path, manifest: &Manifest) -> anyhow::Result<()> {
         toml::to_string_pretty(manifest).with_context(|| "Failed to serialize manifest")?;
     std::fs::write(&path, content).with_context(|| "Failed to write .tempyr/managed.toml")?;
     Ok(())
+}
+
+fn upsert_manifest_entry(entries: &mut Vec<ManagedFile>, entry: ManagedFile) {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|existing| existing.path == entry.path)
+    {
+        *existing = entry;
+    } else {
+        entries.push(entry);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +607,7 @@ mod tests {
     fn test_manifest_round_trip() {
         let manifest = Manifest {
             tempyr_version: "0.1.0".to_string(),
+            managed_artifacts: Some(vec![ManagedArtifact::Hooks, ManagedArtifact::Skill]),
             files: vec![
                 ManagedFile {
                     path: ".claude/settings.json".to_string(),
@@ -525,6 +626,10 @@ mod tests {
         let serialized = toml::to_string_pretty(&manifest).unwrap();
         let deserialized: Manifest = toml::from_str(&serialized).unwrap();
         assert_eq!(deserialized.tempyr_version, manifest.tempyr_version);
+        assert_eq!(
+            deserialized.managed_artifacts,
+            Some(vec![ManagedArtifact::Hooks, ManagedArtifact::Skill])
+        );
         assert_eq!(deserialized.files.len(), 2);
         assert_eq!(deserialized.files[0].strategy, Strategy::Merge);
         assert_eq!(deserialized.files[0].tempyr_hash, Some("def".to_string()));
@@ -552,6 +657,7 @@ mod tests {
 
         let manifest = Some(Manifest {
             tempyr_version: "0.1.0".to_string(),
+            managed_artifacts: None,
             files: vec![ManagedFile {
                 path: def.path.to_string(),
                 strategy: Strategy::Overwrite,
@@ -576,6 +682,7 @@ mod tests {
 
         let manifest = Some(Manifest {
             tempyr_version: "0.0.1".to_string(),
+            managed_artifacts: None,
             files: vec![ManagedFile {
                 path: def.path.to_string(),
                 strategy: Strategy::Overwrite,
@@ -599,6 +706,7 @@ mod tests {
 
         let manifest = Some(Manifest {
             tempyr_version: "0.1.0".to_string(),
+            managed_artifacts: None,
             files: vec![ManagedFile {
                 path: def.path.to_string(),
                 strategy: Strategy::Overwrite,
@@ -642,5 +750,107 @@ mod tests {
                 r.path
             );
         }
+
+        let manifest = load_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(manifest.managed_artifacts, Some(all_artifacts()));
+    }
+
+    #[test]
+    fn test_skip_preserves_manifest_for_user_modified_overwrite_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".tempyr")).unwrap();
+        install_all(dir.path(), false).unwrap();
+
+        let before_manifest = load_manifest(dir.path()).unwrap().unwrap();
+        let def = &MANAGED_FILES[1]; // SKILL.md
+        let before_entry = before_manifest
+            .files
+            .iter()
+            .find(|entry| entry.path == def.path)
+            .unwrap()
+            .clone();
+
+        let file_path = dir.path().join(def.path);
+        std::fs::write(&file_path, "user edited this").unwrap();
+
+        let results = install_selected(dir.path(), false, &[ManagedArtifact::Skill]).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].outcome, WriteOutcome::Skipped);
+
+        let after_manifest = load_manifest(dir.path()).unwrap().unwrap();
+        let after_entry = after_manifest
+            .files
+            .iter()
+            .find(|entry| entry.path == def.path)
+            .unwrap();
+        assert_eq!(after_entry.written_hash, before_entry.written_hash);
+        assert_eq!(after_entry.tempyr_hash, before_entry.tempyr_hash);
+
+        let after_manifest = Some(after_manifest);
+        assert_eq!(
+            check_file(dir.path(), def, &after_manifest).unwrap(),
+            FileStatus::UserModified
+        );
+    }
+
+    #[test]
+    fn test_skip_preserves_manifest_for_user_modified_merge_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".tempyr")).unwrap();
+        install_all(dir.path(), false).unwrap();
+
+        let before_manifest = load_manifest(dir.path()).unwrap().unwrap();
+        let def = &MANAGED_FILES[0]; // settings.json
+        let before_entry = before_manifest
+            .files
+            .iter()
+            .find(|entry| entry.path == def.path)
+            .unwrap()
+            .clone();
+
+        let file_path = dir.path().join(def.path);
+        std::fs::write(&file_path, "{\"hooks\":{},\"user\":true}\n").unwrap();
+
+        let results = install_selected(dir.path(), false, &[ManagedArtifact::Hooks]).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].outcome, WriteOutcome::Skipped);
+
+        let after_manifest = load_manifest(dir.path()).unwrap().unwrap();
+        let after_entry = after_manifest
+            .files
+            .iter()
+            .find(|entry| entry.path == def.path)
+            .unwrap();
+        assert_eq!(after_entry.written_hash, before_entry.written_hash);
+        assert_eq!(after_entry.tempyr_hash, before_entry.tempyr_hash);
+
+        let after_manifest = Some(after_manifest);
+        assert_eq!(
+            check_file(dir.path(), def, &after_manifest).unwrap(),
+            FileStatus::UserModified
+        );
+    }
+
+    #[test]
+    fn test_install_selected_empty_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let results = install_selected(dir.path(), false, &[]).unwrap();
+
+        assert!(results.is_empty());
+        assert!(!dir.path().join(".tempyr/managed.toml").exists());
+    }
+
+    #[test]
+    fn test_check_all_respects_selected_artifacts_from_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".tempyr")).unwrap();
+
+        let results = install_selected(dir.path(), false, &[ManagedArtifact::Hooks]).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let reports = check_all(dir.path()).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].path, ".claude/settings.json");
     }
 }

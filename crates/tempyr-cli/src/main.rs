@@ -6,7 +6,10 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "tempyr", about = "File-based knowledge graph for AI-assisted design")]
+#[command(
+    name = "tempyr",
+    about = "File-based knowledge graph for AI-assisted design"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -31,7 +34,14 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize a new graph in the current directory
-    Init,
+    Init {
+        /// Force the interactive ratatui onboarding flow
+        #[arg(long, conflicts_with = "no_wizard")]
+        wizard: bool,
+        /// Skip interactive onboarding even in a terminal
+        #[arg(long, conflicts_with = "wizard")]
+        no_wizard: bool,
+    },
 
     /// Check graph consistency
     Validate {
@@ -95,10 +105,7 @@ pub enum Commands {
     },
 
     /// Change a node's status
-    Status {
-        id: String,
-        new_status: String,
-    },
+    Status { id: String, new_status: String },
 
     /// Show all nodes reachable from a root
     Traverse {
@@ -259,22 +266,13 @@ pub enum InterviewAction {
         root_type: String,
     },
     /// Process an answer in an active interview
-    Answer {
-        session_id: String,
-        answer: String,
-    },
+    Answer { session_id: String, answer: String },
     /// Show tentative graph state
-    Show {
-        session_id: String,
-    },
+    Show { session_id: String },
     /// Commit tentative nodes to disk
-    Commit {
-        session_id: String,
-    },
+    Commit { session_id: String },
     /// Resume an interrupted session
-    Resume {
-        session_id: String,
-    },
+    Resume { session_id: String },
     /// List active sessions
     List,
 }
@@ -316,14 +314,9 @@ pub enum LinearAction {
     /// Show sync state summary
     Status,
     /// Manually link an existing node to a Linear issue/project
-    Link {
-        node_id: String,
-        linear_id: String,
-    },
+    Link { node_id: String, linear_id: String },
     /// Unlink a node from Linear (does not delete the Linear issue)
-    Unlink {
-        node_id: String,
-    },
+    Unlink { node_id: String },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -397,24 +390,51 @@ fn load_cli_project_env(graph_dir: Option<&Path>) -> anyhow::Result<()> {
 
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Init => commands::init::run(),
+        Commands::Init { wizard, no_wizard } => commands::init::run(cli.json, wizard, no_wizard),
         Commands::Validate { fix } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::validate::run(&ctx, cli.json, fix)
         }
-        Commands::Add { node_type, slug, id, status, owner, body } => {
+        Commands::Add {
+            node_type,
+            slug,
+            id,
+            status,
+            owner,
+            body,
+        } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
-            commands::add::run(&ctx, &node_type, slug.as_deref(), id.as_deref(), status.as_deref(), owner.as_deref(), body.as_deref())
+            commands::add::run(
+                &ctx,
+                &node_type,
+                slug.as_deref(),
+                id.as_deref(),
+                status.as_deref(),
+                owner.as_deref(),
+                body.as_deref(),
+            )
         }
-        Commands::AddEdge { source, target, edge_type } => {
+        Commands::AddEdge {
+            source,
+            target,
+            edge_type,
+        } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::edge::run_add(&ctx, &source, &target, &edge_type)
         }
-        Commands::RemoveEdge { source, target, edge_type } => {
+        Commands::RemoveEdge {
+            source,
+            target,
+            edge_type,
+        } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::edge::run_remove(&ctx, &source, &target, &edge_type)
         }
-        Commands::Rename { old_id, new_id, slug } => {
+        Commands::Rename {
+            old_id,
+            new_id,
+            slug,
+        } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::rename::run(&ctx, &old_id, new_id.as_deref(), slug.as_deref())
         }
@@ -422,19 +442,53 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::status_cmd::run(&ctx, &id, &new_status)
         }
-        Commands::Traverse { id, depth, edge_type } => {
+        Commands::Traverse {
+            id,
+            depth,
+            edge_type,
+        } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::traverse::run(&ctx, &id, depth, edge_type.as_deref(), cli.json)
         }
-        Commands::Search { query, max_results, node_type, status, owner } => {
+        Commands::Search {
+            query,
+            max_results,
+            node_type,
+            status,
+            owner,
+        } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
-            commands::search::run(&ctx, &query.join(" "), max_results, node_type.as_deref(), status.as_deref(), owner.as_deref(), cli.json)
+            commands::search::run(
+                &ctx,
+                &query.join(" "),
+                max_results,
+                node_type.as_deref(),
+                status.as_deref(),
+                owner.as_deref(),
+                cli.json,
+            )
         }
-        Commands::List { node_type, status, owner, max_results } => {
+        Commands::List {
+            node_type,
+            status,
+            owner,
+            max_results,
+        } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
-            commands::list::run(&ctx, node_type.as_deref(), status.as_deref(), owner.as_deref(), max_results, cli.json)
+            commands::list::run(
+                &ctx,
+                node_type.as_deref(),
+                status.as_deref(),
+                owner.as_deref(),
+                max_results,
+                cli.json,
+            )
         }
-        Commands::Context { query, root, budget } => {
+        Commands::Context {
+            query,
+            root,
+            budget,
+        } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::context::run(&ctx, &query.join(" "), root.as_deref(), budget, cli.json)
         }
@@ -443,13 +497,36 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let target = commands::dispatch::DispatchTarget::from_str(&target)?;
             commands::dispatch::run(&ctx, &task_id, target, cli.json)
         }
-        Commands::Render { template, root_id, as_of, include_history, output } => {
+        Commands::Render {
+            template,
+            root_id,
+            as_of,
+            include_history,
+            output,
+        } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
-            commands::render_cmd::run(&ctx, &template, &root_id, as_of.as_deref(), include_history, output.as_deref())
+            commands::render_cmd::run(
+                &ctx,
+                &template,
+                &root_id,
+                as_of.as_deref(),
+                include_history,
+                output.as_deref(),
+            )
         }
-        Commands::Vsearch { query, max_results, node_type } => {
+        Commands::Vsearch {
+            query,
+            max_results,
+            node_type,
+        } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
-            commands::vsearch::run(&ctx, &query.join(" "), max_results, node_type.as_deref(), cli.json)
+            commands::vsearch::run(
+                &ctx,
+                &query.join(" "),
+                max_results,
+                node_type.as_deref(),
+                cli.json,
+            )
         }
         Commands::Ask { question, root } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
@@ -470,9 +547,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Interview { action } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             match action {
-                InterviewAction::Start { brain_dump, root_type } => {
-                    commands::interview_cmd::run_start(&ctx, &brain_dump, &root_type, cli.json)
-                }
+                InterviewAction::Start {
+                    brain_dump,
+                    root_type,
+                } => commands::interview_cmd::run_start(&ctx, &brain_dump, &root_type, cli.json),
                 InterviewAction::Answer { session_id, answer } => {
                     commands::interview_cmd::run_answer(&ctx, &session_id, &answer, cli.json)
                 }
@@ -485,9 +563,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 InterviewAction::Resume { session_id } => {
                     commands::interview_cmd::run_show(&ctx, &session_id, cli.json)
                 }
-                InterviewAction::List => {
-                    commands::interview_cmd::run_list(&ctx, cli.json)
-                }
+                InterviewAction::List => commands::interview_cmd::run_list(&ctx, cli.json),
             }
         }
         Commands::Index { action } => {
@@ -526,7 +602,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LaunchMode, detect_launch_mode_from_args};
+    use super::{Cli, LaunchMode, detect_launch_mode_from_args};
+    use clap::Parser;
 
     #[test]
     fn detect_mcp_mode_when_flag_is_first_arg() {
@@ -558,5 +635,10 @@ mod tests {
             detect_launch_mode_from_args(["tempyr", "--json", "validate"]),
             LaunchMode::Cli
         );
+    }
+
+    #[test]
+    fn init_rejects_conflicting_wizard_flags() {
+        assert!(Cli::try_parse_from(["tempyr", "init", "--wizard", "--no-wizard"]).is_err());
     }
 }
