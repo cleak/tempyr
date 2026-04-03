@@ -487,6 +487,11 @@ fn validate_provider_setup(root: &Path) -> anyhow::Result<String> {
     let _loaded = project::load_project_env_from(root.to_path_buf())?;
     let ctx = ProjectContext::find(Some(root.join("graph").as_path()))?;
     let resolved = ctx.resolved_embedding_config()?;
+    if let Some(env_var) = embeddings::provider_api_key_env_var(&resolved.provider)
+        && let Ok(value) = std::env::var(env_var)
+    {
+        embeddings::validate_api_key_value(env_var, &value)?;
+    }
     let provider = embeddings::create_provider_from_resolved(&resolved)?;
     Ok(format!(
         "{} provider ready ({})",

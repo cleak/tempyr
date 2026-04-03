@@ -33,10 +33,11 @@ When the Tempyr MCP server is running, prefer these tools:
 ## Rules
 
 1. Never rename node IDs manually. Use `tempyr rename`.
-2. Keep edge lists alphabetized by target.
-3. Run `tempyr validate` after manual graph edits.
-4. Prefer updating existing nodes over creating near-duplicates.
-5. If a change affects retrieval quality, rebuild or update the index.
+2. Use human-readable kebab-case slugs when creating node IDs manually.
+3. Store edges bidirectionally in YAML frontmatter, and keep each edge list alphabetized by target.
+4. Run `tempyr validate` after manual graph edits.
+5. Prefer updating existing nodes over creating near-duplicates.
+6. If a change affects retrieval quality, rebuild or update the index.
 
 ## Environment
 
