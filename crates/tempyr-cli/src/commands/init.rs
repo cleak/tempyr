@@ -132,12 +132,7 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
     if selections.write_api_key_to_env_local
         && let Some(key) = selections.api_key.as_deref()
     {
-        let env_var = selections
-            .provider
-            .env_var()
-            .ok_or_else(|| anyhow::anyhow!("Selected provider does not use an API key"))?;
-        upsert_env_var(&root.join(".env.local"), env_var, key)?;
-        ensure_gitignore_contains(root, ".env.local")?;
+        let env_var = write_provider_api_key(root, selections.provider, key)?;
         summary.push(format!("  .env.local           - stored {}", env_var));
     }
 
@@ -390,6 +385,20 @@ fn upsert_env_var(path: &Path, key: &str, value: &str) -> anyhow::Result<()> {
     }
     fs::write(path, output)?;
     Ok(())
+}
+
+fn write_provider_api_key(
+    root: &Path,
+    provider: EmbeddingProviderChoice,
+    key: &str,
+) -> anyhow::Result<&'static str> {
+    let env_var = provider
+        .env_var()
+        .ok_or_else(|| anyhow::anyhow!("Selected provider does not use an API key"))?;
+    embeddings::validate_api_key_value(env_var, key)?;
+    upsert_env_var(&root.join(".env.local"), env_var, key)?;
+    ensure_gitignore_contains(root, ".env.local")?;
+    Ok(env_var)
 }
 
 fn ensure_gitignore_contains(root: &Path, entry: &str) -> anyhow::Result<()> {
@@ -708,6 +717,18 @@ mod tests {
         let updated = fs::read_to_string(path).unwrap();
         assert!(updated.contains("VOYAGE_API_KEY=new"));
         assert!(updated.contains("OTHER=keep"));
+    }
+
+    #[test]
+    fn write_provider_api_key_rejects_placeholders_before_persisting() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let err =
+            write_provider_api_key(tmp.path(), EmbeddingProviderChoice::Voyage, "changeme")
+                .unwrap_err();
+
+        assert!(err.to_string().contains("still looks like a placeholder"));
+        assert!(!tmp.path().join(".env.local").exists());
     }
 
     #[test]
