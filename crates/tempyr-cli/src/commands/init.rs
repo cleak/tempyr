@@ -21,6 +21,13 @@ const TDD_TEMPLATE: &str = include_str!("../../../../templates/tdd.toml");
 const TASK_PROMPT_TEMPLATE: &str = include_str!("../../../../templates/task-prompt.toml");
 
 pub fn run(json_output: bool, force_wizard: bool, no_wizard: bool) -> anyhow::Result<()> {
+    if json_output && force_wizard {
+        anyhow::bail!("--json cannot be combined with --wizard");
+    }
+    if json_output {
+        anyhow::bail!("`tempyr init --json` is not supported yet");
+    }
+
     let cwd = std::env::current_dir()?;
     let tempyr_dir = cwd.join(".tempyr");
     if tempyr_dir.exists() {
@@ -28,7 +35,7 @@ pub fn run(json_output: bool, force_wizard: bool, no_wizard: bool) -> anyhow::Re
     }
 
     let existing_docs = detect_existing_docs(&cwd);
-    let selections = if should_launch_wizard(json_output, force_wizard, no_wizard) {
+    let selections = if should_launch_wizard(force_wizard, no_wizard) {
         onboarding::run(existing_docs)?
             .ok_or_else(|| anyhow::anyhow!("Initialization cancelled."))?
     } else {
@@ -38,8 +45,8 @@ pub fn run(json_output: bool, force_wizard: bool, no_wizard: bool) -> anyhow::Re
     initialize_project(&cwd, &selections)
 }
 
-fn should_launch_wizard(json_output: bool, force_wizard: bool, no_wizard: bool) -> bool {
-    if no_wizard || json_output {
+fn should_launch_wizard(force_wizard: bool, no_wizard: bool) -> bool {
+    if no_wizard {
         return false;
     }
     if force_wizard {

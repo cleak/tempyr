@@ -24,7 +24,8 @@ struct ManagedFileDef {
     description: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ManagedArtifact {
     Hooks,
     Skill,
@@ -62,6 +63,8 @@ const MANAGED_FILES: &[ManagedFileDef] = &[
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub tempyr_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_artifacts: Option<Vec<ManagedArtifact>>,
     pub files: Vec<ManagedFile>,
 }
 
@@ -127,7 +130,7 @@ pub fn check_all(root: &Path) -> anyhow::Result<Vec<UpdateReport>> {
     let manifest = load_manifest(root)?;
     let mut reports = Vec::new();
 
-    for def in MANAGED_FILES {
+    for def in selected_defs(&manifest) {
         let status = check_file(root, def, &manifest)?;
         reports.push(UpdateReport {
             path: def.path,
@@ -144,16 +147,31 @@ pub fn install_selected(
     force: bool,
     artifacts: &[ManagedArtifact],
 ) -> anyhow::Result<Vec<InstallResult>> {
+    let selected_artifacts = canonical_artifacts(artifacts);
+    if selected_artifacts.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let manifest = load_manifest(root)?;
     let mut results = Vec::new();
     let mut new_manifest_files = manifest
         .as_ref()
-        .map(|m| m.files.clone())
+        .map(|m| {
+            m.files
+                .iter()
+                .filter(|entry| {
+                    managed_file_def_for_path(&entry.path)
+                        .map(|def| selected_artifacts.contains(&def.artifact))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
 
-    for def in MANAGED_FILES
+    for def in selected_artifacts
         .iter()
-        .filter(|def| artifacts.contains(&def.artifact))
+        .filter_map(|artifact| managed_file_def(*artifact))
     {
         let previous_entry = manifest
             .as_ref()
@@ -190,6 +208,7 @@ pub fn install_selected(
 
     let new_manifest = Manifest {
         tempyr_version: TEMPYR_VERSION.to_string(),
+        managed_artifacts: Some(selected_artifacts),
         files: new_manifest_files,
     };
     save_manifest(root, &new_manifest)?;
@@ -217,6 +236,35 @@ pub fn install_all(root: &Path, force: bool) -> anyhow::Result<Vec<InstallResult
 
 fn hash(content: &str) -> String {
     blake3::hash(content.as_bytes()).to_hex().to_string()
+}
+
+fn all_artifacts() -> Vec<ManagedArtifact> {
+    MANAGED_FILES.iter().map(|def| def.artifact).collect()
+}
+
+fn canonical_artifacts(artifacts: &[ManagedArtifact]) -> Vec<ManagedArtifact> {
+    MANAGED_FILES
+        .iter()
+        .filter_map(|def| artifacts.contains(&def.artifact).then_some(def.artifact))
+        .collect()
+}
+
+fn managed_file_def(artifact: ManagedArtifact) -> Option<&'static ManagedFileDef> {
+    MANAGED_FILES.iter().find(|def| def.artifact == artifact)
+}
+
+fn managed_file_def_for_path(path: &str) -> Option<&'static ManagedFileDef> {
+    MANAGED_FILES.iter().find(|def| def.path == path)
+}
+
+fn selected_defs(manifest: &Option<Manifest>) -> Vec<&'static ManagedFileDef> {
+    let artifacts = manifest
+        .as_ref()
+        .and_then(|manifest| manifest.managed_artifacts.as_deref())
+        .map(canonical_artifacts)
+        .unwrap_or_else(all_artifacts);
+
+    artifacts.into_iter().filter_map(managed_file_def).collect()
 }
 
 fn check_file(
@@ -559,6 +607,7 @@ mod tests {
     fn test_manifest_round_trip() {
         let manifest = Manifest {
             tempyr_version: "0.1.0".to_string(),
+            managed_artifacts: Some(vec![ManagedArtifact::Hooks, ManagedArtifact::Skill]),
             files: vec![
                 ManagedFile {
                     path: ".claude/settings.json".to_string(),
@@ -577,6 +626,10 @@ mod tests {
         let serialized = toml::to_string_pretty(&manifest).unwrap();
         let deserialized: Manifest = toml::from_str(&serialized).unwrap();
         assert_eq!(deserialized.tempyr_version, manifest.tempyr_version);
+        assert_eq!(
+            deserialized.managed_artifacts,
+            Some(vec![ManagedArtifact::Hooks, ManagedArtifact::Skill])
+        );
         assert_eq!(deserialized.files.len(), 2);
         assert_eq!(deserialized.files[0].strategy, Strategy::Merge);
         assert_eq!(deserialized.files[0].tempyr_hash, Some("def".to_string()));
@@ -604,6 +657,7 @@ mod tests {
 
         let manifest = Some(Manifest {
             tempyr_version: "0.1.0".to_string(),
+            managed_artifacts: None,
             files: vec![ManagedFile {
                 path: def.path.to_string(),
                 strategy: Strategy::Overwrite,
@@ -628,6 +682,7 @@ mod tests {
 
         let manifest = Some(Manifest {
             tempyr_version: "0.0.1".to_string(),
+            managed_artifacts: None,
             files: vec![ManagedFile {
                 path: def.path.to_string(),
                 strategy: Strategy::Overwrite,
@@ -651,6 +706,7 @@ mod tests {
 
         let manifest = Some(Manifest {
             tempyr_version: "0.1.0".to_string(),
+            managed_artifacts: None,
             files: vec![ManagedFile {
                 path: def.path.to_string(),
                 strategy: Strategy::Overwrite,
@@ -694,6 +750,9 @@ mod tests {
                 r.path
             );
         }
+
+        let manifest = load_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(manifest.managed_artifacts, Some(all_artifacts()));
     }
 
     #[test]
@@ -770,5 +829,28 @@ mod tests {
             check_file(dir.path(), def, &after_manifest).unwrap(),
             FileStatus::UserModified
         );
+    }
+
+    #[test]
+    fn test_install_selected_empty_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let results = install_selected(dir.path(), false, &[]).unwrap();
+
+        assert!(results.is_empty());
+        assert!(!dir.path().join(".tempyr/managed.toml").exists());
+    }
+
+    #[test]
+    fn test_check_all_respects_selected_artifacts_from_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".tempyr")).unwrap();
+
+        let results = install_selected(dir.path(), false, &[ManagedArtifact::Hooks]).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let reports = check_all(dir.path()).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].path, ".claude/settings.json");
     }
 }

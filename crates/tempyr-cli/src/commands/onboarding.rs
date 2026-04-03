@@ -395,10 +395,14 @@ fn provider_index(provider: EmbeddingProviderChoice) -> usize {
 }
 
 fn update_provider(state: &mut WizardState, provider: EmbeddingProviderChoice) {
+    if state.selections.provider != provider {
+        state.api_key_input.clear();
+        state.selections.api_key = None;
+    }
+
     state.selections.provider = provider;
     if !provider.needs_api_key() {
         state.selections.write_api_key_to_env_local = false;
-        state.api_key_input.clear();
     }
 }
 
@@ -927,10 +931,20 @@ impl TerminalGuard {
     fn enter() -> anyhow::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        if let Err(err) = execute!(stdout, EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(err.into());
+        }
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        match Terminal::new(backend) {
+            Ok(terminal) => Ok(Self { terminal }),
+            Err(err) => {
+                let _ = disable_raw_mode();
+                let mut stdout = io::stdout();
+                let _ = execute!(stdout, LeaveAlternateScreen);
+                Err(err.into())
+            }
+        }
     }
 }
 
@@ -966,5 +980,21 @@ mod tests {
 
         assert_eq!(state.api_key_input, "nbq");
         assert_eq!(state.page_index, 0);
+    }
+
+    #[test]
+    fn switching_provider_clears_staged_api_key() {
+        let mut state = WizardState::new(ExistingDocs {
+            claude_md: false,
+            agents_md: false,
+        });
+        state.api_key_input = "voyage-secret".to_string();
+        state.selections.api_key = Some("voyage-secret".to_string());
+
+        update_provider(&mut state, EmbeddingProviderChoice::Gemini);
+
+        assert_eq!(state.selections.provider, EmbeddingProviderChoice::Gemini);
+        assert!(state.api_key_input.is_empty());
+        assert!(state.selections.api_key.is_none());
     }
 }

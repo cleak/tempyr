@@ -18,9 +18,10 @@ Use this skill when the user is creating or refining Tempyr graph content throug
 
 1. Start with `interview_start` using the user's own words.
 2. Present any relevant existing graph context before asking questions.
-3. After each user answer, call `interview_answer` with their actual answer.
-4. Show the new tentative nodes or links in compact form.
-5. Continue until the interview reaches review, then summarize and commit on approval.
+3. Drive the session through the five phases in order: Discovery -> Product -> Technical -> Decomposition -> Review.
+4. In each phase, let the returned typed gaps determine the next contextual follow-up questions until the phase is complete and the interview advances.
+5. After each user answer, call `interview_answer` with their actual answer and show the new tentative nodes or links in compact form.
+6. In Review, summarize the proposed nodes and links, then call `interview_commit` only after explicit approval.
 
 ## When to skip the interview
 

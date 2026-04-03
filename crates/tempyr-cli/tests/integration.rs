@@ -19,7 +19,11 @@ fn init_project(dir: &TempDir) {
 }
 
 fn write_node(dir: &TempDir, subdir: &str, id: &str, content: &str) {
-    let path = dir.path().join("graph").join(subdir).join(format!("{id}.md"));
+    let path = dir
+        .path()
+        .join("graph")
+        .join(subdir)
+        .join(format!("{id}.md"));
     fs::write(path, content).unwrap();
 }
 
@@ -54,6 +58,34 @@ fn test_init_fails_if_already_initialized() {
 }
 
 #[test]
+fn test_init_json_is_rejected_until_supported() {
+    let tmp = TempDir::new().unwrap();
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "init"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`tempyr init --json` is not supported yet",
+        ));
+}
+
+#[test]
+fn test_init_rejects_json_and_wizard_together() {
+    let tmp = TempDir::new().unwrap();
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "init", "--wizard"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--json cannot be combined with --wizard",
+        ));
+}
+
+#[test]
 fn test_mcp_flag_rejects_extra_args() {
     let tmp = TempDir::new().unwrap();
 
@@ -62,7 +94,9 @@ fn test_mcp_flag_rejects_extra_args() {
         .args(["--mcp", "validate"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("`--mcp` must be the first and only argument"));
+        .stderr(predicate::str::contains(
+            "`--mcp` must be the first and only argument",
+        ));
 }
 
 #[test]
@@ -107,7 +141,16 @@ fn test_add_node() {
 
     tempyr()
         .current_dir(tmp.path())
-        .args(["add", "feature", "--id", "feat-test", "--status", "draft", "--owner", "caleb"])
+        .args([
+            "add",
+            "feature",
+            "--id",
+            "feat-test",
+            "--status",
+            "draft",
+            "--owner",
+            "caleb",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Created feat-test"));
@@ -120,10 +163,18 @@ fn test_validate_with_valid_nodes() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n");
-    write_node(&tmp, "epics", "epic-a",
-        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-a",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n",
+    );
+    write_node(
+        &tmp,
+        "epics",
+        "epic-a",
+        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
@@ -138,8 +189,12 @@ fn test_validate_catches_dangling_edge() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: nonexistent\n    type: depends_on\n---\n# A\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-a",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: nonexistent\n    type: depends_on\n---\n# A\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
@@ -153,10 +208,18 @@ fn test_add_edge_and_validate() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
-    write_node(&tmp, "epics", "epic-a",
-        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-a",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+    );
+    write_node(
+        &tmp,
+        "epics",
+        "epic-a",
+        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
@@ -178,10 +241,18 @@ fn test_remove_edge() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
-    write_node(&tmp, "epics", "epic-a",
-        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-a",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+    );
+    write_node(
+        &tmp,
+        "epics",
+        "epic-a",
+        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
@@ -202,8 +273,12 @@ fn test_rename_node() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-old",
-        "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Old\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-old",
+        "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Old\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
@@ -221,15 +296,21 @@ fn test_status_update() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-a",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
         .args(["status", "feat-a", "active"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Updated feat-a status to 'active'"));
+        .stdout(predicate::str::contains(
+            "Updated feat-a status to 'active'",
+        ));
 }
 
 #[test]
@@ -237,10 +318,18 @@ fn test_traverse() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n");
-    write_node(&tmp, "epics", "epic-a",
-        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-a",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n",
+    );
+    write_node(
+        &tmp,
+        "epics",
+        "epic-a",
+        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
@@ -256,8 +345,12 @@ fn test_index_rebuild_and_search() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-replay",
-        "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Session Replay\n\nCapture and replay user sessions.\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-replay",
+        "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Session Replay\n\nCapture and replay user sessions.\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
@@ -279,15 +372,21 @@ fn test_render_prd() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-replay",
-        "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Session Replay\n\nCapture user sessions.\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-replay",
+        "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Session Replay\n\nCapture user sessions.\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
         .args(["render", "prd", "feat-replay"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Product Requirements Document: Session Replay"));
+        .stdout(predicate::str::contains(
+            "Product Requirements Document: Session Replay",
+        ));
 }
 
 #[test]
@@ -295,13 +394,23 @@ fn test_render_to_file() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feature A\n\nBody text.\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-a",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feature A\n\nBody text.\n",
+    );
 
     let output_path = tmp.path().join("output.md");
     tempyr()
         .current_dir(tmp.path())
-        .args(["render", "prd", "feat-a", "--output", output_path.to_str().unwrap()])
+        .args([
+            "render",
+            "prd",
+            "feat-a",
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Rendered to"));
@@ -316,8 +425,12 @@ fn test_json_output() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-a",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
@@ -332,8 +445,12 @@ fn test_index_stats() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "features", "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n");
+    write_node(
+        &tmp,
+        "features",
+        "feat-a",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
@@ -354,12 +471,24 @@ fn test_list_by_status() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "tasks", "task-a",
-        "---\nid: task-a\ntype: task\nstatus: backlog\nowner: caleb\n---\n# Task A\n\nDo stuff.\n");
-    write_node(&tmp, "tasks", "task-b",
-        "---\nid: task-b\ntype: task\nstatus: in_progress\nowner: alice\n---\n# Task B\n\nDo other stuff.\n");
-    write_node(&tmp, "features", "feat-x",
-        "---\nid: feat-x\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feature X\n\nA feature.\n");
+    write_node(
+        &tmp,
+        "tasks",
+        "task-a",
+        "---\nid: task-a\ntype: task\nstatus: backlog\nowner: caleb\n---\n# Task A\n\nDo stuff.\n",
+    );
+    write_node(
+        &tmp,
+        "tasks",
+        "task-b",
+        "---\nid: task-b\ntype: task\nstatus: in_progress\nowner: alice\n---\n# Task B\n\nDo other stuff.\n",
+    );
+    write_node(
+        &tmp,
+        "features",
+        "feat-x",
+        "---\nid: feat-x\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feature X\n\nA feature.\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
@@ -420,10 +549,18 @@ fn test_search_with_status_filter() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    write_node(&tmp, "tasks", "task-a",
-        "---\nid: task-a\ntype: task\nstatus: backlog\n---\n# Build Pipeline\n\nBuild the data pipeline.\n");
-    write_node(&tmp, "tasks", "task-b",
-        "---\nid: task-b\ntype: task\nstatus: done\n---\n# Test Pipeline\n\nTest the data pipeline.\n");
+    write_node(
+        &tmp,
+        "tasks",
+        "task-a",
+        "---\nid: task-a\ntype: task\nstatus: backlog\n---\n# Build Pipeline\n\nBuild the data pipeline.\n",
+    );
+    write_node(
+        &tmp,
+        "tasks",
+        "task-b",
+        "---\nid: task-b\ntype: task\nstatus: done\n---\n# Test Pipeline\n\nTest the data pipeline.\n",
+    );
 
     tempyr()
         .current_dir(tmp.path())
@@ -457,7 +594,13 @@ fn test_interview_start_and_list() {
 
     tempyr()
         .current_dir(tmp.path())
-        .args(["interview", "start", "We need session replay for debugging funnel drop-offs", "--root-type", "feature"])
+        .args([
+            "interview",
+            "start",
+            "We need session replay for debugging funnel drop-offs",
+            "--root-type",
+            "feature",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Interview started"))
@@ -505,7 +648,12 @@ fn test_interview_commit() {
 
     let output = tempyr()
         .current_dir(tmp.path())
-        .args(["--json", "interview", "start", "Build a replay system for sessions"])
+        .args([
+            "--json",
+            "interview",
+            "start",
+            "Build a replay system for sessions",
+        ])
         .assert()
         .success()
         .get_output()
@@ -539,7 +687,12 @@ fn test_interview_full_flow() {
     // Start
     let output = tempyr()
         .current_dir(tmp.path())
-        .args(["--json", "interview", "start", "We need a session replay feature for debugging"])
+        .args([
+            "--json",
+            "interview",
+            "start",
+            "We need a session replay feature for debugging",
+        ])
         .assert()
         .success()
         .get_output()
@@ -552,7 +705,12 @@ fn test_interview_full_flow() {
     // Answer a question
     tempyr()
         .current_dir(tmp.path())
-        .args(["interview", "answer", &session_id, "Platform engineers are the target users"])
+        .args([
+            "interview",
+            "answer",
+            &session_id,
+            "Platform engineers are the target users",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Answer recorded"));

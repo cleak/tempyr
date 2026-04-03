@@ -4,7 +4,7 @@ This repository uses Tempyr, a file-based knowledge graph for product and techni
 
 ## Graph Location
 
-- Graph nodes: `graph/`
+- Graph nodes: `graph/<type>/*.md` (Markdown files with YAML frontmatter, e.g. `graph/features/feat-session-replay.md`)
 - Schema: `.tempyr/schema.toml`
 - Config: `.tempyr/config.toml`
 - Render templates: `.tempyr/render/`
