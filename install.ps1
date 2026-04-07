@@ -111,6 +111,19 @@ function Normalize-PathEntry {
     return (Resolve-CanonicalPath -Path $expandedPath)
 }
 
+function Try-Normalize-PathEntry {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    try {
+        return Normalize-PathEntry -Path $Path
+    } catch {
+        return $null
+    }
+}
+
 function Output-IndicatesLockError {
     param(
         [Parameter(Mandatory)]
@@ -122,20 +135,22 @@ function Output-IndicatesLockError {
 
 function Broadcast-EnvironmentChange {
     if (-not ("Tempyr.Win32.NativeMethods" -as [type])) {
-        Add-Type -Namespace Tempyr.Win32 -Name NativeMethods -MemberDefinition @"
+        Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 
-public static class NativeMethods {
-    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    public static extern IntPtr SendMessageTimeout(
-        IntPtr hWnd,
-        int Msg,
-        IntPtr wParam,
-        string lParam,
-        int fuFlags,
-        int uTimeout,
-        out IntPtr lpdwResult);
+namespace Tempyr.Win32 {
+    public static class NativeMethods {
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern IntPtr SendMessageTimeout(
+            IntPtr hWnd,
+            int Msg,
+            IntPtr wParam,
+            string lParam,
+            int fuFlags,
+            int uTimeout,
+            out IntPtr lpdwResult);
+    }
 }
 "@
     }
@@ -160,28 +175,37 @@ function Ensure-UserPathContains {
 
     $normalizedTarget = Normalize-PathEntry -Path $PathToAdd
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $entries = @()
-    if (-not [string]::IsNullOrWhiteSpace($userPath)) {
-        $entries = $userPath.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries)
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $persistedEntries = @()
+    foreach ($scopePath in @($userPath, $machinePath)) {
+        if (-not [string]::IsNullOrWhiteSpace($scopePath)) {
+            $persistedEntries += $scopePath.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries)
+        }
     }
 
-    foreach ($entry in $entries) {
-        $normalizedEntry = Normalize-PathEntry -Path $entry
-        if (
-            $normalizedEntry -and
-            [string]::Equals($normalizedEntry, $normalizedTarget, [System.StringComparison]::OrdinalIgnoreCase)
-        ) {
-            if (-not (($env:Path -split ';') | Where-Object {
-                        [string]::Equals(
-                            (Normalize-PathEntry -Path $_),
-                            $normalizedTarget,
-                            [System.StringComparison]::OrdinalIgnoreCase
-                        )
-                    })) {
-                $env:Path = "$normalizedTarget;$env:Path"
-            }
-            return $false
+    $persistedPathContainsTarget = $false
+    foreach ($entry in $persistedEntries) {
+        $normalizedEntry = Try-Normalize-PathEntry -Path $entry
+        if ($normalizedEntry -and [string]::Equals($normalizedEntry, $normalizedTarget, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $persistedPathContainsTarget = $true
+            break
         }
+    }
+
+    $currentProcessPathContainsTarget = $false
+    foreach ($entry in ($env:Path -split ';')) {
+        $normalizedEntry = Try-Normalize-PathEntry -Path $entry
+        if ($normalizedEntry -and [string]::Equals($normalizedEntry, $normalizedTarget, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $currentProcessPathContainsTarget = $true
+            break
+        }
+    }
+
+    if ($persistedPathContainsTarget) {
+        if (-not $currentProcessPathContainsTarget) {
+            $env:Path = "$normalizedTarget;$env:Path"
+        }
+        return $false
     }
 
     $updatedPath = if ([string]::IsNullOrWhiteSpace($userPath)) {
@@ -191,9 +215,28 @@ function Ensure-UserPathContains {
     }
 
     [Environment]::SetEnvironmentVariable("Path", $updatedPath, "User")
-    $env:Path = "$normalizedTarget;$env:Path"
+    if (-not $currentProcessPathContainsTarget) {
+        $env:Path = "$normalizedTarget;$env:Path"
+    }
     Broadcast-EnvironmentChange
     return $true
+}
+
+function Get-CargoInstallFailureMessage {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject]$InstallResult
+    )
+
+    $message = "cargo install failed with exit code $($InstallResult.ExitCode)."
+    if (-not [string]::IsNullOrWhiteSpace($InstallResult.Output)) {
+        $output = $InstallResult.Output.TrimEnd()
+        if (-not [string]::IsNullOrWhiteSpace($output)) {
+            $message = "$message`n$output"
+        }
+    }
+
+    return $message
 }
 
 function Invoke-CargoInstall {
@@ -274,7 +317,7 @@ if ($installResult.ExitCode -ne 0) {
 }
 
 if ($installResult.ExitCode -ne 0) {
-    throw "cargo install failed."
+    throw (Get-CargoInstallFailureMessage -InstallResult $installResult)
 }
 
 if (-not $NoPathUpdate) {
