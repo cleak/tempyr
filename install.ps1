@@ -241,6 +241,56 @@ function Get-CargoInstallFailureMessage {
     return $message
 }
 
+function ConvertTo-WindowsArgument {
+    param(
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrEmpty($Value)) {
+        return '""'
+    }
+
+    if ($Value -notmatch '[\s"]') {
+        return $Value
+    }
+
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append('"')
+    $backslashCount = 0
+
+    foreach ($char in $Value.ToCharArray()) {
+        if ($char -eq '\') {
+            $backslashCount += 1
+            continue
+        }
+
+        if ($char -eq '"') {
+            if ($backslashCount -gt 0) {
+                [void]$builder.Append(('\' * ($backslashCount * 2)))
+                $backslashCount = 0
+            }
+
+            [void]$builder.Append('\"')
+            continue
+        }
+
+        if ($backslashCount -gt 0) {
+            [void]$builder.Append(('\' * $backslashCount))
+            $backslashCount = 0
+        }
+
+        [void]$builder.Append($char)
+    }
+
+    if ($backslashCount -gt 0) {
+        [void]$builder.Append(('\' * ($backslashCount * 2)))
+    }
+
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
 function Invoke-CargoInstall {
     param(
         [Parameter(Mandatory)]
@@ -261,8 +311,19 @@ function Invoke-CargoInstall {
     $stdoutFile = New-TemporaryFile
     $stderrFile = New-TemporaryFile
     try {
-        & $cargoExe @cargoArgs 1> $stdoutFile.FullName 2> $stderrFile.FullName
-        $exitCode = $LASTEXITCODE
+        # Windows PowerShell 5.1 turns native stderr into a terminating NativeCommandError
+        # when ErrorActionPreference=Stop, even for cargo's normal progress output.
+        $argumentLine = ($cargoArgs | ForEach-Object { ConvertTo-WindowsArgument -Value "$_" }) -join ' '
+        $process = Start-Process `
+            -FilePath $cargoExe `
+            -ArgumentList $argumentLine `
+            -WorkingDirectory $CratePath `
+            -RedirectStandardOutput $stdoutFile.FullName `
+            -RedirectStandardError $stderrFile.FullName `
+            -NoNewWindow `
+            -PassThru `
+            -Wait
+        $exitCode = $process.ExitCode
 
         $stdoutLines = @()
         $stderrLines = @()
