@@ -99,7 +99,7 @@ function Stop-TargetProcesses {
     return @((Get-TargetProcessIds -BinaryPath $BinaryPath)).Count -eq 0
 }
 
-function Normalize-PathEntry {
+function ConvertTo-CanonicalPathEntry {
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -113,14 +113,14 @@ function Normalize-PathEntry {
     return (Resolve-CanonicalPath -Path $expandedPath)
 }
 
-function Try-Normalize-PathEntry {
+function ConvertTo-CanonicalPathEntrySafe {
     param(
         [Parameter(Mandatory)]
         [string]$Path
     )
 
     try {
-        return Normalize-PathEntry -Path $Path
+        return ConvertTo-CanonicalPathEntry -Path $Path
     } catch {
         return $null
     }
@@ -175,7 +175,7 @@ function Ensure-UserPathContains {
         [string]$PathToAdd
     )
 
-    $normalizedTarget = Normalize-PathEntry -Path $PathToAdd
+    $normalizedTarget = ConvertTo-CanonicalPathEntry -Path $PathToAdd
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $persistedEntries = @()
@@ -187,7 +187,7 @@ function Ensure-UserPathContains {
 
     $persistedPathContainsTarget = $false
     foreach ($entry in $persistedEntries) {
-        $normalizedEntry = Try-Normalize-PathEntry -Path $entry
+        $normalizedEntry = ConvertTo-CanonicalPathEntrySafe -Path $entry
         if ($normalizedEntry -and [string]::Equals($normalizedEntry, $normalizedTarget, [System.StringComparison]::OrdinalIgnoreCase)) {
             $persistedPathContainsTarget = $true
             break
@@ -196,7 +196,7 @@ function Ensure-UserPathContains {
 
     $currentProcessPathContainsTarget = $false
     foreach ($entry in ($env:Path -split ';')) {
-        $normalizedEntry = Try-Normalize-PathEntry -Path $entry
+        $normalizedEntry = ConvertTo-CanonicalPathEntrySafe -Path $entry
         if ($normalizedEntry -and [string]::Equals($normalizedEntry, $normalizedTarget, [System.StringComparison]::OrdinalIgnoreCase)) {
             $currentProcessPathContainsTarget = $true
             break
