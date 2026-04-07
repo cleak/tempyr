@@ -55,7 +55,7 @@ function Get-TargetProcessIds {
     )
 
     $targetPath = Resolve-CanonicalPath -Path $BinaryPath
-    $matches = New-Object System.Collections.Generic.List[int]
+    $matchingProcessIds = New-Object System.Collections.Generic.List[int]
 
     foreach ($process in Get-CimInstance Win32_Process -Filter "Name='tempyr.exe'") {
         if (-not $process.ExecutablePath) {
@@ -69,11 +69,11 @@ function Get-TargetProcessIds {
         }
 
         if ([string]::Equals($candidate, $targetPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $matches.Add([int]$process.ProcessId)
+            $matchingProcessIds.Add([int]$process.ProcessId)
         }
     }
 
-    return $matches.ToArray()
+    return $matchingProcessIds.ToArray()
 }
 
 function Stop-TargetProcesses {
