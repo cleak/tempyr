@@ -43,6 +43,8 @@ function Test-FileLocked {
         )
         $stream.Dispose()
         return $false
+    } catch [System.UnauthorizedAccessException] {
+        return $false
     } catch [System.IO.IOException] {
         return $true
     }
@@ -248,24 +250,19 @@ function Invoke-CargoInstall {
     )
 
     $cargoExe = (Get-Command cargo -ErrorAction Stop).Source
+    $cargoArgs = @(
+        "install",
+        "--path", $CratePath,
+        "--root", $InstallRootPath,
+        "--locked",
+        "--force",
+        "--bin", "tempyr"
+    )
     $stdoutFile = New-TemporaryFile
     $stderrFile = New-TemporaryFile
     try {
-        $process = Start-Process `
-            -FilePath $cargoExe `
-            -ArgumentList @(
-                "install",
-                "--path", $CratePath,
-                "--root", $InstallRootPath,
-                "--locked",
-                "--force",
-                "--bin", "tempyr"
-            ) `
-            -NoNewWindow `
-            -Wait `
-            -PassThru `
-            -RedirectStandardOutput $stdoutFile.FullName `
-            -RedirectStandardError $stderrFile.FullName
+        & $cargoExe @cargoArgs 1> $stdoutFile.FullName 2> $stderrFile.FullName
+        $exitCode = $LASTEXITCODE
 
         $stdoutLines = @()
         $stderrLines = @()
@@ -282,7 +279,7 @@ function Invoke-CargoInstall {
 
         $output = ($stderrLines + $stdoutLines) -join [Environment]::NewLine
         return [pscustomobject]@{
-            ExitCode = $process.ExitCode
+            ExitCode = $exitCode
             Output   = $output
         }
     } finally {
@@ -330,6 +327,6 @@ if (-not $NoPathUpdate) {
     if ($addedToPath) {
         Write-Host "Added $binDir to the user PATH."
     } else {
-        Write-Host "$binDir is already present in the user PATH."
+        Write-Host "$binDir is already present in PATH."
     }
 }
