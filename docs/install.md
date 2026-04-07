@@ -1,0 +1,51 @@
+# Installing Tempyr
+
+Tempyr is a Rust workspace. The repo root `Cargo.toml` is a virtual manifest, so source installs need to target `crates/tempyr-cli` instead of `cargo install --path .`.
+
+## Linux
+
+Run:
+
+```bash
+bash install.sh
+```
+
+The script installs Tempyr with:
+
+```bash
+cargo install --path crates/tempyr-cli --root "${XDG_DATA_HOME:-$HOME/.local/share}/tempyr" --locked --force --bin tempyr
+```
+
+It then updates `PATH` idempotently in `~/.profile` and in the active shell's rc file when that shell is `bash` or `zsh`.
+
+## Windows
+
+Run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The script installs Tempyr with:
+
+```powershell
+cargo install --path .\crates\tempyr-cli --root "$Env:LocalAppData\Tempyr" --locked --force --bin tempyr
+```
+
+It then updates the user `PATH` so new shells can find `tempyr.exe`.
+
+## Updating safely
+
+Rerun the installer to update Tempyr. If the currently installed Tempyr binary is locked by a running process, the installer only stops processes whose executable path exactly matches the target installed binary, then retries the install. It does not kill processes based on name alone.
+
+## Custom install root
+
+Both installers accept a custom install root:
+
+```bash
+bash install.sh --install-root /some/path
+```
+
+```powershell
+.\install.ps1 -InstallRoot C:\Some\Path
+```
