@@ -88,16 +88,13 @@ function Stop-TargetProcesses {
     }
 
     Write-Host "Detected a locked Tempyr install at $BinaryPath. Stopping matching processes: $($processIds -join ', ')"
-    Stop-Process -Id $processIds -Force
 
     foreach ($processId in $processIds) {
-        try {
-            Wait-Process -Id $processId -Timeout 15 -ErrorAction Stop
-        } catch {
-        }
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $processId -Timeout 15 -ErrorAction SilentlyContinue
     }
 
-    return $true
+    return @((Get-TargetProcessIds -BinaryPath $BinaryPath)).Count -eq 0
 }
 
 function Normalize-PathEntry {

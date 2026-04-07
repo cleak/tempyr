@@ -18,6 +18,12 @@ cargo install --path crates/tempyr-cli --root "${XDG_DATA_HOME:-$HOME/.local/sha
 
 It then updates `PATH` idempotently in `~/.profile` and in the active shell's rc file when that shell is `bash` or `zsh`.
 
+If you want `install.sh` to skip shell startup file changes, pass `--no-path-update`:
+
+```bash
+bash install.sh --no-path-update
+```
+
 ## Windows
 
 Run:
@@ -33,6 +39,12 @@ cargo install --path .\crates\tempyr-cli --root "$Env:LocalAppData\Tempyr" --loc
 ```
 
 It then updates the user `PATH` so new shells can find `tempyr.exe`.
+
+If you want `install.ps1` to skip user `PATH` changes, pass `-NoPathUpdate`:
+
+```powershell
+.\install.ps1 -NoPathUpdate
+```
 
 ## Updating safely
 
