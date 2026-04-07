@@ -121,7 +121,7 @@ kill_matching_processes() {
   echo "Detected a locked Tempyr install at $target. Stopping matching processes: ${pids[*]}" >&2
   kill -TERM "${pids[@]}" 2>/dev/null || true
 
-  for _ in $(seq 1 30); do
+  for ((attempt = 0; attempt < 30; attempt++)); do
     remaining=()
     for pid in "${pids[@]}"; do
       if kill -0 "$pid" 2>/dev/null; then
@@ -140,6 +140,19 @@ kill_matching_processes() {
   echo "Some Tempyr processes did not exit after SIGTERM. Sending SIGKILL to: ${pids[*]}" >&2
   kill -KILL "${pids[@]}" 2>/dev/null || true
   sleep 1
+
+  remaining=()
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      remaining+=("$pid")
+    fi
+  done
+
+  if ((${#remaining[@]} > 0)); then
+    echo "Failed to stop Tempyr processes: ${remaining[*]}" >&2
+    return 1
+  fi
+
   return 0
 }
 

@@ -110,7 +110,8 @@ function Normalize-PathEntry {
         return $null
     }
 
-    return (Resolve-CanonicalPath -Path $Path)
+    $expandedPath = [Environment]::ExpandEnvironmentVariables($Path.Trim())
+    return (Resolve-CanonicalPath -Path $expandedPath)
 }
 
 function Output-IndicatesLockError {
