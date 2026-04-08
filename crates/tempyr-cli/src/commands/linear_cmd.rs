@@ -15,6 +15,18 @@ fn rt() -> anyhow::Result<tokio::runtime::Runtime> {
     tokio::runtime::Runtime::new().map_err(|e| anyhow::anyhow!("Failed to create runtime: {e}"))
 }
 
+fn finalize_linear_graph_update(
+    ctx: &ProjectContext,
+    state: &SyncState,
+    graph_changed: bool,
+) -> anyhow::Result<()> {
+    if graph_changed {
+        super::warn_if_index_refresh_fails(ctx);
+    }
+    state.save(&ctx.tempyr_dir)?;
+    Ok(())
+}
+
 pub fn run_setup(ctx: &ProjectContext, json_output: bool) -> anyhow::Result<()> {
     let client = LinearClient::from_env()?;
     let runtime = rt()?;
@@ -242,10 +254,7 @@ pub fn run_pull(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
             &status_mapper,
         )
         .await?;
-        state.save(&ctx.tempyr_dir)?;
-        if result.changed_graph() {
-            super::warn_if_index_refresh_fails(ctx);
-        }
+        finalize_linear_graph_update(ctx, &state, result.changed_graph())?;
 
         if json_output {
             println!(
@@ -317,10 +326,7 @@ pub fn run_sync(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
             &status_mapper,
         )
         .await?;
-        state.save(&ctx.tempyr_dir)?;
-        if result.changed_graph() {
-            super::warn_if_index_refresh_fails(ctx);
-        }
+        finalize_linear_graph_update(ctx, &state, result.changed_graph())?;
 
         if json_output {
             println!(

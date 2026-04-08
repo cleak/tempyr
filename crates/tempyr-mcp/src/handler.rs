@@ -298,6 +298,38 @@ fn index_refresh_warning(graph_dir: &Path, gf_dir: &Path, schema: &Schema) -> Op
         .map(|e| format!("Index update failed (run 'tempyr index rebuild'): {e}"))
 }
 
+// Keep graph queries aligned with the just-written snapshot even if saving
+// Linear sync metadata fails afterwards.
+fn finalize_linear_graph_update(
+    sync_state: &SyncState,
+    base_warnings: Vec<String>,
+    graph_changed: bool,
+    graph_dir: &Path,
+    gf_dir: &Path,
+    schema: &Schema,
+) -> Result<Vec<String>, String> {
+    let mut warnings = base_warnings;
+    let refresh_warning = if graph_changed {
+        index_refresh_warning(graph_dir, gf_dir, schema)
+    } else {
+        None
+    };
+
+    if let Some(warning) = &refresh_warning {
+        warnings.push(warning.clone());
+    }
+
+    sync_state.save(gf_dir).map_err(|e| {
+        let save_err = e.to_string();
+        match refresh_warning {
+            Some(warning) => format!("{save_err}; {warning}"),
+            None => save_err,
+        }
+    })?;
+
+    Ok(warnings)
+}
+
 fn sessions_dir(gf_dir: &Path) -> PathBuf {
     gf_dir.join("sessions")
 }
@@ -1250,13 +1282,14 @@ impl TempyrServer {
                 )
                 .await
                 .map_err(|e| e.to_string())?;
-                sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
-                let mut warnings = result.warnings.clone();
-                if result.changed_graph()
-                    && let Some(warning) = index_refresh_warning(&graph_dir, &gf_dir, &schema)
-                {
-                    warnings.push(warning);
-                }
+                let warnings = finalize_linear_graph_update(
+                    &sync_state,
+                    result.warnings.clone(),
+                    result.changed_graph(),
+                    &graph_dir,
+                    &gf_dir,
+                    &schema,
+                )?;
 
                 serde_json::to_string_pretty(&json!({
                     "created": result.created,
@@ -1309,13 +1342,14 @@ impl TempyrServer {
                 )
                 .await
                 .map_err(|e| e.to_string())?;
-                sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
-                let mut warnings = Vec::new();
-                if result.changed_graph()
-                    && let Some(warning) = index_refresh_warning(&graph_dir, &gf_dir, &schema)
-                {
-                    warnings.push(warning);
-                }
+                let warnings = finalize_linear_graph_update(
+                    &sync_state,
+                    result.pull.warnings.clone(),
+                    result.changed_graph(),
+                    &graph_dir,
+                    &gf_dir,
+                    &schema,
+                )?;
 
                 serde_json::to_string_pretty(&json!({
                     "push": {
