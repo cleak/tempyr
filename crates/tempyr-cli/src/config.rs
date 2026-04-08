@@ -1,4 +1,5 @@
 use anyhow::Context;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use tempyr_core::graph::Graph;
@@ -134,19 +135,26 @@ impl ProjectContext {
     /// Refresh the index so query commands keep working after graph mutations.
     pub fn refresh_index_for_current_snapshot(&self) -> anyhow::Result<()> {
         let layout = self.index_layout()?;
-        let index_path = layout.ensure_active_index_seeded()?;
         let graph = Graph::load_from_directory(&self.graph_dir, self.schema.clone())?;
-
-        if index_path.exists() {
-            let index = Index::open(&index_path)?;
-            index.incremental_update(&graph)?;
-        } else {
-            if let Some(parent) = index_path.parent() {
-                std::fs::create_dir_all(parent)?;
+        layout.update_active_index_atomically(|index_path| {
+            if index_path.exists() {
+                let index =
+                    Index::open(index_path).map_err(|e| io::Error::other(format!("Index: {e}")))?;
+                index
+                    .incremental_update(&graph)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+            } else {
+                if let Some(parent) = index_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let index = Index::create(index_path)
+                    .map_err(|e| io::Error::other(format!("Index: {e}")))?;
+                index
+                    .rebuild(&graph)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
             }
-            let index = Index::create(&index_path)?;
-            index.rebuild(&graph)?;
-        }
+            Ok(())
+        })?;
 
         layout.write_active_snapshot_key()?;
         layout.publish_active_snapshot()?;

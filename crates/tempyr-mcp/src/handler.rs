@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -286,23 +287,28 @@ fn refresh_index_for_current_snapshot(
     schema: &Schema,
 ) -> Result<(), String> {
     let layout = index_layout(graph_dir, gf_dir)?;
-    let index_path = layout
-        .ensure_active_index_seeded()
-        .map_err(|e| e.to_string())?;
     let graph = Graph::load_from_directory(graph_dir, schema.clone()).map_err(|e| e.to_string())?;
-
-    if index_path.exists() {
-        let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
-        index
-            .incremental_update(&graph)
-            .map_err(|e| e.to_string())?;
-    } else {
-        if let Some(parent) = index_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let index = Index::create(&index_path).map_err(|e| format!("Index: {e}"))?;
-        index.rebuild(&graph).map_err(|e| e.to_string())?;
-    }
+    layout
+        .update_active_index_atomically(|index_path| {
+            if index_path.exists() {
+                let index =
+                    Index::open(index_path).map_err(|e| io::Error::other(format!("Index: {e}")))?;
+                index
+                    .incremental_update(&graph)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+            } else {
+                if let Some(parent) = index_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let index = Index::create(index_path)
+                    .map_err(|e| io::Error::other(format!("Index: {e}")))?;
+                index
+                    .rebuild(&graph)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
 
     layout
         .write_active_snapshot_key()
