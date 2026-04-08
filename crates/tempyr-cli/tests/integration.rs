@@ -368,6 +368,149 @@ fn test_index_rebuild_and_search() {
 }
 
 #[test]
+fn test_add_refreshes_index_for_follow_up_search() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    write_node(
+        &tmp,
+        "features",
+        "feat-existing",
+        "---\nid: feat-existing\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Existing\n\nAlready indexed.\n",
+    );
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["index", "rebuild"])
+        .assert()
+        .success();
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "add",
+            "feature",
+            "--id",
+            "feat-terrain",
+            "--status",
+            "draft",
+            "--owner",
+            "caleb",
+            "--body",
+            "# Terrain Streaming\n\nLOD terrain streaming for large worlds.\n",
+        ])
+        .assert()
+        .success();
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["search", "terrain"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feat-terrain"));
+}
+
+#[test]
+fn test_add_builds_index_when_missing() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "add",
+            "feature",
+            "--id",
+            "feat-terrain",
+            "--status",
+            "draft",
+            "--owner",
+            "caleb",
+            "--body",
+            "# Terrain Streaming\n\nLOD terrain streaming for large worlds.\n",
+        ])
+        .assert()
+        .success();
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["search", "terrain"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feat-terrain"));
+}
+
+#[test]
+fn test_status_refreshes_index_for_filtered_search() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    write_node(
+        &tmp,
+        "features",
+        "feat-terrain",
+        "---\nid: feat-terrain\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Terrain Streaming\n\nLOD terrain streaming for large worlds.\n",
+    );
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["index", "rebuild"])
+        .assert()
+        .success();
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["status", "feat-terrain", "active"])
+        .assert()
+        .success();
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["search", "terrain", "--status", "active"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feat-terrain"));
+}
+
+#[test]
+fn test_add_edge_refreshes_index_for_follow_up_search() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    write_node(
+        &tmp,
+        "features",
+        "feat-terrain",
+        "---\nid: feat-terrain\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Terrain Streaming\n\nLOD terrain streaming for large worlds.\n",
+    );
+    write_node(
+        &tmp,
+        "epics",
+        "epic-world",
+        "---\nid: epic-world\ntype: epic\nstatus: draft\nowner: caleb\n---\n# World Streaming\n\nParent epic.\n",
+    );
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["index", "rebuild"])
+        .assert()
+        .success();
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["add-edge", "feat-terrain", "epic-world", "child_of"])
+        .assert()
+        .success();
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["search", "terrain"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feat-terrain"));
+}
+
+#[test]
 fn test_render_prd() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);

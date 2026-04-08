@@ -21,6 +21,12 @@ pub struct SyncResult {
     pub pull: PullResult,
 }
 
+impl SyncResult {
+    pub fn changed_graph(&self) -> bool {
+        self.pull.changed_graph()
+    }
+}
+
 /// Full bidirectional sync: push local changes, then pull remote changes.
 pub async fn sync(
     client: &LinearClient,

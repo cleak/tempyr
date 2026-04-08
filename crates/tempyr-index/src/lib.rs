@@ -3,6 +3,7 @@ pub mod fts;
 pub mod hybrid;
 pub mod incremental;
 pub mod indexer;
+pub mod refresh;
 pub mod vector;
 
 use thiserror::Error;

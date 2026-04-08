@@ -91,6 +91,56 @@ pub struct IndexLayout {
     pub legacy_index_path: PathBuf,
 }
 
+struct StagedActiveIndex {
+    active_path: PathBuf,
+    staged_path: PathBuf,
+}
+
+impl StagedActiveIndex {
+    fn path(&self) -> &Path {
+        &self.staged_path
+    }
+
+    fn commit(self) -> io::Result<()> {
+        if !self.staged_path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Staged index was not created",
+            ));
+        }
+        if let Some(parent) = self.active_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        match fs::rename(&self.staged_path, &self.active_path) {
+            Ok(()) => Ok(()),
+            Err(err) if !self.active_path.exists() => Err(err),
+            Err(_) => self.commit_with_backup(),
+        }
+    }
+
+    fn commit_with_backup(self) -> io::Result<()> {
+        let backup = unique_sqlite_temp_path(&self.active_path, "backup");
+        cleanup_sqlite_artifacts(&backup);
+        fs::rename(&self.active_path, &backup)?;
+        match fs::rename(&self.staged_path, &self.active_path) {
+            Ok(()) => {
+                cleanup_sqlite_artifacts(&backup);
+                Ok(())
+            }
+            Err(err) => {
+                let _ = fs::rename(&backup, &self.active_path);
+                Err(err)
+            }
+        }
+    }
+}
+
+impl Drop for StagedActiveIndex {
+    fn drop(&mut self) {
+        cleanup_sqlite_artifacts(&self.staged_path);
+    }
+}
+
 impl IndexLayout {
     pub fn resolve(root: &Path, graph_dir: &Path, tempyr_dir: &Path) -> io::Result<Self> {
         Ok(Self {
@@ -198,6 +248,21 @@ impl IndexLayout {
         Ok(active)
     }
 
+    /// Run a staged index refresh for the current snapshot. The staged index is
+    /// published to the shared snapshot store before live promotion so later
+    /// queries can still resolve the refreshed snapshot if the worktree-local
+    /// marker update fails after commit.
+    pub fn update_active_index_atomically<F>(&self, updater: F) -> io::Result<()>
+    where
+        F: FnOnce(&Path) -> io::Result<()>,
+    {
+        let staged = self.stage_active_index()?;
+        updater(staged.path())?;
+        self.publish_snapshot_from(staged.path())?;
+        staged.commit()?;
+        self.write_active_snapshot_key()
+    }
+
     pub fn write_active_snapshot_key(&self) -> io::Result<()> {
         let path = self.active_snapshot_path();
         if let Some(parent) = path.parent() {
@@ -209,6 +274,10 @@ impl IndexLayout {
 
     pub fn publish_active_snapshot(&self) -> io::Result<PathBuf> {
         let active = self.active_index_path();
+        self.publish_snapshot_from(&active)
+    }
+
+    fn publish_snapshot_from(&self, source: &Path) -> io::Result<PathBuf> {
         let shared = self.shared_snapshot_index_path()?;
         if shared.exists() {
             return Ok(shared);
@@ -224,7 +293,7 @@ impl IndexLayout {
             .unwrap_or_default()
             .as_nanos();
         let tmp = shared.with_extension(format!("db.tmp.{}.{}", std::process::id(), nonce));
-        fs::copy(&active, &tmp)?;
+        fs::copy(source, &tmp)?;
         match fs::hard_link(&tmp, &shared) {
             Ok(()) => {
                 let _ = fs::remove_file(&tmp);
@@ -246,6 +315,51 @@ impl IndexLayout {
             .ok()
             .map(|s| s.trim().to_string())
     }
+
+    fn stage_active_index(&self) -> io::Result<StagedActiveIndex> {
+        let active = self.ensure_active_index_seeded()?;
+        let staged = unique_sqlite_temp_path(&active, "staged");
+        if let Some(parent) = staged.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        cleanup_sqlite_artifacts(&staged);
+        if active.exists() {
+            fs::copy(&active, &staged)?;
+        }
+        Ok(StagedActiveIndex {
+            active_path: active,
+            staged_path: staged,
+        })
+    }
+}
+
+fn unique_sqlite_temp_path(base: &Path, kind: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    base.with_extension(format!("db.{kind}.{}.{}", std::process::id(), nonce))
+}
+
+fn cleanup_sqlite_artifacts(path: &Path) {
+    for candidate in sqlite_artifact_paths(path) {
+        let _ = fs::remove_file(candidate);
+    }
+}
+
+fn sqlite_artifact_paths(path: &Path) -> [PathBuf; 4] {
+    [
+        path.to_path_buf(),
+        sqlite_auxiliary_path(path, "-journal"),
+        sqlite_auxiliary_path(path, "-shm"),
+        sqlite_auxiliary_path(path, "-wal"),
+    ]
+}
+
+fn sqlite_auxiliary_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut raw = path.as_os_str().to_os_string();
+    raw.push(suffix);
+    PathBuf::from(raw)
 }
 
 /// Walk up the directory tree to find a tempyr project root.
@@ -901,5 +1015,128 @@ mod tests {
 
         assert_eq!(published, shared);
         assert_eq!(fs::read_to_string(shared).unwrap(), "existing-shared-index");
+    }
+
+    #[test]
+    fn atomic_active_index_update_promotes_staged_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let graph_dir = root.join("graph");
+        let features_dir = graph_dir.join("features");
+        let tempyr_dir = root.join(".tempyr");
+        fs::create_dir_all(&features_dir).unwrap();
+        fs::create_dir_all(&tempyr_dir).unwrap();
+        fs::write(tempyr_dir.join("schema.toml"), "name = 'x'\n").unwrap();
+        fs::write(features_dir.join("a.md"), "# A\n").unwrap();
+
+        let layout = IndexLayout::resolve(root, &graph_dir, &tempyr_dir).unwrap();
+        let active = layout.active_index_path();
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        fs::write(&active, "active-index").unwrap();
+        fs::write(
+            layout.active_snapshot_path(),
+            layout.snapshot_key().unwrap(),
+        )
+        .unwrap();
+
+        layout
+            .update_active_index_atomically(|staged| {
+                assert_eq!(fs::read_to_string(staged).unwrap(), "active-index");
+                fs::write(staged, "refreshed-index")?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&active).unwrap(), "refreshed-index");
+        assert!(staged_index_artifacts(&active).is_empty());
+    }
+
+    #[test]
+    fn atomic_active_index_update_keeps_live_index_on_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let graph_dir = root.join("graph");
+        let features_dir = graph_dir.join("features");
+        let tempyr_dir = root.join(".tempyr");
+        fs::create_dir_all(&features_dir).unwrap();
+        fs::create_dir_all(&tempyr_dir).unwrap();
+        fs::write(tempyr_dir.join("schema.toml"), "name = 'x'\n").unwrap();
+        fs::write(features_dir.join("a.md"), "# A\n").unwrap();
+
+        let layout = IndexLayout::resolve(root, &graph_dir, &tempyr_dir).unwrap();
+        let active = layout.active_index_path();
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        fs::write(&active, "active-index").unwrap();
+        fs::write(
+            layout.active_snapshot_path(),
+            layout.snapshot_key().unwrap(),
+        )
+        .unwrap();
+
+        let err = layout
+            .update_active_index_atomically(|staged| {
+                fs::write(staged, "half-written-index")?;
+                Err(io::Error::other("boom"))
+            })
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(fs::read_to_string(&active).unwrap(), "active-index");
+        assert!(staged_index_artifacts(&active).is_empty());
+    }
+
+    #[test]
+    fn atomic_active_index_update_keeps_snapshot_queryable_when_marker_write_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let graph_dir = root.join("graph");
+        let features_dir = graph_dir.join("features");
+        let tempyr_dir = root.join(".tempyr");
+        fs::create_dir_all(&features_dir).unwrap();
+        fs::create_dir_all(&tempyr_dir).unwrap();
+        fs::write(tempyr_dir.join("schema.toml"), "name = 'x'\n").unwrap();
+        fs::write(features_dir.join("a.md"), "# A\n").unwrap();
+
+        let layout = IndexLayout::resolve(root, &graph_dir, &tempyr_dir).unwrap();
+        let active = layout.active_index_path();
+        let shared = layout.shared_snapshot_index_path().unwrap();
+        let snapshot_key_path = layout.active_snapshot_path();
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        fs::write(&active, "active-index").unwrap();
+        fs::write(&snapshot_key_path, layout.snapshot_key().unwrap()).unwrap();
+
+        let err = layout
+            .update_active_index_atomically(|staged| {
+                fs::write(staged, "refreshed-index")?;
+                fs::remove_file(&snapshot_key_path)?;
+                fs::create_dir(&snapshot_key_path)?;
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            err.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::IsADirectory
+        ));
+        assert_eq!(fs::read_to_string(&active).unwrap(), "refreshed-index");
+        assert_eq!(fs::read_to_string(&shared).unwrap(), "refreshed-index");
+        assert_eq!(layout.current_index_path().unwrap(), Some(shared));
+        fs::remove_dir(&snapshot_key_path).unwrap();
+        assert!(staged_index_artifacts(&active).is_empty());
+    }
+
+    fn staged_index_artifacts(active: &Path) -> Vec<PathBuf> {
+        let prefix = format!("{}.", active.file_name().unwrap().to_string_lossy());
+        fs::read_dir(active.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+                    && path != active
+            })
+            .collect()
     }
 }

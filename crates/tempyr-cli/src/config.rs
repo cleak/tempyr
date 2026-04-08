@@ -1,12 +1,14 @@
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
+use tempyr_core::graph::Graph;
 use tempyr_core::project;
 use tempyr_core::project::{CacheLayout, IndexLayout};
 use tempyr_core::schema::Schema;
 use tempyr_index::embeddings::{
     EmbeddingConfig, EmbeddingConfigPartial, ResolvedEmbeddingConfig, resolve_embedding_config,
 };
+use tempyr_index::refresh::refresh_index_for_graph;
 
 /// Project context: resolved paths for a tempyr project.
 pub struct ProjectContext {
@@ -127,6 +129,14 @@ impl ProjectContext {
         let layout = self.index_layout()?;
         layout.set_snapshot_key(snapshot_key);
         Ok(layout.publish_active_snapshot()?)
+    }
+
+    /// Refresh the index so query commands keep working after graph mutations.
+    pub fn refresh_index_for_current_snapshot(&self) -> anyhow::Result<()> {
+        let layout = self.index_layout()?;
+        let graph = Graph::load_from_directory(&self.graph_dir, self.schema.clone())?;
+        refresh_index_for_graph(&layout, &graph)?;
+        Ok(())
     }
 
     fn index_layout(&self) -> anyhow::Result<IndexLayout> {

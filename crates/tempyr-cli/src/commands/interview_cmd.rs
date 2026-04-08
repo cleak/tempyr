@@ -154,6 +154,7 @@ pub fn run_commit(ctx: &ProjectContext, session_id: &str) -> anyhow::Result<()> 
             println!("  {}", path.display());
         }
     }
+    super::warn_if_index_refresh_fails(ctx);
 
     Ok(())
 }
