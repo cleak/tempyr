@@ -111,11 +111,27 @@ impl StagedActiveIndex {
         if let Some(parent) = self.active_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        if self.active_path.exists() {
-            fs::remove_file(&self.active_path)?;
+        match fs::rename(&self.staged_path, &self.active_path) {
+            Ok(()) => Ok(()),
+            Err(err) if !self.active_path.exists() => Err(err),
+            Err(_) => self.commit_with_backup(),
         }
-        fs::rename(&self.staged_path, &self.active_path)?;
-        Ok(())
+    }
+
+    fn commit_with_backup(self) -> io::Result<()> {
+        let backup = unique_sqlite_temp_path(&self.active_path, "backup");
+        cleanup_sqlite_artifacts(&backup);
+        fs::rename(&self.active_path, &backup)?;
+        match fs::rename(&self.staged_path, &self.active_path) {
+            Ok(()) => {
+                cleanup_sqlite_artifacts(&backup);
+                Ok(())
+            }
+            Err(err) => {
+                let _ = fs::rename(&backup, &self.active_path);
+                Err(err)
+            }
+        }
     }
 }
 
@@ -232,15 +248,19 @@ impl IndexLayout {
         Ok(active)
     }
 
-    /// Run a staged index refresh and only replace the active index after the
-    /// updater has finished successfully.
+    /// Run a staged index refresh for the current snapshot. The staged index is
+    /// published to the shared snapshot store before live promotion so later
+    /// queries can still resolve the refreshed snapshot if the worktree-local
+    /// marker update fails after commit.
     pub fn update_active_index_atomically<F>(&self, updater: F) -> io::Result<()>
     where
         F: FnOnce(&Path) -> io::Result<()>,
     {
         let staged = self.stage_active_index()?;
         updater(staged.path())?;
-        staged.commit()
+        self.publish_snapshot_from(staged.path())?;
+        staged.commit()?;
+        self.write_active_snapshot_key()
     }
 
     pub fn write_active_snapshot_key(&self) -> io::Result<()> {
@@ -254,6 +274,10 @@ impl IndexLayout {
 
     pub fn publish_active_snapshot(&self) -> io::Result<PathBuf> {
         let active = self.active_index_path();
+        self.publish_snapshot_from(&active)
+    }
+
+    fn publish_snapshot_from(&self, source: &Path) -> io::Result<PathBuf> {
         let shared = self.shared_snapshot_index_path()?;
         if shared.exists() {
             return Ok(shared);
@@ -269,7 +293,7 @@ impl IndexLayout {
             .unwrap_or_default()
             .as_nanos();
         let tmp = shared.with_extension(format!("db.tmp.{}.{}", std::process::id(), nonce));
-        fs::copy(&active, &tmp)?;
+        fs::copy(source, &tmp)?;
         match fs::hard_link(&tmp, &shared) {
             Ok(()) => {
                 let _ = fs::remove_file(&tmp);
@@ -1058,6 +1082,47 @@ mod tests {
 
         assert_eq!(err.kind(), io::ErrorKind::Other);
         assert_eq!(fs::read_to_string(&active).unwrap(), "active-index");
+        assert!(staged_index_artifacts(&active).is_empty());
+    }
+
+    #[test]
+    fn atomic_active_index_update_keeps_snapshot_queryable_when_marker_write_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let graph_dir = root.join("graph");
+        let features_dir = graph_dir.join("features");
+        let tempyr_dir = root.join(".tempyr");
+        fs::create_dir_all(&features_dir).unwrap();
+        fs::create_dir_all(&tempyr_dir).unwrap();
+        fs::write(tempyr_dir.join("schema.toml"), "name = 'x'\n").unwrap();
+        fs::write(features_dir.join("a.md"), "# A\n").unwrap();
+
+        let layout = IndexLayout::resolve(root, &graph_dir, &tempyr_dir).unwrap();
+        let active = layout.active_index_path();
+        let shared = layout.shared_snapshot_index_path().unwrap();
+        let snapshot_key_path = layout.active_snapshot_path();
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        fs::write(&active, "active-index").unwrap();
+        fs::write(&snapshot_key_path, layout.snapshot_key().unwrap()).unwrap();
+
+        let err = layout
+            .update_active_index_atomically(|staged| {
+                fs::write(staged, "refreshed-index")?;
+                fs::remove_file(&snapshot_key_path)?;
+                fs::create_dir(&snapshot_key_path)?;
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            err.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::IsADirectory
+        ));
+        assert_eq!(fs::read_to_string(&active).unwrap(), "refreshed-index");
+        assert_eq!(fs::read_to_string(&shared).unwrap(), "refreshed-index");
+        assert_eq!(layout.current_index_path().unwrap(), Some(shared));
+        fs::remove_dir(&snapshot_key_path).unwrap();
         assert!(staged_index_artifacts(&active).is_empty());
     }
 

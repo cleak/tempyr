@@ -155,9 +155,6 @@ impl ProjectContext {
             }
             Ok(())
         })?;
-
-        layout.write_active_snapshot_key()?;
-        layout.publish_active_snapshot()?;
         Ok(())
     }
 

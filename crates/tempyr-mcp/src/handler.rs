@@ -309,13 +309,6 @@ fn refresh_index_for_current_snapshot(
             Ok(())
         })
         .map_err(|e| e.to_string())?;
-
-    layout
-        .write_active_snapshot_key()
-        .map_err(|e| e.to_string())?;
-    layout
-        .publish_active_snapshot()
-        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
