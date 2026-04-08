@@ -29,5 +29,6 @@ pub fn run(
         }
         _ => anyhow::bail!("Provide either --slug (recommended) or --id"),
     }
+    super::warn_if_index_refresh_fails(ctx);
     Ok(())
 }

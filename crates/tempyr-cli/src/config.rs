@@ -1,12 +1,14 @@
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
+use tempyr_core::graph::Graph;
 use tempyr_core::project;
 use tempyr_core::project::{CacheLayout, IndexLayout};
 use tempyr_core::schema::Schema;
 use tempyr_index::embeddings::{
     EmbeddingConfig, EmbeddingConfigPartial, ResolvedEmbeddingConfig, resolve_embedding_config,
 };
+use tempyr_index::indexer::Index;
 
 /// Project context: resolved paths for a tempyr project.
 pub struct ProjectContext {
@@ -127,6 +129,28 @@ impl ProjectContext {
         let layout = self.index_layout()?;
         layout.set_snapshot_key(snapshot_key);
         Ok(layout.publish_active_snapshot()?)
+    }
+
+    /// Refresh the index so query commands keep working after graph mutations.
+    pub fn refresh_index_for_current_snapshot(&self) -> anyhow::Result<()> {
+        let layout = self.index_layout()?;
+        let index_path = layout.ensure_active_index_seeded()?;
+        let graph = Graph::load_from_directory(&self.graph_dir, self.schema.clone())?;
+
+        if index_path.exists() {
+            let index = Index::open(&index_path)?;
+            index.incremental_update(&graph)?;
+        } else {
+            if let Some(parent) = index_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let index = Index::create(&index_path)?;
+            index.rebuild(&graph)?;
+        }
+
+        layout.write_active_snapshot_key()?;
+        layout.publish_active_snapshot()?;
+        Ok(())
     }
 
     fn index_layout(&self) -> anyhow::Result<IndexLayout> {

@@ -27,5 +27,6 @@ pub fn run(
     for path in &modified {
         println!("  {}", path.display());
     }
+    super::warn_if_index_refresh_fails(ctx);
     Ok(())
 }

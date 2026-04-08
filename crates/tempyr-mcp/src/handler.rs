@@ -280,6 +280,45 @@ fn open_optional_index(graph_dir: &Path, gf_dir: &Path) -> Result<Option<Index>,
     }
 }
 
+fn refresh_index_for_current_snapshot(
+    graph_dir: &Path,
+    gf_dir: &Path,
+    schema: &Schema,
+) -> Result<(), String> {
+    let layout = index_layout(graph_dir, gf_dir)?;
+    let index_path = layout
+        .ensure_active_index_seeded()
+        .map_err(|e| e.to_string())?;
+    let graph = Graph::load_from_directory(graph_dir, schema.clone()).map_err(|e| e.to_string())?;
+
+    if index_path.exists() {
+        let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
+        index
+            .incremental_update(&graph)
+            .map_err(|e| e.to_string())?;
+    } else {
+        if let Some(parent) = index_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let index = Index::create(&index_path).map_err(|e| format!("Index: {e}"))?;
+        index.rebuild(&graph).map_err(|e| e.to_string())?;
+    }
+
+    layout
+        .write_active_snapshot_key()
+        .map_err(|e| e.to_string())?;
+    layout
+        .publish_active_snapshot()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn index_refresh_warning(graph_dir: &Path, gf_dir: &Path, schema: &Schema) -> Option<String> {
+    refresh_index_for_current_snapshot(graph_dir, gf_dir, schema)
+        .err()
+        .map(|e| format!("Index update failed (run 'tempyr index rebuild'): {e}"))
+}
+
 fn sessions_dir(gf_dir: &Path) -> PathBuf {
     gf_dir.join("sessions")
 }
@@ -618,7 +657,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<GraphAddNodeParams>,
     ) -> Result<String, String> {
-        let (graph_dir, _, _) = find_project()?;
+        let (graph_dir, gf_dir, schema) = find_project()?;
         let (generated_id, path) = ops::create_node_file_auto_id(
             &graph_dir,
             &p.slug,
@@ -630,10 +669,11 @@ impl TempyrServer {
         )
         .map_err(|e| e.to_string())?;
 
-        Ok(format!(
-            "Created node '{generated_id}' at {}",
-            path.display()
-        ))
+        let mut response = format!("Created node '{generated_id}' at {}", path.display());
+        if let Some(warning) = index_refresh_warning(&graph_dir, &gf_dir, &schema) {
+            response.push_str(&format!("\nWarning: {}", warning));
+        }
+        Ok(response)
     }
 
     #[tool(
@@ -644,7 +684,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<GraphUpdateNodeParams>,
     ) -> Result<String, String> {
-        let (graph_dir, _, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = find_project()?;
         let resolved = ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
         let path = ops::update_node(
             &graph_dir,
@@ -671,11 +711,15 @@ impl TempyrServer {
             changed.push("tags");
         }
 
-        Ok(format!(
+        let mut response = format!(
             "Updated node '{resolved}' ({}) at {}",
             changed.join(", "),
             path.display()
-        ))
+        );
+        if let Some(warning) = index_refresh_warning(&graph_dir, &gf_dir, &schema) {
+            response.push_str(&format!("\nWarning: {}", warning));
+        }
+        Ok(response)
     }
 
     #[tool(
@@ -686,7 +730,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<GraphAddEdgeParams>,
     ) -> Result<String, String> {
-        let (graph_dir, _, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = find_project()?;
         let resolved_source =
             ops::resolve_node_id(&graph_dir, &p.source).map_err(|e| e.to_string())?;
         let resolved_target =
@@ -701,10 +745,14 @@ impl TempyrServer {
         .map_err(|e| e.to_string())?;
 
         let reverse = schema.reverse_edge_type(&p.edge_type).unwrap_or("?");
-        Ok(format!(
+        let mut response = format!(
             "Added edge: {resolved_source} --{}--> {resolved_target} (reverse: {reverse})",
             p.edge_type
-        ))
+        );
+        if let Some(warning) = index_refresh_warning(&graph_dir, &gf_dir, &schema) {
+            response.push_str(&format!("\nWarning: {}", warning));
+        }
+        Ok(response)
     }
 
     #[tool(
@@ -893,46 +941,15 @@ impl TempyrServer {
 
         let mut all_warnings = result.warnings.clone();
         let validation_warnings = {
-            let graph =
-                Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
+            let graph = Graph::load_from_directory(&graph_dir, schema.clone())
+                .map_err(|e| e.to_string())?;
             let issues = validate_graph(&graph);
             issues.iter().map(|i| i.to_string()).collect::<Vec<_>>()
         };
         all_warnings.extend(validation_warnings);
 
-        if let Ok(layout) = index_layout(&graph_dir, &gf_dir)
-            && let Err(e) = (|| -> std::result::Result<(), String> {
-                let index_path = layout
-                    .ensure_active_index_seeded()
-                    .map_err(|e| e.to_string())?;
-                let schema2 =
-                    Schema::load(&gf_dir.join("schema.toml")).map_err(|e| e.to_string())?;
-                let graph =
-                    Graph::load_from_directory(&graph_dir, schema2).map_err(|e| e.to_string())?;
-                if index_path.exists() {
-                    let index = Index::open(&index_path).map_err(|e| e.to_string())?;
-                    index
-                        .incremental_update(&graph)
-                        .map_err(|e| e.to_string())?;
-                } else {
-                    if let Some(parent) = index_path.parent() {
-                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                    }
-                    let index = Index::create(&index_path).map_err(|e| e.to_string())?;
-                    index.rebuild(&graph).map_err(|e| e.to_string())?;
-                }
-                layout
-                    .write_active_snapshot_key()
-                    .map_err(|e| e.to_string())?;
-                layout
-                    .publish_active_snapshot()
-                    .map_err(|e| e.to_string())?;
-                Ok(())
-            })()
-        {
-            all_warnings.push(format!(
-                "Index update failed (run 'tempyr index rebuild'): {e}"
-            ));
+        if let Some(warning) = index_refresh_warning(&graph_dir, &gf_dir, &schema) {
+            all_warnings.push(warning);
         }
 
         serde_json::to_string_pretty(&json!({
@@ -1255,13 +1272,19 @@ impl TempyrServer {
                 .await
                 .map_err(|e| e.to_string())?;
                 sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
+                let mut warnings = result.warnings.clone();
+                if result.changed_graph()
+                    && let Some(warning) = index_refresh_warning(&graph_dir, &gf_dir, &schema)
+                {
+                    warnings.push(warning);
+                }
 
                 serde_json::to_string_pretty(&json!({
                     "created": result.created,
                     "updated": result.updated,
                     "status_changed": result.status_changed.len(),
                     "conflicts": result.conflicts.len(),
-                    "warnings": result.warnings,
+                    "warnings": warnings,
                     "errors": result.errors,
                 }))
                 .map_err(|e| e.to_string())
@@ -1308,6 +1331,12 @@ impl TempyrServer {
                 .await
                 .map_err(|e| e.to_string())?;
                 sync_state.save(&gf_dir).map_err(|e| e.to_string())?;
+                let mut warnings = Vec::new();
+                if result.changed_graph()
+                    && let Some(warning) = index_refresh_warning(&graph_dir, &gf_dir, &schema)
+                {
+                    warnings.push(warning);
+                }
 
                 serde_json::to_string_pretty(&json!({
                     "push": {
@@ -1320,7 +1349,8 @@ impl TempyrServer {
                         "updated": result.pull.updated.len(),
                         "conflicts": result.pull.conflicts.len(),
                         "errors": result.pull.errors.len(),
-                    }
+                    },
+                    "warnings": warnings,
                 }))
                 .map_err(|e| e.to_string())
             })

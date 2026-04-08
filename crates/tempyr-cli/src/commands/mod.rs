@@ -1,3 +1,5 @@
+use crate::config::ProjectContext;
+
 pub mod add;
 pub mod ask;
 pub mod context;
@@ -21,3 +23,9 @@ pub mod traverse;
 pub mod update;
 pub mod validate;
 pub mod vsearch;
+
+pub(crate) fn warn_if_index_refresh_fails(ctx: &ProjectContext) {
+    if let Err(err) = ctx.refresh_index_for_current_snapshot() {
+        eprintln!("Warning: index refresh failed (run `tempyr index rebuild`): {err}");
+    }
+}

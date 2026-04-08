@@ -24,6 +24,12 @@ pub struct PullResult {
     pub errors: Vec<(String, String)>,
 }
 
+impl PullResult {
+    pub fn changed_graph(&self) -> bool {
+        !self.created.is_empty() || !self.updated.is_empty()
+    }
+}
+
 #[derive(Debug)]
 pub struct StatusChange {
     pub node_id: String,

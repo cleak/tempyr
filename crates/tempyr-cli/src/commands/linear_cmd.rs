@@ -243,6 +243,9 @@ pub fn run_pull(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
         )
         .await?;
         state.save(&ctx.tempyr_dir)?;
+        if result.changed_graph() {
+            super::warn_if_index_refresh_fails(ctx);
+        }
 
         if json_output {
             println!(
@@ -315,6 +318,9 @@ pub fn run_sync(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
         )
         .await?;
         state.save(&ctx.tempyr_dir)?;
+        if result.changed_graph() {
+            super::warn_if_index_refresh_fails(ctx);
+        }
 
         if json_output {
             println!(
