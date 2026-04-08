@@ -349,6 +349,56 @@ function Invoke-CargoInstall {
     }
 }
 
+function Invoke-CargoInstallWithLockRecovery {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CratePath,
+        [Parameter(Mandatory)]
+        [string]$InstallRootPath,
+        [Parameter(Mandatory)]
+        [string]$TargetBinaryPath
+    )
+
+    $maxAttempts = 4
+    $retryDelaySeconds = 2
+    $attempt = 1
+    $stoppedMatchingProcesses = $false
+
+    while ($true) {
+        $installResult = Invoke-CargoInstall -CratePath $CratePath -InstallRootPath $InstallRootPath
+        if ($installResult.ExitCode -eq 0) {
+            return $installResult
+        }
+
+        $lockRelatedFailure = Output-IndicatesLockError -Output $installResult.Output
+        if (-not $lockRelatedFailure) {
+            return $installResult
+        }
+
+        $targetBinaryLocked = Test-FileLocked -Path $TargetBinaryPath
+        if (-not $stoppedMatchingProcesses) {
+            if ($targetBinaryLocked -and (Stop-TargetProcesses -BinaryPath $TargetBinaryPath)) {
+                $stoppedMatchingProcesses = $true
+                Write-Host "Retrying cargo install after stopping matching Tempyr processes..."
+                $attempt += 1
+                continue
+            }
+        }
+
+        if ($attempt -ge $maxAttempts) {
+            return $installResult
+        }
+
+        if ($targetBinaryLocked) {
+            Write-Host "Target binary is still locked by another process. Waiting $retryDelaySeconds seconds before retry $($attempt + 1) of $maxAttempts..."
+        } else {
+            Write-Host "Cargo reported a lock-related install failure. Waiting $retryDelaySeconds seconds before retry $($attempt + 1) of $maxAttempts..."
+        }
+        Start-Sleep -Seconds $retryDelaySeconds
+        $attempt += 1
+    }
+}
+
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "cargo is required but was not found in PATH."
 }
@@ -362,17 +412,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $cratePath "Cargo.toml"))) {
     throw "Could not find crates/tempyr-cli/Cargo.toml relative to $scriptRoot."
 }
 
-$installResult = Invoke-CargoInstall -CratePath $cratePath -InstallRootPath $InstallRoot
-if ($installResult.ExitCode -ne 0) {
-    if (
-        (Test-FileLocked -Path $targetBinary) -and
-        (Output-IndicatesLockError -Output $installResult.Output) -and
-        (Stop-TargetProcesses -BinaryPath $targetBinary)
-    ) {
-        Write-Host "Retrying cargo install after stopping matching Tempyr processes..."
-        $installResult = Invoke-CargoInstall -CratePath $cratePath -InstallRootPath $InstallRoot
-    }
-}
+$installResult = Invoke-CargoInstallWithLockRecovery `
+    -CratePath $cratePath `
+    -InstallRootPath $InstallRoot `
+    -TargetBinaryPath $targetBinary
 
 if ($installResult.ExitCode -ne 0) {
     throw (Get-CargoInstallFailureMessage -InstallResult $installResult)
