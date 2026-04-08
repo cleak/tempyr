@@ -286,16 +286,38 @@ fn refresh_index_for_current_snapshot(
     gf_dir: &Path,
     schema: &Schema,
 ) -> Result<(), String> {
-    let layout = index_layout(graph_dir, gf_dir)?;
     let graph = Graph::load_from_directory(graph_dir, schema.clone()).map_err(|e| e.to_string())?;
-    refresh_index_for_graph(&layout, &graph).map_err(|e| e.to_string())?;
+    refresh_index_for_loaded_graph(graph_dir, gf_dir, &graph)
+}
+
+fn refresh_index_for_loaded_graph(
+    graph_dir: &Path,
+    gf_dir: &Path,
+    graph: &Graph,
+) -> Result<(), String> {
+    let layout = index_layout(graph_dir, gf_dir)?;
+    refresh_index_for_graph(&layout, graph).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn format_index_refresh_warning(err: String) -> String {
+    format!("Index update failed (run 'tempyr index rebuild'): {err}")
+}
+
+fn index_refresh_warning_for_loaded_graph(
+    graph_dir: &Path,
+    gf_dir: &Path,
+    graph: &Graph,
+) -> Option<String> {
+    refresh_index_for_loaded_graph(graph_dir, gf_dir, graph)
+        .err()
+        .map(format_index_refresh_warning)
 }
 
 fn index_refresh_warning(graph_dir: &Path, gf_dir: &Path, schema: &Schema) -> Option<String> {
     refresh_index_for_current_snapshot(graph_dir, gf_dir, schema)
         .err()
-        .map(|e| format!("Index update failed (run 'tempyr index rebuild'): {e}"))
+        .map(format_index_refresh_warning)
 }
 
 // Keep graph queries aligned with the just-written snapshot even if saving
@@ -951,15 +973,15 @@ impl TempyrServer {
             .map_err(|e| e.to_string())?;
 
         let mut all_warnings = result.warnings.clone();
-        let validation_warnings = {
-            let graph = Graph::load_from_directory(&graph_dir, schema.clone())
-                .map_err(|e| e.to_string())?;
-            let issues = validate_graph(&graph);
-            issues.iter().map(|i| i.to_string()).collect::<Vec<_>>()
-        };
+        let graph =
+            Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
+        let validation_warnings = validate_graph(&graph)
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>();
         all_warnings.extend(validation_warnings);
 
-        if let Some(warning) = index_refresh_warning(&graph_dir, &gf_dir, &schema) {
+        if let Some(warning) = index_refresh_warning_for_loaded_graph(&graph_dir, &gf_dir, &graph) {
             all_warnings.push(warning);
         }
 
