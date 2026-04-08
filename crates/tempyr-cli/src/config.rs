@@ -1,5 +1,4 @@
 use anyhow::Context;
-use std::io;
 use std::path::{Path, PathBuf};
 
 use tempyr_core::graph::Graph;
@@ -9,7 +8,7 @@ use tempyr_core::schema::Schema;
 use tempyr_index::embeddings::{
     EmbeddingConfig, EmbeddingConfigPartial, ResolvedEmbeddingConfig, resolve_embedding_config,
 };
-use tempyr_index::indexer::Index;
+use tempyr_index::refresh::refresh_index_for_graph;
 
 /// Project context: resolved paths for a tempyr project.
 pub struct ProjectContext {
@@ -136,25 +135,7 @@ impl ProjectContext {
     pub fn refresh_index_for_current_snapshot(&self) -> anyhow::Result<()> {
         let layout = self.index_layout()?;
         let graph = Graph::load_from_directory(&self.graph_dir, self.schema.clone())?;
-        layout.update_active_index_atomically(|index_path| {
-            if index_path.exists() {
-                let index =
-                    Index::open(index_path).map_err(|e| io::Error::other(format!("Index: {e}")))?;
-                index
-                    .incremental_update(&graph)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
-            } else {
-                if let Some(parent) = index_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let index = Index::create(index_path)
-                    .map_err(|e| io::Error::other(format!("Index: {e}")))?;
-                index
-                    .rebuild(&graph)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
-            }
-            Ok(())
-        })?;
+        refresh_index_for_graph(&layout, &graph)?;
         Ok(())
     }
 

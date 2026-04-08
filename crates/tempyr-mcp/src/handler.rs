@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::path::{Path, PathBuf};
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -20,6 +19,7 @@ use tempyr_core::validate::validate_graph;
 use tempyr_index::fts::MetadataFilter;
 use tempyr_index::hybrid::{RetrievalConfig, hybrid_retrieve};
 use tempyr_index::indexer::Index;
+use tempyr_index::refresh::refresh_index_for_graph;
 use tempyr_interview::gaps::next_questions;
 use tempyr_interview::proposer;
 use tempyr_interview::session::{
@@ -288,27 +288,7 @@ fn refresh_index_for_current_snapshot(
 ) -> Result<(), String> {
     let layout = index_layout(graph_dir, gf_dir)?;
     let graph = Graph::load_from_directory(graph_dir, schema.clone()).map_err(|e| e.to_string())?;
-    layout
-        .update_active_index_atomically(|index_path| {
-            if index_path.exists() {
-                let index =
-                    Index::open(index_path).map_err(|e| io::Error::other(format!("Index: {e}")))?;
-                index
-                    .incremental_update(&graph)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
-            } else {
-                if let Some(parent) = index_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                let index = Index::create(index_path)
-                    .map_err(|e| io::Error::other(format!("Index: {e}")))?;
-                index
-                    .rebuild(&graph)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
-            }
-            Ok(())
-        })
-        .map_err(|e| e.to_string())?;
+    refresh_index_for_graph(&layout, &graph).map_err(|e| e.to_string())?;
     Ok(())
 }
 
