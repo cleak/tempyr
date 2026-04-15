@@ -229,6 +229,34 @@ handle_failed_process_stop() {
   echo "The install target appears busy, and matching Tempyr processes could not be stopped at $target." >&2
 }
 
+retry_lock_related_install() {
+  local target="$1"
+  local -a pids
+  local status
+
+  if [[ ! -e "$target" ]]; then
+    echo "Retrying cargo install after the lock cleared on its own..." >&2
+    run_cargo_install
+    return $?
+  fi
+
+  mapfile -t pids < <(find_matching_pids "$target")
+  if ((${#pids[@]} == 0)); then
+    echo "Retrying cargo install after the lock cleared on its own..." >&2
+    run_cargo_install
+    return $?
+  fi
+
+  stop_matching_processes "$target" "${pids[@]}" || {
+    status=$?
+    handle_failed_process_stop "$target" "$status"
+    return "$status"
+  }
+
+  echo "Retrying cargo install after stopping matching Tempyr processes..." >&2
+  run_cargo_install
+}
+
 upsert_path_block() {
   local rc_file="$1"
   local tmp_file
@@ -273,14 +301,8 @@ ensure_path_persistence() {
 preflight_locked_target
 
 run_cargo_install || {
-  if [[ -e "$TARGET_BIN" ]] && output_indicates_lock_error "$INSTALL_OUTPUT"; then
-    if kill_matching_processes "$TARGET_BIN"; then
-      echo "Retrying cargo install after stopping matching Tempyr processes..." >&2
-      run_cargo_install
-    else
-      handle_failed_process_stop "$TARGET_BIN" "$?"
-      exit 1
-    fi
+  if output_indicates_lock_error "$INSTALL_OUTPUT"; then
+    retry_lock_related_install "$TARGET_BIN"
   else
     exit 1
   fi
