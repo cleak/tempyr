@@ -49,8 +49,7 @@ pub fn check_all(root: &Path) -> anyhow::Result<Vec<HookReport>> {
         return Ok(Vec::new());
     };
 
-    let current_exe = std::env::current_exe().context("Failed to resolve tempyr executable")?;
-    let managed_block = render_managed_block(&current_exe);
+    let managed_block = render_managed_block();
 
     let mut reports = Vec::new();
     for def in GIT_HOOKS {
@@ -73,8 +72,7 @@ pub fn install_all(root: &Path) -> anyhow::Result<Vec<HookInstallResult>> {
     fs::create_dir_all(&hooks_dir)
         .with_context(|| format!("Failed to create hooks dir {}", hooks_dir.display()))?;
 
-    let current_exe = std::env::current_exe().context("Failed to resolve tempyr executable")?;
-    let managed_block = render_managed_block(&current_exe);
+    let managed_block = render_managed_block();
 
     let mut results = Vec::new();
     for def in GIT_HOOKS {
@@ -168,20 +166,39 @@ fn managed_block_range(content: &str) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-fn render_managed_block(current_exe: &Path) -> String {
-    let exe_path = current_exe.to_string_lossy().replace('\\', "/");
-    let exe = shell_single_quote(&exe_path);
+fn render_managed_block() -> String {
     format!(
-        "{MANAGED_START}\n# tempyr version: {TEMPYR_VERSION}\nTEMPYR_BIN='{exe}'\n\
+        "{MANAGED_START}\n# tempyr version: {TEMPYR_VERSION}\nTEMPYR_BIN=\"${{TEMPYR_BIN:-}}\"\n\
+run_tempyr() {{\n\
+  if [ -n \"$TEMPYR_BIN\" ]; then\n\
+    if [ -x \"$TEMPYR_BIN\" ]; then\n\
+      \"$TEMPYR_BIN\" \"$@\"\n\
+      return $?\n\
+    fi\n\
+    if command -v \"$TEMPYR_BIN\" >/dev/null 2>&1; then\n\
+      \"$TEMPYR_BIN\" \"$@\"\n\
+      return $?\n\
+    fi\n\
+  fi\n\
+\n\
+  for candidate in ./target/debug/tempyr ./target/debug/tempyr.exe ./target/release/tempyr ./target/release/tempyr.exe; do\n\
+    if [ -x \"$candidate\" ]; then\n\
+      \"$candidate\" \"$@\"\n\
+      return $?\n\
+    fi\n\
+  done\n\
+\n\
+  if command -v tempyr >/dev/null 2>&1; then\n\
+    tempyr \"$@\"\n\
+    return $?\n\
+  fi\n\
+\n\
+  return 127\n\
+}}\n\
 if [ ! -d .tempyr ] && [ ! -f .tempyr-redirect ]; then\n  exit 0\nfi\n\
-if [ -x \"$TEMPYR_BIN\" ]; then\n  \"$TEMPYR_BIN\" index update --json --skip-embeddings >/dev/null 2>&1 || true\n\
-elif command -v tempyr >/dev/null 2>&1; then\n  tempyr index update --json --skip-embeddings >/dev/null 2>&1 || true\n\
-fi\n{MANAGED_END}\n"
+run_tempyr index update --json --skip-embeddings >/dev/null 2>&1 || true\n\
+{MANAGED_END}\n"
     )
-}
-
-fn shell_single_quote(raw: &str) -> String {
-    raw.replace('\'', "'\"'\"'")
 }
 
 #[cfg(unix)]
@@ -224,7 +241,7 @@ mod tests {
 
     #[test]
     fn merge_hook_content_creates_new_hook() {
-        let managed = render_managed_block(Path::new("/tmp/tempyr"));
+        let managed = render_managed_block();
 
         let (content, outcome) = merge_hook_content(None, &managed);
 
@@ -235,7 +252,7 @@ mod tests {
 
     #[test]
     fn merge_hook_content_appends_to_existing_user_hook() {
-        let managed = render_managed_block(Path::new("/tmp/tempyr"));
+        let managed = render_managed_block();
         let existing = "#!/bin/sh\necho user-hook\n";
 
         let (content, outcome) = merge_hook_content(Some(existing), &managed);
@@ -249,7 +266,7 @@ mod tests {
     fn merge_hook_content_replaces_stale_managed_block() {
         let stale = format!("{MANAGED_START}\nold\n{MANAGED_END}\n");
         let existing = format!("#!/bin/sh\n{stale}echo after\n");
-        let managed = render_managed_block(Path::new("/tmp/tempyr"));
+        let managed = render_managed_block();
 
         let (content, outcome) = merge_hook_content(Some(&existing), &managed);
 
@@ -265,7 +282,7 @@ mod tests {
         let path = tmp.path().join("post-checkout");
         fs::write(&path, "#!/bin/sh\necho user-hook\n").unwrap();
 
-        let managed = render_managed_block(Path::new("/tmp/tempyr"));
+        let managed = render_managed_block();
 
         assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);
     }
@@ -275,7 +292,7 @@ mod tests {
     fn hook_status_treats_non_executable_managed_hook_as_stale() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("post-checkout");
-        let managed = render_managed_block(Path::new("/tmp/tempyr"));
+        let managed = render_managed_block();
         fs::write(&path, &managed).unwrap();
 
         let mut perms = fs::metadata(&path).unwrap().permissions();
@@ -283,5 +300,14 @@ mod tests {
         fs::set_permissions(&path, perms).unwrap();
 
         assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);
+    }
+
+    #[test]
+    fn managed_block_is_worktree_agnostic() {
+        let managed = render_managed_block();
+
+        assert!(managed.contains("TEMPYR_BIN=\"${TEMPYR_BIN:-}\""));
+        assert!(managed.contains("./target/debug/tempyr"));
+        assert!(!managed.contains("/tmp/tempyr"));
     }
 }
