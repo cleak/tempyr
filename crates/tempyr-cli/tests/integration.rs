@@ -1,8 +1,9 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use rmcp::model::ProtocolVersion;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command as ProcessCommand, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -33,9 +34,10 @@ fn write_node(dir: &TempDir, subdir: &str, id: &str, content: &str) {
     fs::write(path, content).unwrap();
 }
 
-fn spawn_mcp_child() -> Child {
+fn spawn_mcp_child(cwd: &Path) -> Child {
     ProcessCommand::new(tempyr_bin())
         .arg("--mcp")
+        .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -85,7 +87,7 @@ fn initialize_mcp_session(child: &mut Child) {
             "id": 1,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2025-06-18",
+                "protocolVersion": ProtocolVersion::V_2025_06_18,
                 "capabilities": {},
                 "clientInfo": {
                     "name": "integration-test",
@@ -245,11 +247,13 @@ fn run_parent_death_helper_if_requested() {
     let info_path = PathBuf::from(std::env::var_os("TEMPYR_TEST_PARENT_DEATH_INFO").unwrap());
     let stderr_path = PathBuf::from(std::env::var_os("TEMPYR_TEST_PARENT_DEATH_STDERR").unwrap());
     let tempyr_bin = PathBuf::from(std::env::var_os("TEMPYR_TEST_TEMPYR_BIN").unwrap());
+    let cwd = PathBuf::from(std::env::var_os("TEMPYR_TEST_PARENT_DEATH_CWD").unwrap());
     let stderr_file = fs::File::create(&stderr_path).unwrap();
 
     // This helper must exit while tempyr is still alive so the MCP process observes parent death.
     let child = ProcessCommand::new(tempyr_bin)
         .arg("--mcp")
+        .current_dir(&cwd)
         .stdin(Stdio::inherit())
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file))
@@ -339,9 +343,11 @@ fn test_mcp_flag_rejects_extra_args() {
 
 #[test]
 fn test_mcp_mode_starts_on_stdio() {
+    let tmp = TempDir::new().unwrap();
     let tempyr_bin = assert_cmd::cargo::cargo_bin("tempyr");
     let mut child = ProcessCommand::new(tempyr_bin)
         .arg("--mcp")
+        .current_dir(tmp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -361,7 +367,8 @@ fn test_mcp_mode_starts_on_stdio() {
 
 #[test]
 fn test_mcp_exits_cleanly_on_stdin_eof_before_initialize() {
-    let mut child = spawn_mcp_child();
+    let tmp = TempDir::new().unwrap();
+    let mut child = spawn_mcp_child(tmp.path());
 
     drop(child.stdin.take());
 
@@ -377,7 +384,8 @@ fn test_mcp_exits_cleanly_on_stdin_eof_before_initialize() {
 
 #[test]
 fn test_mcp_exits_cleanly_on_stdin_eof_after_initialize() {
-    let mut child = spawn_mcp_child();
+    let tmp = TempDir::new().unwrap();
+    let mut child = spawn_mcp_child(tmp.path());
     initialize_mcp_session(&mut child);
 
     drop(child.stdin.take());
@@ -416,6 +424,7 @@ fn test_mcp_exits_on_parent_death() {
         .env("TEMPYR_TEST_PARENT_DEATH_INFO", &helper_info_path)
         .env("TEMPYR_TEST_PARENT_DEATH_STDERR", &helper_stderr_path)
         .env("TEMPYR_TEST_TEMPYR_BIN", &tempyr_bin)
+        .env("TEMPYR_TEST_PARENT_DEATH_CWD", tmp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

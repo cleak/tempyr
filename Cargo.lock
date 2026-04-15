@@ -3110,6 +3110,7 @@ dependencies = [
  "libc",
  "predicates",
  "ratatui",
+ "rmcp",
  "serde",
  "serde_json",
  "tempfile",

@@ -230,7 +230,9 @@ unsafe fn find_process_entry(
 ) -> Result<Option<windows_sys::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W>> {
     use std::mem::size_of;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_NO_MORE_FILES, GetLastError, INVALID_HANDLE_VALUE,
+    };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
@@ -246,6 +248,7 @@ unsafe fn find_process_entry(
         ..Default::default()
     };
     let mut found = None;
+    let mut enumeration_error = None;
 
     if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {
         loop {
@@ -254,13 +257,38 @@ unsafe fn find_process_entry(
                 break;
             }
             if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
+                let err = unsafe { GetLastError() };
+                if err != ERROR_NO_MORE_FILES {
+                    enumeration_error = Some(anyhow!(
+                        "Process32NextW failed while enumerating process snapshot: {}",
+                        std::io::Error::from_raw_os_error(err as i32)
+                    ));
+                }
                 break;
             }
         }
+    } else {
+        let err = unsafe { GetLastError() };
+        if err != ERROR_NO_MORE_FILES {
+            enumeration_error = Some(anyhow!(
+                "Process32FirstW failed while enumerating process snapshot: {}",
+                std::io::Error::from_raw_os_error(err as i32)
+            ));
+        }
     }
 
-    if unsafe { CloseHandle(snapshot) } == 0 {
-        bail!("{}: {}", close_error(), std::io::Error::last_os_error());
+    let close_handle_error = if unsafe { CloseHandle(snapshot) } == 0 {
+        Some(std::io::Error::last_os_error())
+    } else {
+        None
+    };
+
+    if let Some(err) = enumeration_error {
+        return Err(err);
+    }
+
+    if let Some(err) = close_handle_error {
+        bail!("{}: {}", close_error(), err);
     }
 
     Ok(found)
