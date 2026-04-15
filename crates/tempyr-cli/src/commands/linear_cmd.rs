@@ -126,7 +126,7 @@ pub fn run_push(
     let config = LinearConfig::load(&ctx.tempyr_dir)?;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
     let index = ctx
-        .current_index_path()
+        .queryable_index_path()
         .ok()
         .and_then(|path| Index::open(&path).ok());
     let mut state = SyncState::load(&ctx.tempyr_dir)?;
@@ -303,7 +303,7 @@ pub fn run_sync(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
     let config = LinearConfig::load(&ctx.tempyr_dir)?;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
     let index = ctx
-        .current_index_path()
+        .queryable_index_path()
         .ok()
         .and_then(|path| Index::open(&path).ok());
     let mut state = SyncState::load(&ctx.tempyr_dir)?;

@@ -6,6 +6,7 @@ pub mod context;
 pub mod dedupe;
 pub mod dispatch;
 pub mod edge;
+pub mod git_hooks;
 pub mod import;
 pub mod index_cmd;
 pub mod init;

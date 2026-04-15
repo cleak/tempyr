@@ -10,7 +10,7 @@ pub fn run(
     budget: usize,
     json: bool,
 ) -> anyhow::Result<()> {
-    let index_path = ctx.current_index_path()?;
+    let index_path = ctx.queryable_index_path()?;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
     let index = Index::open(&index_path)?;
     let config = RetrievalConfig {

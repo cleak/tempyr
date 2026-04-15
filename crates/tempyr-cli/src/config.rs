@@ -100,13 +100,19 @@ impl ProjectContext {
         Ok(resolve_embedding_config(&config)?)
     }
 
-    /// Resolve the best available index path for the current graph snapshot.
-    pub fn current_index_path(&self) -> anyhow::Result<PathBuf> {
-        self.index_layout()?.current_index_path()?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Index not found for current graph snapshot. Run `tempyr index rebuild` first."
-            )
-        })
+    /// Resolve the current snapshot index, building the structural index on demand
+    /// when a brand-new worktree has no local or shared snapshot yet.
+    pub fn queryable_index_path(&self) -> anyhow::Result<PathBuf> {
+        let layout = self.index_layout()?;
+        if let Some(path) = layout.current_index_path()? {
+            return Ok(path);
+        }
+
+        let graph = Graph::load_from_directory(&self.graph_dir, self.schema.clone())?;
+        refresh_index_for_graph(&layout, &graph)?;
+        layout
+            .current_index_path()?
+            .ok_or_else(|| anyhow::anyhow!("Index refresh did not produce a queryable snapshot."))
     }
 
     /// Ensure the mutable per-worktree index exists, seeding it from a shared snapshot

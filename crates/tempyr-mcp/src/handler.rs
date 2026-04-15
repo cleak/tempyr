@@ -281,6 +281,20 @@ fn open_optional_index(graph_dir: &Path, gf_dir: &Path) -> Result<Option<Index>,
     }
 }
 
+fn ensure_index_path(graph_dir: &Path, gf_dir: &Path, schema: &Schema) -> Result<PathBuf, String> {
+    let layout = index_layout(graph_dir, gf_dir)?;
+    if let Some(path) = layout.current_index_path().map_err(|e| e.to_string())? {
+        return Ok(path);
+    }
+
+    let graph = Graph::load_from_directory(graph_dir, schema.clone()).map_err(|e| e.to_string())?;
+    refresh_index_for_graph(&layout, &graph).map_err(|e| e.to_string())?;
+    layout
+        .current_index_path()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Index refresh did not produce a queryable snapshot.".to_string())
+}
+
 fn refresh_index_for_current_snapshot(
     graph_dir: &Path,
     gf_dir: &Path,
@@ -485,14 +499,8 @@ impl TempyrServer {
     )]
     fn graph_search(&self, Parameters(p): Parameters<GraphSearchParams>) -> Result<String, String> {
         let max_results = p.max_results.unwrap_or(10) as usize;
-        let (graph_dir, gf_dir, _) = find_project()?;
-        let index_path = index_layout(&graph_dir, &gf_dir)?
-            .current_index_path()
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| {
-                "Index not found for current graph snapshot. Run `tempyr index rebuild` first."
-                    .to_string()
-            })?;
+        let (graph_dir, gf_dir, schema) = find_project()?;
+        let index_path = ensure_index_path(&graph_dir, &gf_dir, &schema)?;
         let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
 
         let filter = MetadataFilter {
@@ -526,14 +534,8 @@ impl TempyrServer {
     )]
     fn graph_list(&self, Parameters(p): Parameters<GraphListParams>) -> Result<String, String> {
         let max_results = p.max_results.unwrap_or(50) as usize;
-        let (graph_dir, gf_dir, _) = find_project()?;
-        let index_path = index_layout(&graph_dir, &gf_dir)?
-            .current_index_path()
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| {
-                "Index not found for current graph snapshot. Run `tempyr index rebuild` first."
-                    .to_string()
-            })?;
+        let (graph_dir, gf_dir, schema) = find_project()?;
+        let index_path = ensure_index_path(&graph_dir, &gf_dir, &schema)?;
         let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
 
         let filter = MetadataFilter {
@@ -576,14 +578,9 @@ impl TempyrServer {
             .as_deref()
             .map(|r| ops::resolve_node_id(&graph_dir, r).map_err(|e| e.to_string()))
             .transpose()?;
-        let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
-        let index_path = index_layout(&graph_dir, &gf_dir)?
-            .current_index_path()
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| {
-                "Index not found for current graph snapshot. Run `tempyr index rebuild` first."
-                    .to_string()
-            })?;
+        let graph =
+            Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
+        let index_path = ensure_index_path(&graph_dir, &gf_dir, &schema)?;
         let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
 
         let config = RetrievalConfig {

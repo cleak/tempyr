@@ -5,7 +5,7 @@ use tempyr_core::graph::Graph;
 use tempyr_index::embeddings::{self, EmbeddingStore};
 use tempyr_index::indexer::Index;
 
-pub fn run_rebuild(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
+pub fn run_rebuild(ctx: &ProjectContext, json: bool, skip_embeddings: bool) -> anyhow::Result<()> {
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
     let (snapshot_key, index_path) = ctx.ensure_active_index_seeded()?;
 
@@ -21,7 +21,7 @@ pub fn run_rebuild(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
     let stats = index.rebuild(&graph)?;
 
     // Try to generate embeddings
-    let embed_result = try_embed(&graph, ctx);
+    let embed_result = maybe_embed(&graph, ctx, skip_embeddings);
     ctx.write_active_snapshot_key(&snapshot_key)?;
     ctx.publish_active_snapshot(&snapshot_key)?;
 
@@ -48,28 +48,25 @@ pub fn run_rebuild(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
         for (node_type, count) in &stats.nodes_by_type {
             println!("  {node_type}: {count}");
         }
-        match embed_result {
-            Ok(es) => println!("{es}"),
-            Err(e) => println!("Embeddings skipped: {e}"),
-        }
+        render_embedding_message(&embed_result);
     }
 
     Ok(())
 }
 
-pub fn run_update(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
+pub fn run_update(ctx: &ProjectContext, json: bool, skip_embeddings: bool) -> anyhow::Result<()> {
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
     let (snapshot_key, index_path) = ctx.ensure_active_index_seeded()?;
 
     if !index_path.exists() {
-        return run_rebuild(ctx, json);
+        return run_rebuild(ctx, json, skip_embeddings);
     }
 
     let index = Index::open(&index_path)?;
     let stats = index.incremental_update(&graph)?;
 
     // Try to generate embeddings for new/changed nodes
-    let embed_result = try_embed(&graph, ctx);
+    let embed_result = maybe_embed(&graph, ctx, skip_embeddings);
     ctx.write_active_snapshot_key(&snapshot_key)?;
     ctx.publish_active_snapshot(&snapshot_key)?;
 
@@ -87,17 +84,14 @@ pub fn run_update(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
             "Index updated: {} nodes, {} edges",
             stats.node_count, stats.edge_count
         );
-        match embed_result {
-            Ok(es) => println!("{es}"),
-            Err(e) => println!("Embeddings skipped: {e}"),
-        }
+        render_embedding_message(&embed_result);
     }
 
     Ok(())
 }
 
 pub fn run_stats(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
-    let index_path = ctx.current_index_path()?;
+    let index_path = ctx.queryable_index_path()?;
 
     let index = Index::open(&index_path)?;
     let stats = index.stats()?;
@@ -140,6 +134,24 @@ fn try_embed(graph: &Graph, ctx: &ProjectContext) -> anyhow::Result<embeddings::
     let rt = tokio::runtime::Runtime::new()?;
     let stats = rt.block_on(embeddings::embed_graph(&store, graph, provider.as_ref()))?;
     Ok(stats)
+}
+
+fn maybe_embed(
+    graph: &Graph,
+    ctx: &ProjectContext,
+    skip_embeddings: bool,
+) -> anyhow::Result<embeddings::EmbedStats> {
+    if skip_embeddings {
+        anyhow::bail!("disabled via --skip-embeddings");
+    }
+    try_embed(graph, ctx)
+}
+
+fn render_embedding_message(embed_result: &anyhow::Result<embeddings::EmbedStats>) {
+    match embed_result {
+        Ok(es) => println!("{es}"),
+        Err(e) => println!("Embeddings skipped: {e}"),
+    }
 }
 
 fn shared_embedding_counts(
