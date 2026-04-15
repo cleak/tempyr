@@ -120,9 +120,19 @@ find_matching_pids() {
   done
 }
 
+pid_matches_resolved_target() {
+  local resolved_target="$1"
+  local pid="$2"
+  local resolved
+
+  resolved="$(readlink -f -- "/proc/$pid/exe" 2>/dev/null || true)"
+  [[ "$resolved" == "$resolved_target" ]]
+}
+
 stop_matching_processes() {
   local target="$1"
   shift
+  local resolved_target
   local -a pids remaining
   local pid
 
@@ -131,13 +141,34 @@ stop_matching_processes() {
     return 1
   fi
 
+  if [[ ! -e "$target" ]]; then
+    return 0
+  fi
+
+  resolved_target="$(readlink -f -- "$target")"
+
+  remaining=()
+  for pid in "${pids[@]}"; do
+    if pid_matches_resolved_target "$resolved_target" "$pid"; then
+      remaining+=("$pid")
+    fi
+  done
+  pids=("${remaining[@]}")
+  if ((${#pids[@]} == 0)); then
+    return 0
+  fi
+
   echo "Detected a locked Tempyr install at $target. Stopping matching processes: ${pids[*]}" >&2
-  kill -TERM "${pids[@]}" 2>/dev/null || true
+  for pid in "${pids[@]}"; do
+    if pid_matches_resolved_target "$resolved_target" "$pid"; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
 
   for ((attempt = 0; attempt < 30; attempt++)); do
     remaining=()
     for pid in "${pids[@]}"; do
-      if kill -0 "$pid" 2>/dev/null; then
+      if pid_matches_resolved_target "$resolved_target" "$pid" && kill -0 "$pid" 2>/dev/null; then
         remaining+=("$pid")
       fi
     done
@@ -151,12 +182,16 @@ stop_matching_processes() {
   done
 
   echo "Some Tempyr processes did not exit after SIGTERM. Sending SIGKILL to: ${pids[*]}" >&2
-  kill -KILL "${pids[@]}" 2>/dev/null || true
+  for pid in "${pids[@]}"; do
+    if pid_matches_resolved_target "$resolved_target" "$pid"; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
   sleep 1
 
   remaining=()
   for pid in "${pids[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
+    if pid_matches_resolved_target "$resolved_target" "$pid" && kill -0 "$pid" 2>/dev/null; then
       remaining+=("$pid")
     fi
   done
