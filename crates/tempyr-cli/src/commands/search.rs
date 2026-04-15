@@ -11,7 +11,7 @@ pub fn run(
     owner: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let index_path = ctx.current_index_path()?;
+    let index_path = ctx.queryable_index_path()?;
     let index = Index::open(&index_path)?;
     let filter = MetadataFilter {
         node_type,

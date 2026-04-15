@@ -368,6 +368,26 @@ fn test_index_rebuild_and_search() {
 }
 
 #[test]
+fn test_search_builds_structural_index_when_missing() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    write_node(
+        &tmp,
+        "features",
+        "feat-replay",
+        "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Session Replay\n\nCapture and replay user sessions.\n",
+    );
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["search", "replay"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feat-replay"));
+}
+
+#[test]
 fn test_add_refreshes_index_for_follow_up_search() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);

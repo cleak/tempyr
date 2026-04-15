@@ -280,9 +280,17 @@ pub enum InterviewAction {
 #[derive(Subcommand)]
 pub enum IndexAction {
     /// Full index rebuild from source files
-    Rebuild,
+    Rebuild {
+        /// Refresh structural search data only; do not call embedding providers
+        #[arg(long)]
+        skip_embeddings: bool,
+    },
     /// Incremental update (changed files only)
-    Update,
+    Update {
+        /// Refresh structural search data only; do not call embedding providers
+        #[arg(long)]
+        skip_embeddings: bool,
+    },
     /// Show index statistics
     Stats,
 }
@@ -569,8 +577,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Index { action } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             match action {
-                IndexAction::Rebuild => commands::index_cmd::run_rebuild(&ctx, cli.json),
-                IndexAction::Update => commands::index_cmd::run_update(&ctx, cli.json),
+                IndexAction::Rebuild { skip_embeddings } => {
+                    commands::index_cmd::run_rebuild(&ctx, cli.json, skip_embeddings)
+                }
+                IndexAction::Update { skip_embeddings } => {
+                    commands::index_cmd::run_update(&ctx, cli.json, skip_embeddings)
+                }
                 IndexAction::Stats => commands::index_cmd::run_stats(&ctx, cli.json),
             }
         }

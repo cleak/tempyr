@@ -27,6 +27,27 @@ fn finalize_linear_graph_update(
     Ok(())
 }
 
+fn load_optional_queryable_index(ctx: &ProjectContext) -> Option<Index> {
+    let path = match ctx.queryable_index_path() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("Warning: failed to prepare index-backed Linear context: {err}");
+            return None;
+        }
+    };
+
+    match Index::open(&path) {
+        Ok(index) => Some(index),
+        Err(err) => {
+            eprintln!(
+                "Warning: failed to open index-backed Linear context at {}: {err}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 pub fn run_setup(ctx: &ProjectContext, json_output: bool) -> anyhow::Result<()> {
     let client = LinearClient::from_env()?;
     let runtime = rt()?;
@@ -125,10 +146,6 @@ pub fn run_push(
     let client = LinearClient::from_env()?;
     let config = LinearConfig::load(&ctx.tempyr_dir)?;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
-    let index = ctx
-        .current_index_path()
-        .ok()
-        .and_then(|path| Index::open(&path).ok());
     let mut state = SyncState::load(&ctx.tempyr_dir)?;
     let status_mapper = build_status_mapper(&client, &config)?;
 
@@ -136,6 +153,7 @@ pub fn run_push(
         return run_push_dry_run(&graph, &state, node_id, json_output);
     }
 
+    let index = load_optional_queryable_index(ctx);
     let runtime = rt()?;
     runtime.block_on(async {
         if let Some(id) = node_id {
@@ -302,10 +320,6 @@ pub fn run_sync(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
     let client = LinearClient::from_env()?;
     let config = LinearConfig::load(&ctx.tempyr_dir)?;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
-    let index = ctx
-        .current_index_path()
-        .ok()
-        .and_then(|path| Index::open(&path).ok());
     let mut state = SyncState::load(&ctx.tempyr_dir)?;
     let status_mapper = build_status_mapper(&client, &config)?;
 
@@ -313,6 +327,7 @@ pub fn run_sync(ctx: &ProjectContext, dry_run: bool, json_output: bool) -> anyho
         return run_sync_dry_run(&graph, &state, json_output);
     }
 
+    let index = load_optional_queryable_index(ctx);
     let runtime = rt()?;
     runtime.block_on(async {
         let result = sync::sync(

@@ -16,7 +16,7 @@ pub fn run(
     node_type: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let index_path = ctx.current_index_path()?;
+    let index_path = ctx.queryable_index_path()?;
     let index = Index::open(&index_path)?;
     let resolved = ctx.resolved_embedding_config()?;
     let store_path = ctx.embedding_store_path(

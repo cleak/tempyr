@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ProjectContext;
 
+use super::git_hooks;
 use super::index_cmd;
 use super::managed::{self, ManagedArtifact, WriteOutcome};
 use super::onboarding::{
@@ -165,6 +166,9 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
         ));
     }
 
+    let git_hook_results = git_hooks::install_all(root)?;
+    summary.extend(render_git_hook_results(&git_hook_results));
+
     let mut existing_doc_updates = Vec::new();
 
     if selections.install_claude_doc {
@@ -238,7 +242,7 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
         let ctx = ProjectContext::find(Some(root.join("graph").as_path()))?;
         println!();
         println!("Running initial index rebuild...");
-        if let Err(err) = index_cmd::run_rebuild(&ctx, false) {
+        if let Err(err) = index_cmd::run_rebuild(&ctx, false, false) {
             eprintln!("Warning: initial index rebuild failed: {err}");
         }
     }
@@ -277,6 +281,28 @@ fn render_managed_results(results: &[managed::InstallResult]) -> Vec<String> {
             WriteOutcome::Skipped => {
                 Some(format!("  {:<23}- skipped (user modified)", result.path))
             }
+            WriteOutcome::Unchanged => None,
+        })
+        .collect()
+}
+
+fn render_git_hook_results(results: &[git_hooks::HookInstallResult]) -> Vec<String> {
+    results
+        .iter()
+        .filter_map(|result| match result.outcome {
+            WriteOutcome::Created => Some(format!(
+                "  git hook {:<14}- {}",
+                result.name, result.description
+            )),
+            WriteOutcome::Merged => Some(format!(
+                "  git hook {:<14}- {}",
+                result.name, result.description
+            )),
+            WriteOutcome::Updated => Some(format!(
+                "  git hook {:<14}- {}",
+                result.name, result.description
+            )),
+            WriteOutcome::Skipped => None,
             WriteOutcome::Unchanged => None,
         })
         .collect()
@@ -723,9 +749,8 @@ mod tests {
     fn write_provider_api_key_rejects_placeholders_before_persisting() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let err =
-            write_provider_api_key(tmp.path(), EmbeddingProviderChoice::Voyage, "changeme")
-                .unwrap_err();
+        let err = write_provider_api_key(tmp.path(), EmbeddingProviderChoice::Voyage, "changeme")
+            .unwrap_err();
 
         assert!(err.to_string().contains("still looks like a placeholder"));
         assert!(!tmp.path().join(".env.local").exists());
