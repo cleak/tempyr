@@ -1,6 +1,7 @@
 use anyhow::Context;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use super::managed::WriteOutcome;
 
@@ -104,8 +105,37 @@ pub fn install_all(root: &Path) -> anyhow::Result<Vec<HookInstallResult>> {
 }
 
 fn hooks_dir(root: &Path) -> Option<PathBuf> {
-    let git_dirs = tempyr_core::project::resolve_git_dirs(root)?;
-    Some(git_dirs.common_dir.join("hooks"))
+    resolve_hooks_dir_via_git(root).or_else(|| {
+        let git_dirs = tempyr_core::project::resolve_git_dirs(root)?;
+        Some(git_dirs.common_dir.join("hooks"))
+    })
+}
+
+fn resolve_hooks_dir_via_git(root: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-path", "hooks"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    hooks_dir_from_git_output(root, &output.stdout)
+}
+
+fn hooks_dir_from_git_output(root: &Path, stdout: &[u8]) -> Option<PathBuf> {
+    let path = std::str::from_utf8(stdout).ok()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(root.join(path))
+    }
 }
 
 fn hook_status(path: &Path, managed_block: &str) -> anyhow::Result<HookStatus> {
@@ -115,40 +145,25 @@ fn hook_status(path: &Path, managed_block: &str) -> anyhow::Result<HookStatus> {
 
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read hook {}", path.display()))?;
-    if content.contains(managed_block) {
-        if !hook_is_executable(path)? {
-            return Ok(HookStatus::Stale);
-        }
-        return Ok(HookStatus::UpToDate);
+    let Some((start, _)) = managed_block_range(&content) else {
+        return Ok(HookStatus::Stale);
+    };
+
+    if !content.contains(managed_block) || !managed_block_is_reachable(&content, start) {
+        return Ok(HookStatus::Stale);
     }
-    Ok(HookStatus::Stale)
+
+    if !hook_is_executable(path)? {
+        return Ok(HookStatus::Stale);
+    }
+
+    Ok(HookStatus::UpToDate)
 }
 
 fn merge_hook_content(existing: Option<&str>, managed_block: &str) -> (String, WriteOutcome) {
     match existing {
         None => (format!("{SHEBANG}{managed_block}"), WriteOutcome::Created),
-        Some(content) if content.contains(managed_block) => {
-            (content.to_string(), WriteOutcome::Unchanged)
-        }
-        Some(content) => {
-            if let Some((start, end)) = managed_block_range(content) {
-                let mut merged = String::with_capacity(content.len() + managed_block.len());
-                merged.push_str(&content[..start]);
-                merged.push_str(managed_block);
-                merged.push_str(&content[end..]);
-                return (merged, WriteOutcome::Updated);
-            }
-
-            let mut merged = content.to_string();
-            if !merged.ends_with('\n') {
-                merged.push('\n');
-            }
-            if !merged.ends_with("\n\n") {
-                merged.push('\n');
-            }
-            merged.push_str(managed_block);
-            (merged, WriteOutcome::Merged)
-        }
+        Some(content) => merge_existing_hook_content(content, managed_block),
     }
 }
 
@@ -164,6 +179,123 @@ fn managed_block_range(content: &str) -> Option<(usize, usize)> {
         end
     };
     Some((start, end))
+}
+
+fn merge_existing_hook_content(content: &str, managed_block: &str) -> (String, WriteOutcome) {
+    if let Some((start, end)) = managed_block_range(content) {
+        let has_current_block = content.contains(managed_block);
+        let reachable = managed_block_is_reachable(content, start);
+
+        if has_current_block && reachable {
+            return (content.to_string(), WriteOutcome::Unchanged);
+        }
+
+        if reachable {
+            let mut merged = String::with_capacity(content.len() + managed_block.len());
+            merged.push_str(&content[..start]);
+            merged.push_str(managed_block);
+            merged.push_str(&content[end..]);
+            return (merged, WriteOutcome::Updated);
+        }
+
+        let (base, _) = strip_managed_block(content);
+        return (
+            insert_managed_block(&base, managed_block),
+            WriteOutcome::Updated,
+        );
+    }
+
+    (
+        insert_managed_block(content, managed_block),
+        WriteOutcome::Merged,
+    )
+}
+
+fn strip_managed_block(content: &str) -> (String, bool) {
+    let Some((start, end)) = managed_block_range(content) else {
+        return (content.to_string(), false);
+    };
+
+    let mut stripped = String::with_capacity(content.len() - (end - start));
+    stripped.push_str(&content[..start]);
+    stripped.push_str(&content[end..]);
+    (stripped, true)
+}
+
+fn insert_managed_block(content: &str, managed_block: &str) -> String {
+    if let Some(offset) = terminal_control_offset(content) {
+        let before = trim_trailing_line_endings(&content[..offset]);
+        let after = &content[offset..];
+
+        let mut merged =
+            String::with_capacity(before.len() + managed_block.len() + after.len() + 2);
+        if !before.is_empty() {
+            merged.push_str(before);
+            merged.push('\n');
+            merged.push('\n');
+        }
+        merged.push_str(managed_block);
+        merged.push_str(after);
+        return merged;
+    }
+
+    let trimmed = trim_trailing_line_endings(content);
+    let mut merged = String::with_capacity(trimmed.len() + managed_block.len() + 2);
+    if !trimmed.is_empty() {
+        merged.push_str(trimmed);
+        merged.push('\n');
+        merged.push('\n');
+    }
+    merged.push_str(managed_block);
+    merged
+}
+
+fn trim_trailing_line_endings(content: &str) -> &str {
+    content.trim_end_matches(['\r', '\n'])
+}
+
+fn managed_block_is_reachable(content: &str, block_start: usize) -> bool {
+    terminal_control_offset(content).is_none_or(|offset| offset >= block_start)
+}
+
+fn terminal_control_offset(content: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in content.split_inclusive('\n') {
+        let line_content = line.trim_end_matches(['\r', '\n']);
+        if is_terminal_control_line(line_content) {
+            return Some(offset);
+        }
+        offset += line.len();
+    }
+
+    if offset < content.len() && is_terminal_control_line(&content[offset..]) {
+        return Some(offset);
+    }
+
+    None
+}
+
+fn is_terminal_control_line(line: &str) -> bool {
+    let stripped = line.trim_start();
+    if stripped.is_empty() || stripped.starts_with('#') {
+        return false;
+    }
+
+    ["exit", "exec", "return"]
+        .into_iter()
+        .any(|keyword| matches_shell_keyword(stripped, keyword))
+}
+
+fn matches_shell_keyword(line: &str, keyword: &str) -> bool {
+    let Some(rest) = line.strip_prefix(keyword) else {
+        return false;
+    };
+
+    rest.is_empty()
+        || matches!(
+            rest.chars().next(),
+            Some(' ' | '\t' | '\r' | '\n' | ';' | '#')
+        )
 }
 
 fn render_managed_block() -> String {
@@ -208,7 +340,7 @@ fn ensure_hook_executable(path: &Path) -> anyhow::Result<()> {
     let metadata =
         fs::metadata(path).with_context(|| format!("Failed to stat hook {}", path.display()))?;
     let mut perms = metadata.permissions();
-    perms.set_mode(perms.mode() | 0o755);
+    perms.set_mode(perms.mode() | 0o100);
     fs::set_permissions(path, perms)
         .with_context(|| format!("Failed to chmod hook {}", path.display()))?;
     Ok(())
@@ -263,6 +395,18 @@ mod tests {
     }
 
     #[test]
+    fn merge_hook_content_inserts_before_terminal_control_flow() {
+        let managed = render_managed_block();
+        let existing = "#!/bin/sh\necho before\nexit 0\n";
+
+        let (content, outcome) = merge_hook_content(Some(existing), &managed);
+
+        assert_eq!(outcome, WriteOutcome::Merged);
+        assert!(content.contains("echo before\n\n# >>> tempyr managed index warmup >>>"));
+        assert!(content.contains(&format!("{MANAGED_END}\nexit 0\n")));
+    }
+
+    #[test]
     fn merge_hook_content_replaces_stale_managed_block() {
         let stale = format!("{MANAGED_START}\nold\n{MANAGED_END}\n");
         let existing = format!("#!/bin/sh\n{stale}echo after\n");
@@ -277,12 +421,35 @@ mod tests {
     }
 
     #[test]
+    fn merge_hook_content_repositions_unreachable_managed_block() {
+        let managed = render_managed_block();
+        let existing = format!("#!/bin/sh\nexit 0\n\n{managed}");
+
+        let (content, outcome) = merge_hook_content(Some(&existing), &managed);
+
+        assert_eq!(outcome, WriteOutcome::Updated);
+        assert_eq!(content.matches(MANAGED_START).count(), 1);
+        assert!(content.contains(&format!("{MANAGED_END}\nexit 0\n")));
+    }
+
+    #[test]
     fn hook_status_treats_existing_user_hook_as_stale() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("post-checkout");
         fs::write(&path, "#!/bin/sh\necho user-hook\n").unwrap();
 
         let managed = render_managed_block();
+
+        assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);
+    }
+
+    #[test]
+    fn hook_status_treats_unreachable_managed_hook_as_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("post-checkout");
+        let managed = render_managed_block();
+        let hook = format!("#!/bin/sh\nexit 0\n\n{managed}");
+        fs::write(&path, hook).unwrap();
 
         assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);
     }
@@ -300,6 +467,41 @@ mod tests {
         fs::set_permissions(&path, perms).unwrap();
 
         assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);
+    }
+
+    #[test]
+    fn hooks_dir_from_git_output_resolves_relative_paths_against_root() {
+        let root = Path::new("/repo/root");
+
+        let path = hooks_dir_from_git_output(root, b".githooks\n").unwrap();
+
+        assert_eq!(path, root.join(".githooks"));
+    }
+
+    #[test]
+    fn hooks_dir_from_git_output_preserves_absolute_paths() {
+        let root = Path::new("/repo/root");
+
+        let path = hooks_dir_from_git_output(root, b"/shared/hooks\n").unwrap();
+
+        assert_eq!(path, PathBuf::from("/shared/hooks"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_hook_executable_only_adds_owner_execute_bit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("post-checkout");
+        fs::write(&path, "#!/bin/sh\n").unwrap();
+
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(&path, perms).unwrap();
+
+        ensure_hook_executable(&path).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[test]
