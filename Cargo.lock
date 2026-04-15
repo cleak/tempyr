@@ -3107,6 +3107,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "libc",
  "predicates",
  "ratatui",
  "serde",
@@ -3121,6 +3122,7 @@ dependencies = [
  "tokio",
  "toml",
  "walkdir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3195,6 +3197,7 @@ name = "tempyr-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "rmcp",
  "schemars",
  "serde",
@@ -3205,6 +3208,8 @@ dependencies = [
  "tempyr-linear",
  "tempyr-render",
  "tokio",
+ "tokio-util",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
