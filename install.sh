@@ -102,7 +102,22 @@ preflight_locked_target() {
 
 output_indicates_lock_error() {
   local output="$1"
-  grep -Eq 'Text file busy|Device or resource busy|resource busy' <<<"$output"
+  local target="$2"
+  local target_name
+
+  target_name="$(basename -- "$target")"
+
+  grep -Eq 'Text file busy|Device or resource busy|resource busy' <<<"$output" || return 1
+
+  if grep -Fq -- "$target" <<<"$output"; then
+    return 0
+  fi
+
+  if grep -Fq -- "executable \`$target_name\`" <<<"$output"; then
+    return 0
+  fi
+
+  grep -Eq -- "failed to move .*${target_name}.* to .*${target_name}|Replacing .*${target_name}" <<<"$output"
 }
 
 find_matching_pids() {
@@ -301,7 +316,7 @@ ensure_path_persistence() {
 preflight_locked_target
 
 run_cargo_install || {
-  if output_indicates_lock_error "$INSTALL_OUTPUT"; then
+  if output_indicates_lock_error "$INSTALL_OUTPUT" "$TARGET_BIN"; then
     retry_lock_related_install "$TARGET_BIN"
   else
     exit 1
