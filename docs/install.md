@@ -48,9 +48,9 @@ If you want `install.ps1` to skip user `PATH` changes, pass `-NoPathUpdate`:
 
 ## Updating safely
 
-Rerun the installer to update Tempyr. If the currently installed Tempyr binary is locked by a running process, the installer only stops processes whose executable path exactly matches the target installed binary, then retries the install. It does not kill processes based on name alone.
+Rerun the installer to update Tempyr. Both installers check whether the target Tempyr binary is already in use before invoking `cargo install`. If it is, they only stop processes whose executable path exactly matches the target installed binary. They do not kill processes based on name alone.
 
-If the binary is briefly locked by some other process, the Windows installer also waits and retries a few times before failing.
+If the binary becomes locked during the install anyway, the installers stop matching Tempyr processes and retry. On Windows, the installer also waits and retries a few times before failing when the lock appears to be transient.
 
 ## Custom install root
 

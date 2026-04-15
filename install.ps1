@@ -362,7 +362,9 @@ function Invoke-CargoInstallWithLockRecovery {
     $maxAttempts = 4
     $retryDelaySeconds = 2
     $attempt = 1
-    $stoppedMatchingProcesses = $false
+    if (Test-FileLocked -Path $TargetBinaryPath) {
+        [void](Stop-TargetProcesses -BinaryPath $TargetBinaryPath)
+    }
 
     while ($true) {
         $installResult = Invoke-CargoInstall -CratePath $CratePath -InstallRootPath $InstallRootPath
@@ -376,13 +378,10 @@ function Invoke-CargoInstallWithLockRecovery {
         }
 
         $targetBinaryLocked = Test-FileLocked -Path $TargetBinaryPath
-        if (-not $stoppedMatchingProcesses) {
-            if ($targetBinaryLocked -and (Stop-TargetProcesses -BinaryPath $TargetBinaryPath)) {
-                $stoppedMatchingProcesses = $true
-                Write-Host "Retrying cargo install after stopping matching Tempyr processes..."
-                $attempt += 1
-                continue
-            }
+        if ($targetBinaryLocked -and (Stop-TargetProcesses -BinaryPath $TargetBinaryPath)) {
+            Write-Host "Retrying cargo install after stopping matching Tempyr processes..."
+            $attempt += 1
+            continue
         }
 
         if ($attempt -ge $maxAttempts) {
