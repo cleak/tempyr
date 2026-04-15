@@ -145,11 +145,11 @@ fn hook_status(path: &Path, managed_block: &str) -> anyhow::Result<HookStatus> {
 
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read hook {}", path.display()))?;
-    let Some((start, _)) = managed_block_range(&content) else {
+    let Some(status) = managed_block_status(&content, managed_block) else {
         return Ok(HookStatus::Stale);
     };
 
-    if !content.contains(managed_block) || !managed_block_is_reachable(&content, start) {
+    if !status.is_current() {
         return Ok(HookStatus::Stale);
     }
 
@@ -182,15 +182,14 @@ fn managed_block_range(content: &str) -> Option<(usize, usize)> {
 }
 
 fn merge_existing_hook_content(content: &str, managed_block: &str) -> (String, WriteOutcome) {
-    if let Some((start, end)) = managed_block_range(content) {
-        let has_current_block = content.contains(managed_block);
-        let reachable = managed_block_is_reachable(content, start);
+    if let Some(status) = managed_block_status(content, managed_block) {
+        let (start, end) = status.range;
 
-        if has_current_block && reachable {
+        if status.is_current() {
             return (content.to_string(), WriteOutcome::Unchanged);
         }
 
-        if reachable {
+        if status.reachable && !status.has_additional_blocks {
             let mut merged = String::with_capacity(content.len() + managed_block.len());
             merged.push_str(&content[..start]);
             merged.push_str(managed_block);
@@ -198,7 +197,7 @@ fn merge_existing_hook_content(content: &str, managed_block: &str) -> (String, W
             return (merged, WriteOutcome::Updated);
         }
 
-        let (base, _) = strip_managed_block(content);
+        let base = strip_all_managed_blocks(content);
         return (
             insert_managed_block(&base, managed_block),
             WriteOutcome::Updated,
@@ -211,15 +210,17 @@ fn merge_existing_hook_content(content: &str, managed_block: &str) -> (String, W
     )
 }
 
-fn strip_managed_block(content: &str) -> (String, bool) {
-    let Some((start, end)) = managed_block_range(content) else {
-        return (content.to_string(), false);
-    };
+fn strip_all_managed_blocks(content: &str) -> String {
+    let mut stripped = String::with_capacity(content.len());
+    let mut remaining = content;
 
-    let mut stripped = String::with_capacity(content.len() - (end - start));
-    stripped.push_str(&content[..start]);
-    stripped.push_str(&content[end..]);
-    (stripped, true)
+    while let Some((start, end)) = managed_block_range(remaining) {
+        stripped.push_str(&remaining[..start]);
+        remaining = &remaining[end..];
+    }
+
+    stripped.push_str(remaining);
+    stripped
 }
 
 fn insert_managed_block(content: &str, managed_block: &str) -> String {
@@ -256,6 +257,32 @@ fn trim_trailing_line_endings(content: &str) -> &str {
 
 fn managed_block_is_reachable(content: &str, block_start: usize) -> bool {
     terminal_control_offset(content).is_none_or(|offset| offset >= block_start)
+}
+
+struct ManagedBlockStatus {
+    range: (usize, usize),
+    is_exact_match: bool,
+    has_additional_blocks: bool,
+    reachable: bool,
+}
+
+impl ManagedBlockStatus {
+    fn is_current(&self) -> bool {
+        self.is_exact_match && !self.has_additional_blocks && self.reachable
+    }
+}
+
+fn managed_block_status(content: &str, managed_block: &str) -> Option<ManagedBlockStatus> {
+    let (start, end) = managed_block_range(content)?;
+    let extracted = &content[start..end];
+    let has_additional_blocks = content[end..].contains(MANAGED_START);
+
+    Some(ManagedBlockStatus {
+        range: (start, end),
+        is_exact_match: extracted == managed_block,
+        has_additional_blocks,
+        reachable: managed_block_is_reachable(content, start),
+    })
 }
 
 fn terminal_control_offset(content: &str) -> Option<usize> {
@@ -362,7 +389,7 @@ fn hook_is_executable(path: &Path) -> anyhow::Result<bool> {
 
     let metadata =
         fs::metadata(path).with_context(|| format!("Failed to stat hook {}", path.display()))?;
-    Ok(metadata.permissions().mode() & 0o111 != 0)
+    Ok(metadata.permissions().mode() & 0o100 != 0)
 }
 
 #[cfg(not(unix))]
@@ -450,6 +477,32 @@ mod tests {
     }
 
     #[test]
+    fn merge_hook_content_collapses_duplicate_managed_blocks() {
+        let managed = render_managed_block();
+        let existing = format!("#!/bin/sh\n{managed}\necho after\n{managed}");
+
+        let (content, outcome) = merge_hook_content(Some(&existing), &managed);
+
+        assert_eq!(outcome, WriteOutcome::Updated);
+        assert_eq!(content.matches(MANAGED_START).count(), 1);
+        assert!(content.contains("echo after"));
+    }
+
+    #[test]
+    fn merge_hook_content_replaces_stale_first_block_when_later_block_is_current() {
+        let managed = render_managed_block();
+        let stale = format!("{MANAGED_START}\nold\n{MANAGED_END}\n");
+        let existing = format!("#!/bin/sh\n{stale}\necho after\n{managed}");
+
+        let (content, outcome) = merge_hook_content(Some(&existing), &managed);
+
+        assert_eq!(outcome, WriteOutcome::Updated);
+        assert_eq!(content.matches(MANAGED_START).count(), 1);
+        assert!(content.contains("echo after"));
+        assert!(!content.contains("\nold\n"));
+    }
+
+    #[test]
     fn hook_status_treats_existing_user_hook_as_stale() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("post-checkout");
@@ -482,6 +535,17 @@ mod tests {
         assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);
     }
 
+    #[test]
+    fn hook_status_treats_duplicate_managed_blocks_as_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("post-checkout");
+        let managed = render_managed_block();
+        let hook = format!("#!/bin/sh\n{managed}\n{managed}");
+        fs::write(&path, hook).unwrap();
+
+        assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);
+    }
+
     #[cfg(unix)]
     #[test]
     fn hook_status_treats_non_executable_managed_hook_as_stale() {
@@ -495,6 +559,22 @@ mod tests {
         fs::set_permissions(&path, perms).unwrap();
 
         assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_status_requires_owner_execute_bit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("post-checkout");
+        let managed = render_managed_block();
+        fs::write(&path, &managed).unwrap();
+
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o055);
+        fs::set_permissions(&path, perms).unwrap();
+
+        assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);
+        assert!(!hook_is_executable(&path).unwrap());
     }
 
     #[test]
