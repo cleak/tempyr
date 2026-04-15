@@ -276,14 +276,18 @@ fn terminal_control_offset(content: &str) -> Option<usize> {
 }
 
 fn is_terminal_control_line(line: &str) -> bool {
-    let stripped = line.trim_start();
-    if stripped.is_empty() || stripped.starts_with('#') {
+    let line = line.trim_end();
+    if line.is_empty() || line.starts_with('#') {
+        return false;
+    }
+
+    if matches!(line.as_bytes().first(), Some(b' ' | b'\t')) {
         return false;
     }
 
     ["exit", "exec", "return"]
         .into_iter()
-        .any(|keyword| matches_shell_keyword(stripped, keyword))
+        .any(|keyword| matches_shell_keyword(line, keyword))
 }
 
 fn matches_shell_keyword(line: &str, keyword: &str) -> bool {
@@ -327,8 +331,9 @@ run_tempyr() {{\n\
 \n\
   return 127\n\
 }}\n\
-if [ ! -d .tempyr ] && [ ! -f .tempyr-redirect ]; then\n  exit 0\nfi\n\
-run_tempyr index update --json --skip-embeddings >/dev/null 2>&1 || true\n\
+if [ -d .tempyr ] || [ -f .tempyr-redirect ]; then\n\
+  run_tempyr index update --json --skip-embeddings >/dev/null 2>&1 || true\n\
+fi\n\
 {MANAGED_END}\n"
     )
 }
@@ -407,6 +412,18 @@ mod tests {
     }
 
     #[test]
+    fn merge_hook_content_ignores_indented_control_flow() {
+        let managed = render_managed_block();
+        let existing = "#!/bin/sh\nif some_check; then\n  exit 0\nfi\n";
+
+        let (content, outcome) = merge_hook_content(Some(existing), &managed);
+
+        assert_eq!(outcome, WriteOutcome::Merged);
+        assert!(content.contains("fi\n\n# >>> tempyr managed index warmup >>>"));
+        assert!(!content.contains("then\n\n# >>> tempyr managed index warmup >>>"));
+    }
+
+    #[test]
     fn merge_hook_content_replaces_stale_managed_block() {
         let stale = format!("{MANAGED_START}\nold\n{MANAGED_END}\n");
         let existing = format!("#!/bin/sh\n{stale}echo after\n");
@@ -441,6 +458,17 @@ mod tests {
         let managed = render_managed_block();
 
         assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);
+    }
+
+    #[test]
+    fn hook_status_ignores_indented_control_flow_before_managed_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("post-checkout");
+        let managed = render_managed_block();
+        let hook = format!("#!/bin/sh\nif some_check; then\n  exit 0\nfi\n\n{managed}");
+        fs::write(&path, hook).unwrap();
+
+        assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::UpToDate);
     }
 
     #[test]
@@ -510,6 +538,8 @@ mod tests {
 
         assert!(managed.contains("TEMPYR_BIN=\"${TEMPYR_BIN:-}\""));
         assert!(managed.contains("./target/debug/tempyr"));
+        assert!(managed.contains("if [ -d .tempyr ] || [ -f .tempyr-redirect ]; then"));
+        assert!(!managed.contains("exit 0"));
         assert!(!managed.contains("/tmp/tempyr"));
     }
 }
