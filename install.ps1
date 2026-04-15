@@ -379,6 +379,9 @@ function Invoke-CargoInstallWithLockRecovery {
 
         $targetBinaryLocked = Test-FileLocked -Path $TargetBinaryPath
         if ($targetBinaryLocked -and (Stop-TargetProcesses -BinaryPath $TargetBinaryPath)) {
+            if ($attempt -ge $maxAttempts) {
+                return $installResult
+            }
             Write-Host "Retrying cargo install after stopping matching Tempyr processes..."
             $attempt += 1
             continue

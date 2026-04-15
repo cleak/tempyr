@@ -92,7 +92,7 @@ preflight_locked_target() {
     return 0
   fi
 
-  kill_matching_processes "$TARGET_BIN"
+  stop_matching_processes "$TARGET_BIN" "${pids[@]}"
 }
 
 output_indicates_lock_error() {
@@ -120,12 +120,13 @@ find_matching_pids() {
   done
 }
 
-kill_matching_processes() {
+stop_matching_processes() {
   local target="$1"
+  shift
   local -a pids remaining
   local pid
 
-  mapfile -t pids < <(find_matching_pids "$target")
+  pids=("$@")
   if ((${#pids[@]} == 0)); then
     return 1
   fi
@@ -166,6 +167,14 @@ kill_matching_processes() {
   fi
 
   return 0
+}
+
+kill_matching_processes() {
+  local target="$1"
+  local -a pids
+
+  mapfile -t pids < <(find_matching_pids "$target")
+  stop_matching_processes "$target" "${pids[@]}"
 }
 
 handle_failed_process_stop() {
