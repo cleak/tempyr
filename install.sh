@@ -87,12 +87,17 @@ preflight_locked_target() {
   [[ -e "$TARGET_BIN" ]] || return 0
 
   local -a pids
+  local status
   mapfile -t pids < <(find_matching_pids "$TARGET_BIN")
   if ((${#pids[@]} == 0)); then
     return 0
   fi
 
-  stop_matching_processes "$TARGET_BIN" "${pids[@]}"
+  stop_matching_processes "$TARGET_BIN" "${pids[@]}" || {
+    status=$?
+    handle_failed_process_stop "$TARGET_BIN" "$status"
+    return "$status"
+  }
 }
 
 output_indicates_lock_error() {
