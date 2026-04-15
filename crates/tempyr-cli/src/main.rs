@@ -381,7 +381,9 @@ fn run_cli_mode() -> anyhow::Result<()> {
 
 fn run_mcp_mode() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(tempyr_mcp::serve_stdio())
+    let result = rt.block_on(tempyr_mcp::serve_stdio());
+    rt.shutdown_timeout(std::time::Duration::from_secs(1));
+    result
 }
 
 fn load_cli_project_env(graph_dir: Option<&Path>) -> anyhow::Result<()> {

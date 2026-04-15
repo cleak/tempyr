@@ -1,13 +1,20 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use rmcp::model::ProtocolVersion;
 use std::fs;
-use std::process::{Command as ProcessCommand, Stdio};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command as ProcessCommand, ExitStatus, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 fn tempyr() -> Command {
     Command::cargo_bin("tempyr").unwrap()
+}
+
+fn tempyr_bin() -> PathBuf {
+    assert_cmd::cargo::cargo_bin("tempyr")
 }
 
 fn init_project(dir: &TempDir) {
@@ -25,6 +32,241 @@ fn write_node(dir: &TempDir, subdir: &str, id: &str, content: &str) {
         .join(subdir)
         .join(format!("{id}.md"));
     fs::write(path, content).unwrap();
+}
+
+fn spawn_mcp_child(cwd: &Path) -> Child {
+    ProcessCommand::new(tempyr_bin())
+        .arg("--mcp")
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> ExitStatus {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            panic!("child process did not exit within {:?}", timeout);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn read_child_stderr(child: &mut Child) -> String {
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    stderr
+}
+
+fn write_json_line(stdin: &mut ChildStdin, value: serde_json::Value) {
+    serde_json::to_writer(&mut *stdin, &value).unwrap();
+    stdin.write_all(b"\n").unwrap();
+    stdin.flush().unwrap();
+}
+
+fn initialize_mcp_session(child: &mut Child) {
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut stdout = BufReader::new(stdout);
+
+    write_json_line(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": ProtocolVersion::V_2025_06_18,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "integration-test",
+                    "version": "0.1.0"
+                }
+            }
+        }),
+    );
+
+    let mut response = String::new();
+    stdout.read_line(&mut response).unwrap();
+    assert!(
+        !response.trim().is_empty(),
+        "expected initialize response but stdout was empty"
+    );
+
+    let response: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
+    assert_eq!(response["id"], 1);
+
+    write_json_line(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    );
+
+    child.stdin = Some(stdin);
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ParentDeathHelperInfo {
+    pid: u32,
+    stderr_path: PathBuf,
+    #[serde(default)]
+    created_at: Option<u64>,
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32, _created_at: Option<u64>) -> bool {
+    let status = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if status == 0 {
+        true
+    } else {
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32, created_at: Option<u64>) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        WaitForSingleObject,
+    };
+
+    unsafe {
+        let handle = OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        );
+        if handle.is_null() {
+            return false;
+        }
+
+        let mut process_created_at = FILETIME::default();
+        let mut exit_time = FILETIME::default();
+        let mut kernel_time = FILETIME::default();
+        let mut user_time = FILETIME::default();
+        if GetProcessTimes(
+            handle,
+            &mut process_created_at,
+            &mut exit_time,
+            &mut kernel_time,
+            &mut user_time,
+        ) == 0
+        {
+            let _ = CloseHandle(handle);
+            return false;
+        }
+
+        let actual_created_at = ((process_created_at.dwHighDateTime as u64) << 32)
+            | process_created_at.dwLowDateTime as u64;
+        if let Some(expected_created_at) = created_at
+            && actual_created_at != expected_created_at
+        {
+            let _ = CloseHandle(handle);
+            return false;
+        }
+
+        let wait = WaitForSingleObject(handle, 0);
+        let _ = CloseHandle(handle);
+        wait == WAIT_TIMEOUT
+    }
+}
+
+#[cfg(windows)]
+fn process_creation_time(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+
+        let mut process_created_at = FILETIME::default();
+        let mut exit_time = FILETIME::default();
+        let mut kernel_time = FILETIME::default();
+        let mut user_time = FILETIME::default();
+        let result = GetProcessTimes(
+            handle,
+            &mut process_created_at,
+            &mut exit_time,
+            &mut kernel_time,
+            &mut user_time,
+        );
+        let _ = CloseHandle(handle);
+        if result == 0 {
+            return None;
+        }
+
+        Some(
+            ((process_created_at.dwHighDateTime as u64) << 32)
+                | process_created_at.dwLowDateTime as u64,
+        )
+    }
+}
+
+#[cfg(not(windows))]
+fn process_creation_time(_pid: u32) -> Option<u64> {
+    None
+}
+
+fn wait_for_pid_exit(info: &ParentDeathHelperInfo, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !process_is_running(info.pid, info.created_at) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+#[allow(clippy::zombie_processes)]
+fn run_parent_death_helper_if_requested() {
+    if std::env::var_os("TEMPYR_TEST_PARENT_DEATH_HELPER").is_none() {
+        return;
+    }
+
+    let info_path = PathBuf::from(std::env::var_os("TEMPYR_TEST_PARENT_DEATH_INFO").unwrap());
+    let stderr_path = PathBuf::from(std::env::var_os("TEMPYR_TEST_PARENT_DEATH_STDERR").unwrap());
+    let tempyr_bin = PathBuf::from(std::env::var_os("TEMPYR_TEST_TEMPYR_BIN").unwrap());
+    let cwd = PathBuf::from(std::env::var_os("TEMPYR_TEST_PARENT_DEATH_CWD").unwrap());
+    let stderr_file = fs::File::create(&stderr_path).unwrap();
+
+    // This helper must exit while tempyr is still alive so the MCP process observes parent death.
+    let child = ProcessCommand::new(tempyr_bin)
+        .arg("--mcp")
+        .current_dir(&cwd)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .unwrap();
+
+    let info = ParentDeathHelperInfo {
+        pid: child.id(),
+        stderr_path,
+        created_at: process_creation_time(child.id()),
+    };
+    fs::write(info_path, serde_json::to_vec(&info).unwrap()).unwrap();
+    thread::sleep(Duration::from_millis(500));
 }
 
 #[test]
@@ -101,9 +343,11 @@ fn test_mcp_flag_rejects_extra_args() {
 
 #[test]
 fn test_mcp_mode_starts_on_stdio() {
+    let tmp = TempDir::new().unwrap();
     let tempyr_bin = assert_cmd::cargo::cargo_bin("tempyr");
     let mut child = ProcessCommand::new(tempyr_bin)
         .arg("--mcp")
+        .current_dir(tmp.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -119,6 +363,97 @@ fn test_mcp_mode_starts_on_stdio() {
     child.kill().unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn test_mcp_exits_cleanly_on_stdin_eof_before_initialize() {
+    let tmp = TempDir::new().unwrap();
+    let mut child = spawn_mcp_child(tmp.path());
+
+    drop(child.stdin.take());
+
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(0));
+
+    let stderr = read_child_stderr(&mut child);
+    assert!(
+        stderr.contains("tempyr shutting down: stdin EOF"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn test_mcp_exits_cleanly_on_stdin_eof_after_initialize() {
+    let tmp = TempDir::new().unwrap();
+    let mut child = spawn_mcp_child(tmp.path());
+    initialize_mcp_session(&mut child);
+
+    drop(child.stdin.take());
+
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(0));
+
+    let stderr = read_child_stderr(&mut child);
+    assert!(
+        stderr.contains("tempyr shutting down: stdin EOF"),
+        "{stderr}"
+    );
+}
+
+#[test]
+#[ignore]
+fn test_mcp_parent_death_helper() {
+    run_parent_death_helper_if_requested();
+}
+
+#[test]
+fn test_mcp_exits_on_parent_death() {
+    let tmp = TempDir::new().unwrap();
+    let helper_info_path = tmp.path().join("parent-death.json");
+    let helper_stderr_path = tmp.path().join("tempyr-parent-death.stderr");
+    let tempyr_bin = tempyr_bin();
+
+    let mut helper = ProcessCommand::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "test_mcp_parent_death_helper",
+            "--nocapture",
+        ])
+        .env("TEMPYR_TEST_PARENT_DEATH_HELPER", "1")
+        .env("TEMPYR_TEST_PARENT_DEATH_INFO", &helper_info_path)
+        .env("TEMPYR_TEST_PARENT_DEATH_STDERR", &helper_stderr_path)
+        .env("TEMPYR_TEST_TEMPYR_BIN", &tempyr_bin)
+        .env("TEMPYR_TEST_PARENT_DEATH_CWD", tmp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let keep_stdin_open = helper.stdin.take().unwrap();
+    let helper_status = wait_for_child_exit(&mut helper, Duration::from_secs(20));
+    assert!(
+        helper_status.success(),
+        "helper failed with status {helper_status}"
+    );
+
+    let info: ParentDeathHelperInfo =
+        serde_json::from_slice(&fs::read(&helper_info_path).unwrap()).unwrap();
+
+    let exited = wait_for_pid_exit(&info, Duration::from_secs(20));
+    drop(keep_stdin_open);
+
+    let stderr = fs::read_to_string(&info.stderr_path).unwrap();
+    assert!(
+        exited,
+        "process {} did not exit within 20s\nstderr:\n{}",
+        info.pid, stderr
+    );
+    assert!(
+        stderr.contains("tempyr shutting down: parent pid"),
+        "{stderr}"
+    );
 }
 
 #[test]
