@@ -83,9 +83,41 @@ run_cargo_install() {
   return "$status"
 }
 
+preflight_locked_target() {
+  [[ -e "$TARGET_BIN" ]] || return 0
+
+  local -a pids
+  local status
+  mapfile -t pids < <(find_matching_pids "$TARGET_BIN")
+  if ((${#pids[@]} == 0)); then
+    return 0
+  fi
+
+  stop_matching_processes "$TARGET_BIN" "${pids[@]}" || {
+    status=$?
+    handle_failed_process_stop "$TARGET_BIN" "$status"
+    return "$status"
+  }
+}
+
 output_indicates_lock_error() {
   local output="$1"
-  grep -Eq 'Text file busy|Device or resource busy|resource busy' <<<"$output"
+  local target="$2"
+  local target_name
+
+  target_name="$(basename -- "$target")"
+
+  grep -Eq 'Text file busy|Device or resource busy|resource busy' <<<"$output" || return 1
+
+  if grep -Fq -- "$target" <<<"$output"; then
+    return 0
+  fi
+
+  if grep -Fq -- "executable \`$target_name\`" <<<"$output"; then
+    return 0
+  fi
+
+  grep -Eq -- "failed to move .*${target_name}.* to .*${target_name}|Replacing .*${target_name}" <<<"$output"
 }
 
 find_matching_pids() {
@@ -108,23 +140,55 @@ find_matching_pids() {
   done
 }
 
-kill_matching_processes() {
+pid_matches_resolved_target() {
+  local resolved_target="$1"
+  local pid="$2"
+  local resolved
+
+  resolved="$(readlink -f -- "/proc/$pid/exe" 2>/dev/null || true)"
+  [[ "$resolved" == "$resolved_target" ]]
+}
+
+stop_matching_processes() {
   local target="$1"
+  shift
+  local resolved_target
   local -a pids remaining
   local pid
 
-  mapfile -t pids < <(find_matching_pids "$target")
+  pids=("$@")
   if ((${#pids[@]} == 0)); then
     return 1
   fi
 
+  if [[ ! -e "$target" ]]; then
+    return 0
+  fi
+
+  resolved_target="$(readlink -f -- "$target")"
+
+  remaining=()
+  for pid in "${pids[@]}"; do
+    if pid_matches_resolved_target "$resolved_target" "$pid"; then
+      remaining+=("$pid")
+    fi
+  done
+  pids=("${remaining[@]}")
+  if ((${#pids[@]} == 0)); then
+    return 0
+  fi
+
   echo "Detected a locked Tempyr install at $target. Stopping matching processes: ${pids[*]}" >&2
-  kill -TERM "${pids[@]}" 2>/dev/null || true
+  for pid in "${pids[@]}"; do
+    if pid_matches_resolved_target "$resolved_target" "$pid"; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
 
   for ((attempt = 0; attempt < 30; attempt++)); do
     remaining=()
     for pid in "${pids[@]}"; do
-      if kill -0 "$pid" 2>/dev/null; then
+      if pid_matches_resolved_target "$resolved_target" "$pid" && kill -0 "$pid" 2>/dev/null; then
         remaining+=("$pid")
       fi
     done
@@ -138,22 +202,74 @@ kill_matching_processes() {
   done
 
   echo "Some Tempyr processes did not exit after SIGTERM. Sending SIGKILL to: ${pids[*]}" >&2
-  kill -KILL "${pids[@]}" 2>/dev/null || true
+  for pid in "${pids[@]}"; do
+    if pid_matches_resolved_target "$resolved_target" "$pid"; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
   sleep 1
 
   remaining=()
   for pid in "${pids[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
+    if pid_matches_resolved_target "$resolved_target" "$pid" && kill -0 "$pid" 2>/dev/null; then
       remaining+=("$pid")
     fi
   done
 
   if ((${#remaining[@]} > 0)); then
     echo "Failed to stop Tempyr processes: ${remaining[*]}" >&2
-    return 1
+    return 2
   fi
 
   return 0
+}
+
+kill_matching_processes() {
+  local target="$1"
+  local -a pids
+
+  mapfile -t pids < <(find_matching_pids "$target")
+  stop_matching_processes "$target" "${pids[@]}"
+}
+
+handle_failed_process_stop() {
+  local target="$1"
+  local status="$2"
+
+  if [[ "$status" -eq 1 ]]; then
+    echo "The install target appears busy, but no matching Tempyr processes were found at $target." >&2
+    return
+  fi
+
+  echo "The install target appears busy, and matching Tempyr processes could not be stopped at $target." >&2
+}
+
+retry_lock_related_install() {
+  local target="$1"
+  local -a pids
+  local status
+
+  if [[ ! -e "$target" ]]; then
+    echo "Retrying cargo install after the lock cleared on its own..." >&2
+    run_cargo_install
+    return $?
+  fi
+
+  mapfile -t pids < <(find_matching_pids "$target")
+  if ((${#pids[@]} == 0)); then
+    echo "Retrying cargo install after the lock cleared on its own..." >&2
+    run_cargo_install
+    return $?
+  fi
+
+  stop_matching_processes "$target" "${pids[@]}" || {
+    status=$?
+    handle_failed_process_stop "$target" "$status"
+    return "$status"
+  }
+
+  echo "Retrying cargo install after stopping matching Tempyr processes..." >&2
+  run_cargo_install
 }
 
 upsert_path_block() {
@@ -197,15 +313,11 @@ ensure_path_persistence() {
   esac
 }
 
+preflight_locked_target
+
 run_cargo_install || {
-  if [[ -e "$TARGET_BIN" ]] && output_indicates_lock_error "$INSTALL_OUTPUT"; then
-    if kill_matching_processes "$TARGET_BIN"; then
-      echo "Retrying cargo install after stopping matching Tempyr processes..." >&2
-      run_cargo_install
-    else
-      echo "The install target appears busy, but no matching Tempyr processes were found at $TARGET_BIN." >&2
-      exit 1
-    fi
+  if output_indicates_lock_error "$INSTALL_OUTPUT" "$TARGET_BIN"; then
+    retry_lock_related_install "$TARGET_BIN"
   else
     exit 1
   fi
