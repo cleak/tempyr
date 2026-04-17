@@ -3,7 +3,7 @@ use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::ProjectContext;
 use anyhow::Context;
@@ -14,6 +14,7 @@ use super::managed::{self, ManagedArtifact, WriteOutcome};
 use super::onboarding::{
     self, EmbeddingProviderChoice, ExistingDocMode, ExistingDocs, OnboardingSelections,
 };
+use super::process_utils::wait_for_child_exit;
 use tempyr_core::project;
 use tempyr_index::embeddings;
 
@@ -26,7 +27,6 @@ const PRD_TEMPLATE: &str = include_str!("../../../../templates/prd.toml");
 const TDD_TEMPLATE: &str = include_str!("../../../../templates/tdd.toml");
 const TASK_PROMPT_TEMPLATE: &str = include_str!("../../../../templates/task-prompt.toml");
 const MERGE_AGENT_TIMEOUT: Duration = Duration::from_secs(30);
-const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub fn run(json_output: bool, force_wizard: bool, no_wizard: bool) -> anyhow::Result<()> {
     if json_output && force_wizard {
@@ -1064,23 +1064,6 @@ fn restore_doc_snapshots(
         fs::write(root.join(path), contents)?;
     }
     Ok(())
-}
-
-fn wait_for_child_exit(
-    child: &mut std::process::Child,
-    timeout: Duration,
-) -> std::io::Result<Option<std::process::ExitStatus>> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Ok(None);
-        }
-        thread::sleep(PROCESS_POLL_INTERVAL.min(deadline - now));
-    }
 }
 
 fn should_write_codex_config(

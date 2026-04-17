@@ -16,6 +16,7 @@ pub mod list;
 pub mod managed;
 pub mod migrate;
 pub mod onboarding;
+pub(crate) mod process_utils;
 pub mod rename;
 pub mod render_cmd;
 pub mod search;

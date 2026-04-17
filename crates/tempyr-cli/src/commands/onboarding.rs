@@ -1,7 +1,6 @@
 use std::io;
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context;
 use crossterm::event::{
@@ -18,8 +17,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
+use super::process_utils::wait_for_child_exit;
+
 const COMMAND_HELP_TIMEOUT: Duration = Duration::from_secs(2);
-const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingProviderChoice {
@@ -155,23 +155,6 @@ fn command_runs_help(program: &str) -> bool {
             let _ = child.wait();
             false
         }
-    }
-}
-
-fn wait_for_child_exit(
-    child: &mut std::process::Child,
-    timeout: Duration,
-) -> std::io::Result<Option<std::process::ExitStatus>> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Ok(None);
-        }
-        thread::sleep(PROCESS_POLL_INTERVAL.min(deadline - now));
     }
 }
 
