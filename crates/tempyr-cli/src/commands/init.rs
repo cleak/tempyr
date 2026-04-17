@@ -69,7 +69,7 @@ fn noninteractive_defaults(existing_docs: ExistingDocs) -> OnboardingSelections 
     OnboardingSelections {
         provider: EmbeddingProviderChoice::Voyage,
         api_key: None,
-        write_api_key_to_env_local: false,
+        write_api_key_for_tempyr: false,
         create_env_local_from_template: false,
         validate_provider_setup: false,
         run_index_rebuild: false,
@@ -137,11 +137,15 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
         ensure_gitignore_contains(root, ".env.local")?;
     }
 
-    if selections.write_api_key_to_env_local
+    if selections.write_api_key_for_tempyr
         && let Some(key) = selections.api_key.as_deref()
     {
-        let env_var = write_provider_api_key(root, selections.provider, key)?;
-        summary.push(format!("  .env.local           - stored {}", env_var));
+        let (env_var, path) = write_provider_api_key(root, selections.provider, key)?;
+        summary.push(format!(
+            "  {:<20} - stored {}",
+            display_api_key_target(root, &path),
+            env_var
+        ));
     }
 
     let claude_artifacts = selected_claude_artifacts(selections);
@@ -342,13 +346,13 @@ fn render_config(provider: EmbeddingProviderChoice) -> String {
             "voyage",
             "voyage-4",
             1024,
-            "# API key: set VOYAGE_API_KEY in .env.local or your shell environment",
+            "# API key: set VOYAGE_API_KEY in Tempyr's shared worktree env, .env.local, or your shell environment",
         ),
         EmbeddingProviderChoice::Gemini => (
             "gemini",
             "gemini-embedding-001",
             768,
-            "# API key: set GEMINI_API_KEY in .env.local or your shell environment",
+            "# API key: set GEMINI_API_KEY in Tempyr's shared worktree env, .env.local, or your shell environment",
         ),
         EmbeddingProviderChoice::Local => (
             "local",
@@ -431,14 +435,35 @@ fn write_provider_api_key(
     root: &Path,
     provider: EmbeddingProviderChoice,
     key: &str,
-) -> anyhow::Result<&'static str> {
+) -> anyhow::Result<(&'static str, PathBuf)> {
     let env_var = provider
         .env_var()
         .ok_or_else(|| anyhow::anyhow!("Selected provider does not use an API key"))?;
     embeddings::validate_api_key_value(env_var, key)?;
-    upsert_env_var(&root.join(".env.local"), env_var, key)?;
-    ensure_gitignore_contains(root, ".env.local")?;
-    Ok(env_var)
+    let path = provider_api_key_path(root);
+    upsert_env_var(&path, env_var, key)?;
+    if path == root.join(".env.local") {
+        ensure_gitignore_contains(root, ".env.local")?;
+    }
+    Ok((env_var, path))
+}
+
+fn provider_api_key_path(root: &Path) -> PathBuf {
+    project::shared_env_root(root)
+        .unwrap_or_else(|| root.to_path_buf())
+        .join(".env.local")
+}
+
+fn display_api_key_target(root: &Path, path: &Path) -> String {
+    if path == root.join(".env.local") {
+        ".env.local".to_string()
+    } else if let Some(shared_root) = project::shared_env_root(root)
+        && path == shared_root.join(".env.local")
+    {
+        "<git-common-dir>/tempyr/.env.local".to_string()
+    } else {
+        path.display().to_string()
+    }
 }
 
 fn ensure_gitignore_contains(root: &Path, entry: &str) -> anyhow::Result<()> {
@@ -520,6 +545,7 @@ tempyr --mcp
 
 - Prefer a project-level `.mcp.json` in the repo root so the MCP config is shared and follows each Git worktree.
 - Use relative paths in project `.mcp.json` entries. Anthropic documents relative paths for project-scoped `.mcp.json` and absolute paths for user-level `~/.claude.json`.
+- For hosted embedding keys shared across worktrees, prefer Tempyr's shared Git-common-dir env file at `<git-common-dir>/tempyr/.env.local`. Tempyr loads that automatically without committing it.
 - If `tempyr` is already on `PATH`, use a minimal project config like:
 
 ```json
@@ -543,6 +569,7 @@ tempyr --mcp
 
 - Prefer a project-scoped `.codex/config.toml` entry instead of a user-level `~/.codex/config.toml` entry when you want MCP to follow Git worktrees.
 - In that project config, set `cwd = ".."` so the MCP server starts from the repo root even though `.codex/config.toml` lives under `.codex/`.
+- For hosted embedding keys shared across worktrees, prefer Tempyr's shared Git-common-dir env file at `<git-common-dir>/tempyr/.env.local`. Tempyr loads that automatically without committing it.
 - Example:
 
 ```toml
@@ -678,6 +705,7 @@ fn render_follow_up_body(docs: &[DocSpec], mode: FollowUpMode) -> String {
             body.push_str("Suggested Claude Code launch pattern:\n");
             body.push_str("- Keep Tempyr in a project-level `.mcp.json` at the repo root so the MCP config is shared and follows Git worktrees.\n");
             body.push_str("- Prefer relative paths in that `.mcp.json`; keep user-level `~/.claude.json` entries for personal servers, not worktree-local Tempyr config.\n");
+            body.push_str("- For hosted embedding keys shared across worktrees, prefer Tempyr's shared Git-common-dir env file at `<git-common-dir>/tempyr/.env.local`; Tempyr loads it automatically.\n");
             body.push_str("- If `tempyr` is not reliably on `PATH`, use a repo-relative launcher script that derives `TEMPYR_PROJECT_ROOT` from its own location before execing `tempyr --mcp`.\n");
             body.push_str("- Add `.env` and `.env.local` to `.worktreeinclude` when Tempyr needs provider credentials inside Claude-created worktrees.\n");
             body.push_str("- Use `--permission-mode acceptEdits`.\n");
@@ -689,6 +717,7 @@ fn render_follow_up_body(docs: &[DocSpec], mode: FollowUpMode) -> String {
             body.push_str("Suggested Codex setup notes:\n");
             body.push_str("- Use project-scoped `.codex/config.toml` with `sandbox_mode`, `approval_policy`, and `sandbox_workspace_write.writable_roots` tuned to the doc files you want updated.\n");
             body.push_str("- For Tempyr MCP in that project config, set `cwd = \"..\"` so Codex launches `tempyr --mcp` from the repo root while keeping the config worktree-portable.\n");
+            body.push_str("- For hosted embedding keys shared across worktrees, prefer Tempyr's shared Git-common-dir env file at `<git-common-dir>/tempyr/.env.local`; Tempyr loads it automatically.\n");
             body.push_str("- Avoid an absolute MCP `cwd` in shared or user-level config if you want the same setup to follow Git worktrees cleanly.\n");
             body.push_str("- OpenAI's docs note that repo-local `.codex` and `.agents` paths remain protected inside default writable roots, so Tempyr installs supporting skill files directly and limits Codex handoff to markdown docs.\n");
             body.push_str("- After opening Codex in the repo, point it at this file and ask it to merge the snippets below.\n\n");
@@ -1282,6 +1311,63 @@ mod tests {
         let detail = summarize_process_output(b"stdout detail", "stderr detail".as_bytes());
 
         assert_eq!(detail, "stderr detail");
+    }
+
+    #[test]
+    fn write_provider_api_key_prefers_shared_git_env_when_available() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        let (env_var, path) =
+            write_provider_api_key(tmp.path(), EmbeddingProviderChoice::Voyage, "pa-valid-key")
+                .unwrap();
+
+        assert_eq!(env_var, "VOYAGE_API_KEY");
+        assert_eq!(
+            path,
+            fs::canonicalize(tmp.path().join(".git").join("tempyr").join(".env.local")).unwrap()
+        );
+        assert!(
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("VOYAGE_API_KEY=pa-valid-key")
+        );
+        assert!(!tmp.path().join(".env.local").exists());
+    }
+
+    #[test]
+    fn write_provider_api_key_uses_git_common_dir_for_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let worktree = tmp.path().join("wt");
+        let common = repo.join(".git");
+        let private = common.join("worktrees").join("feature");
+
+        fs::create_dir_all(&private).unwrap();
+        fs::create_dir(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", private.display()),
+        )
+        .unwrap();
+        fs::write(private.join("commondir"), "../..\n").unwrap();
+
+        let (env_var, path) =
+            write_provider_api_key(&worktree, EmbeddingProviderChoice::Voyage, "pa-valid-key")
+                .unwrap();
+
+        assert_eq!(env_var, "VOYAGE_API_KEY");
+        assert_eq!(
+            path,
+            fs::canonicalize(common.join("tempyr").join(".env.local")).unwrap()
+        );
+        assert!(
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("VOYAGE_API_KEY=pa-valid-key")
+        );
+        assert!(!worktree.join(".env.local").exists());
+        assert!(!private.join("tempyr").join(".env.local").exists());
     }
 
     #[test]

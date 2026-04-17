@@ -191,7 +191,7 @@ impl ExistingDocs {
 pub struct OnboardingSelections {
     pub provider: EmbeddingProviderChoice,
     pub api_key: Option<String>,
-    pub write_api_key_to_env_local: bool,
+    pub write_api_key_for_tempyr: bool,
     pub create_env_local_from_template: bool,
     pub validate_provider_setup: bool,
     pub run_index_rebuild: bool,
@@ -211,7 +211,7 @@ impl OnboardingSelections {
         Self {
             provider: EmbeddingProviderChoice::Voyage,
             api_key: None,
-            write_api_key_to_env_local: true,
+            write_api_key_for_tempyr: true,
             create_env_local_from_template: true,
             validate_provider_setup: true,
             run_index_rebuild: false,
@@ -326,7 +326,7 @@ impl WizardState {
     }
 
     fn should_show_api_key_page(&self) -> bool {
-        self.selections.provider.needs_api_key() && self.selections.write_api_key_to_env_local
+        self.selections.provider.needs_api_key() && self.selections.write_api_key_for_tempyr
     }
 
     fn selected_existing_docs(&self) -> bool {
@@ -498,10 +498,10 @@ fn update_provider(state: &mut WizardState, provider: EmbeddingProviderChoice) {
     state.selections.provider = provider;
     if provider.needs_api_key() {
         if !previous.needs_api_key() {
-            state.selections.write_api_key_to_env_local = true;
+            state.selections.write_api_key_for_tempyr = true;
         }
     } else {
-        state.selections.write_api_key_to_env_local = false;
+        state.selections.write_api_key_for_tempyr = false;
     }
     state.core_index = state
         .core_index
@@ -511,9 +511,8 @@ fn update_provider(state: &mut WizardState, provider: EmbeddingProviderChoice) {
 fn toggle_core_option(state: &mut WizardState) {
     match core_options(state).get(state.core_index).copied() {
         Some(CoreOption::StoreApiKey) => {
-            state.selections.write_api_key_to_env_local =
-                !state.selections.write_api_key_to_env_local;
-            if !state.selections.write_api_key_to_env_local {
+            state.selections.write_api_key_for_tempyr = !state.selections.write_api_key_for_tempyr;
+            if !state.selections.write_api_key_for_tempyr {
                 state.api_key_input.clear();
                 state.selections.api_key = None;
             }
@@ -646,7 +645,9 @@ fn current_header(state: &WizardState) -> Vec<Line<'static>> {
                 "Enter a real {} now.",
                 state.selections.provider.env_var().unwrap_or("the API key")
             )),
-            Line::from("Tempyr validates it as you type and only stores it if you continue."),
+            Line::from(
+                "Tempyr validates it as you type and stores it in Tempyr's shared worktree env when available, falling back to .env.local.",
+            ),
         ],
         Page::AgentIntegrations => vec![
             Line::from("Toggle the agent integrations you want Tempyr to scaffold."),
@@ -816,9 +817,12 @@ fn render_api_key(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardStat
     let intro = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(env_var, Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" will be written to "),
+            Span::raw(" will be written to Tempyr's shared worktree env when Git is available,"),
+        ]),
+        Line::from(vec![
+            Span::raw("falling back to "),
             Span::styled(".env.local", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" when this page is valid."),
+            Span::raw(" otherwise."),
         ]),
         Line::from(""),
         Line::from("Paste the key here, or go back and disable secret storage for this provider."),
@@ -1035,8 +1039,8 @@ fn render_review(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardState
             ),
             Span::raw(enabled_list(&[
                 (
-                    "write key",
-                    state.selections.write_api_key_to_env_local
+                    "store key",
+                    state.selections.write_api_key_for_tempyr
                         && state.selections.provider.needs_api_key(),
                 ),
                 (
@@ -1130,7 +1134,7 @@ fn core_options(state: &WizardState) -> Vec<CoreOption> {
 
 fn core_option_enabled(state: &WizardState, option: CoreOption) -> bool {
     match option {
-        CoreOption::StoreApiKey => state.selections.write_api_key_to_env_local,
+        CoreOption::StoreApiKey => state.selections.write_api_key_for_tempyr,
         CoreOption::CreateEnvLocal => state.selections.create_env_local_from_template,
         CoreOption::ValidateProvider => state.selections.validate_provider_setup,
         CoreOption::RunIndexRebuild => state.selections.run_index_rebuild,
@@ -1140,7 +1144,7 @@ fn core_option_enabled(state: &WizardState, option: CoreOption) -> bool {
 
 fn core_option_label(option: CoreOption) -> String {
     match option {
-        CoreOption::StoreApiKey => "Store API key in .env.local".to_string(),
+        CoreOption::StoreApiKey => "Store API key for Tempyr".to_string(),
         CoreOption::CreateEnvLocal => "Create .env.local from template if missing".to_string(),
         CoreOption::ValidateProvider => "Validate provider setup now".to_string(),
         CoreOption::RunIndexRebuild => "Run initial index rebuild after setup".to_string(),
@@ -1170,7 +1174,7 @@ fn core_option_detail_lines(state: &WizardState, option: CoreOption) -> Vec<Line
             ]),
             Line::from(""),
             Line::from(
-                "If enabled, Tempyr opens a dedicated input screen and writes the validated key to .env.local.",
+                "If enabled, Tempyr opens a dedicated input screen and writes the validated key to Tempyr's shared worktree env when Git is available, falling back to .env.local.",
             ),
             Line::from(
                 "Disable this if you want to keep the secret in your shell environment instead.",
