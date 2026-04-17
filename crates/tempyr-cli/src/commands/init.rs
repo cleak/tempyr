@@ -504,13 +504,43 @@ tempyr --mcp
 
 ## Claude Code
 
-- Prefer running Claude from the repo root.
-- Use project-level MCP configuration or a launch-time `--mcp-config` entry that starts `tempyr --mcp`.
+- Prefer a project-level `.mcp.json` in the repo root so the MCP config is shared and follows each Git worktree.
+- Use relative paths in project `.mcp.json` entries. Anthropic documents relative paths for project-scoped `.mcp.json` and absolute paths for user-level `~/.claude.json`.
+- If `tempyr` is already on `PATH`, use a minimal project config like:
+
+```json
+{
+  "mcpServers": {
+    "tempyr": {
+      "command": "tempyr",
+      "args": ["--mcp"],
+      "env": {}
+    }
+  }
+}
+```
+
+- If `tempyr` is not reliably on `PATH`, or you want deterministic worktree-local project discovery regardless of subprocess launch details, point `.mcp.json` at a repo-relative launcher script that sets `TEMPYR_PROJECT_ROOT` from its own location before execing `tempyr --mcp`.
+- If Tempyr needs repo-local `.env` or `.env.local` files, add them to `.worktreeinclude` so Claude-created worktrees copy those gitignored files.
+- Keep Claude approval choices and other machine-specific trust settings local instead of checking them into the repo.
 - If you want Claude to merge existing instruction docs, prefer `--permission-mode acceptEdits` with narrow `Edit(...)` tool rules for the target markdown files.
 
 ## Codex
 
-- Configure a project MCP server entry that starts `tempyr --mcp`.
+- Prefer a project-scoped `.codex/config.toml` entry instead of a user-level `~/.codex/config.toml` entry when you want MCP to follow Git worktrees.
+- In that project config, set `cwd = ".."` so the MCP server starts from the repo root even though `.codex/config.toml` lives under `.codex/`.
+- Example:
+
+```toml
+[mcp_servers.tempyr]
+command = "tempyr"
+args = ["--mcp"]
+cwd = ".."
+startup_timeout_sec = 5
+```
+
+- Avoid an absolute `cwd` in shared or user-level config if you want the same checked-in config to work across multiple worktrees.
+- Use `TEMPYR_PROJECT_ROOT` (or `TEMPYR_GRAPH_DIR`) only as a fallback escape hatch when the MCP client cannot launch the server from the correct working directory.
 - If you want Codex to update existing instruction docs, use project config with narrow writable roots for those markdown files.
 - Repo-local `.codex` and `.agents` paths can remain protected even when writable roots are restricted, so Tempyr installs supporting assets directly and limits merge handoffs to markdown docs.
 "#;
@@ -622,14 +652,20 @@ fn render_follow_up_body(docs: &[DocSpec], mode: FollowUpMode) -> String {
         }
         FollowUpMode::ClaudeCode => {
             body.push_str("Suggested Claude Code launch pattern:\n");
-            body.push_str("- Run Claude from the repo root.\n");
+            body.push_str("- Keep Tempyr in a project-level `.mcp.json` at the repo root so the MCP config is shared and follows Git worktrees.\n");
+            body.push_str("- Prefer relative paths in that `.mcp.json`; keep user-level `~/.claude.json` entries for personal servers, not worktree-local Tempyr config.\n");
+            body.push_str("- If `tempyr` is not reliably on `PATH`, use a repo-relative launcher script that derives `TEMPYR_PROJECT_ROOT` from its own location before execing `tempyr --mcp`.\n");
+            body.push_str("- Add `.env` and `.env.local` to `.worktreeinclude` when Tempyr needs provider credentials inside Claude-created worktrees.\n");
             body.push_str("- Use `--permission-mode acceptEdits`.\n");
             body.push_str("- Prefer `--allowedTools Read,Grep,Glob,Edit(/CLAUDE.md),Edit(/AGENTS.md)` to narrow writes to the instruction docs you want merged.\n");
+            body.push_str("- Keep approval choices local instead of checking shared allowlists into the repo.\n");
             body.push_str("- Supporting `.claude` hooks/skills were installed directly by Tempyr because protected directories can still prompt.\n\n");
         }
         FollowUpMode::Codex => {
             body.push_str("Suggested Codex setup notes:\n");
             body.push_str("- Use project-scoped `.codex/config.toml` with `sandbox_mode`, `approval_policy`, and `sandbox_workspace_write.writable_roots` tuned to the doc files you want updated.\n");
+            body.push_str("- For Tempyr MCP in that project config, set `cwd = \"..\"` so Codex launches `tempyr --mcp` from the repo root while keeping the config worktree-portable.\n");
+            body.push_str("- Avoid an absolute MCP `cwd` in shared or user-level config if you want the same setup to follow Git worktrees cleanly.\n");
             body.push_str("- OpenAI's docs note that repo-local `.codex` and `.agents` paths remain protected inside default writable roots, so Tempyr installs supporting skill files directly and limits Codex handoff to markdown docs.\n");
             body.push_str("- After opening Codex in the repo, point it at this file and ask it to merge the snippets below.\n\n");
         }

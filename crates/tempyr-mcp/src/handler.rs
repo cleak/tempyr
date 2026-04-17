@@ -252,7 +252,15 @@ fn default_confidence() -> f64 {
 
 fn find_project() -> Result<(PathBuf, PathBuf, Schema), String> {
     let root = tempyr_core::project::find_project_root().ok_or_else(|| {
-        "Not a tempyr project (no .tempyr/ or .tempyr-redirect found)".to_string()
+        let cwd = std::env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "<unknown>".to_string());
+        format!(
+            "Not a tempyr project from server cwd {cwd} (no .tempyr/ or .tempyr-redirect found). \
+Set {} or {} if your MCP client launches tempyr from a different workspace.",
+            tempyr_core::project::PROJECT_ROOT_ENV_VAR,
+            tempyr_core::project::GRAPH_DIR_ENV_VAR,
+        )
     })?;
     let gf_dir = root.join(".tempyr");
     let schema_path = gf_dir.join("schema.toml");
