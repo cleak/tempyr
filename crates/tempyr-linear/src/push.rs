@@ -9,7 +9,7 @@ use tempyr_index::indexer::Index;
 use crate::client::LinearClient;
 use crate::config::LinearConfig;
 use crate::context::{build_attachments, build_issue_description};
-use crate::mapping::{node_title, StatusMapper};
+use crate::mapping::{StatusMapper, node_title};
 use crate::queries::*;
 use crate::state::{SyncEntry, SyncState};
 use crate::{LinearError, Result};
@@ -70,7 +70,17 @@ pub async fn push_all(
 
     // Push features (as top-level issues)
     for node in &features {
-        match push_feature(client, node, graph, index, schema, config, state, status_mapper).await
+        match push_feature(
+            client,
+            node,
+            graph,
+            index,
+            schema,
+            config,
+            state,
+            status_mapper,
+        )
+        .await
         {
             Ok(Some(entry)) => match entry.action {
                 PushAction::Created => result.created.push(entry),
@@ -83,7 +93,18 @@ pub async fn push_all(
 
     // Push tasks (as sub-issues)
     for node in &tasks {
-        match push_task(client, node, graph, index, schema, config, state, status_mapper).await {
+        match push_task(
+            client,
+            node,
+            graph,
+            index,
+            schema,
+            config,
+            state,
+            status_mapper,
+        )
+        .await
+        {
             Ok(Some(entry)) => match entry.action {
                 PushAction::Created => result.created.push(entry),
                 PushAction::Updated => result.updated.push(entry),
@@ -110,12 +131,30 @@ pub async fn push_node(
 ) -> Result<PushEntry> {
     match node.node_type() {
         "epic" => push_epic(client, node, graph, schema, config, state, status_mapper).await,
-        "feature" => push_feature(client, node, graph, index, schema, config, state, status_mapper)
-            .await?
-            .ok_or_else(|| LinearError::NotLinked(node.id().to_string())),
-        "task" => push_task(client, node, graph, index, schema, config, state, status_mapper)
-            .await?
-            .ok_or_else(|| LinearError::NotLinked(node.id().to_string())),
+        "feature" => push_feature(
+            client,
+            node,
+            graph,
+            index,
+            schema,
+            config,
+            state,
+            status_mapper,
+        )
+        .await?
+        .ok_or_else(|| LinearError::NotLinked(node.id().to_string())),
+        "task" => push_task(
+            client,
+            node,
+            graph,
+            index,
+            schema,
+            config,
+            state,
+            status_mapper,
+        )
+        .await?
+        .ok_or_else(|| LinearError::NotLinked(node.id().to_string())),
         other => Err(LinearError::Config(format!(
             "Node type '{other}' is not syncable to Linear"
         ))),
@@ -313,11 +352,9 @@ async fn push_issue(
     let description = build_issue_description(node, graph, schema);
     let now = Utc::now();
 
-    let state_id = node
-        .status()
-        .and_then(|s| {
-            status_mapper.to_linear_state_id(node.node_type(), s, &config.status_overrides)
-        });
+    let state_id = node.status().and_then(|s| {
+        status_mapper.to_linear_state_id(node.node_type(), s, &config.status_overrides)
+    });
 
     if let Some(existing) = state.get_by_node_id(node.id()) {
         // Skip if no changes
@@ -388,10 +425,7 @@ async fn push_issue(
         }
 
         let data: IssueCreateData = client
-            .execute(
-                ISSUE_CREATE_MUTATION,
-                json!({ "input": input }),
-            )
+            .execute(ISSUE_CREATE_MUTATION, json!({ "input": input }))
             .await?;
 
         let issue = data
@@ -470,10 +504,7 @@ async fn sync_attachments(
     // Delete old attachments
     for att_id in &existing.attachment_ids {
         let _ = client
-            .execute::<AttachmentDeleteData>(
-                ATTACHMENT_DELETE_MUTATION,
-                json!({ "id": att_id }),
-            )
+            .execute::<AttachmentDeleteData>(ATTACHMENT_DELETE_MUTATION, json!({ "id": att_id }))
             .await;
         // Ignore errors — attachment may already be deleted
     }
@@ -497,29 +528,27 @@ fn find_parent_linear_id(
         }
         if let Some(parent) = graph.get_node(&edge.target)
             && parent.node_type() == parent_type
-                && let Some(entry) = state.get_by_node_id(parent.id()) {
-                    return Some(entry.linear_id.clone());
-                }
+            && let Some(entry) = state.get_by_node_id(parent.id())
+        {
+            return Some(entry.linear_id.clone());
+        }
     }
     None
 }
 
 /// Walk up two levels: node → feature (child_of) → epic (child_of) → project ID.
-fn find_grandparent_project_id(
-    node: &Node,
-    graph: &Graph,
-    state: &SyncState,
-) -> Option<String> {
+fn find_grandparent_project_id(node: &Node, graph: &Graph, state: &SyncState) -> Option<String> {
     // Find parent feature
     for edge in node.edges() {
         if edge.edge_type != "child_of" {
             continue;
         }
         if let Some(parent) = graph.get_node(&edge.target)
-            && parent.node_type() == "feature" {
-                // Find grandparent epic
-                return find_parent_linear_id(parent, graph, state, "epic");
-            }
+            && parent.node_type() == "feature"
+        {
+            // Find grandparent epic
+            return find_parent_linear_id(parent, graph, state, "epic");
+        }
     }
     None
 }

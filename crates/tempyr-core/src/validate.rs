@@ -89,18 +89,18 @@ pub fn validate_node(node: &Node, schema: &Schema) -> Vec<ValidationIssue> {
     // Check status is valid
     if let Some(status) = node.status()
         && !node_def.allowed_statuses.is_empty()
-            && !node_def.allowed_statuses.contains(&status.to_string())
-        {
-            issues.push(ValidationIssue {
-                severity: Severity::Error,
-                kind: ValidationKind::InvalidStatus,
-                node_id: node.id().to_string(),
-                message: format!(
-                    "Invalid status '{}'. Allowed: {:?}",
-                    status, node_def.allowed_statuses
-                ),
-            });
-        }
+        && !node_def.allowed_statuses.contains(&status.to_string())
+    {
+        issues.push(ValidationIssue {
+            severity: Severity::Error,
+            kind: ValidationKind::InvalidStatus,
+            node_id: node.id().to_string(),
+            message: format!(
+                "Invalid status '{}'. Allowed: {:?}",
+                status, node_def.allowed_statuses
+            ),
+        });
+    }
 
     issues
 }
@@ -126,11 +126,11 @@ fn validate_edges(node: &Node, graph: &Graph) -> Vec<ValidationIssue> {
 
         // Check edge type is allowed
         let target_node = graph.get_node(&edge.target).unwrap();
-        if graph.schema.validate_edge(
-            node.node_type(),
-            &edge.edge_type,
-            target_node.node_type(),
-        ).is_err() {
+        if graph
+            .schema
+            .validate_edge(node.node_type(), &edge.edge_type, target_node.node_type())
+            .is_err()
+        {
             issues.push(ValidationIssue {
                 severity: Severity::Error,
                 kind: ValidationKind::InvalidEdgeType,
@@ -167,9 +167,10 @@ pub fn validate_bidirectional_edges(graph: &Graph) -> Vec<ValidationIssue> {
             };
 
             // Check that target has reverse edge pointing back to source
-            let has_reverse = target_node.edges().iter().any(|e| {
-                e.target == node.id() && e.edge_type == reverse_type
-            });
+            let has_reverse = target_node
+                .edges()
+                .iter()
+                .any(|e| e.target == node.id() && e.edge_type == reverse_type);
 
             if !has_reverse {
                 issues.push(ValidationIssue {
@@ -222,7 +223,10 @@ mod tests {
         graph.add_node(parse_node(feat, PathBuf::from("feat.md")).unwrap());
 
         let issues = validate_graph(&graph);
-        let errors: Vec<_> = issues.iter().filter(|i| i.severity == Severity::Error).collect();
+        let errors: Vec<_> = issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .collect();
         assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
 
@@ -234,7 +238,11 @@ mod tests {
         graph.add_node(parse_node(node, PathBuf::from("feat.md")).unwrap());
 
         let issues = validate_graph(&graph);
-        assert!(issues.iter().any(|i| i.kind == ValidationKind::DanglingEdge));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.kind == ValidationKind::DanglingEdge)
+        );
     }
 
     #[test]
@@ -249,7 +257,11 @@ mod tests {
         graph.add_node(parse_node(epic, PathBuf::from("epic.md")).unwrap());
 
         let issues = validate_graph(&graph);
-        assert!(issues.iter().any(|i| i.kind == ValidationKind::MissingReverseEdge));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.kind == ValidationKind::MissingReverseEdge)
+        );
     }
 
     #[test]
@@ -274,7 +286,11 @@ mod tests {
         graph.add_node(parse_node(node, PathBuf::from("feat.md")).unwrap());
 
         let issues = validate_graph(&graph);
-        assert!(issues.iter().any(|i| i.kind == ValidationKind::InvalidStatus));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.kind == ValidationKind::InvalidStatus)
+        );
     }
 
     #[test]
@@ -285,7 +301,11 @@ mod tests {
         graph.add_node(parse_node(node, PathBuf::from("thing.md")).unwrap());
 
         let issues = validate_graph(&graph);
-        assert!(issues.iter().any(|i| i.kind == ValidationKind::InvalidNodeType));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.kind == ValidationKind::InvalidNodeType)
+        );
     }
 
     #[test]
@@ -297,7 +317,10 @@ mod tests {
         graph.add_node(parse_node(node, PathBuf::from("p.md")).unwrap());
 
         let issues = validate_graph(&graph);
-        let errors: Vec<_> = issues.iter().filter(|i| i.severity == Severity::Error).collect();
+        let errors: Vec<_> = issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .collect();
         assert!(errors.is_empty());
     }
 }

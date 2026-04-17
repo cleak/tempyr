@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::edge::EdgeEntry;
-use crate::{TempyrError, Result};
+use crate::{Result, TempyrError};
 
 /// The YAML frontmatter of a graph node file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,8 +66,8 @@ impl Node {
 pub fn parse_node(content: &str, file_path: PathBuf) -> Result<Node> {
     let (frontmatter_str, body) = split_frontmatter(content)?;
 
-    let frontmatter: NodeFrontmatter = serde_yml::from_str(frontmatter_str)
-        .map_err(|e| TempyrError::Yaml(e.to_string()))?;
+    let frontmatter: NodeFrontmatter =
+        serde_yml::from_str(frontmatter_str).map_err(|e| TempyrError::Yaml(e.to_string()))?;
 
     let content_hash = blake3::hash(body.as_bytes()).to_hex().to_string();
 
@@ -81,8 +81,8 @@ pub fn parse_node(content: &str, file_path: PathBuf) -> Result<Node> {
 
 /// Serialize a node back to its file format (YAML frontmatter + markdown body).
 pub fn serialize_node(node: &Node) -> Result<String> {
-    let yaml = serde_yml::to_string(&node.frontmatter)
-        .map_err(|e| TempyrError::Yaml(e.to_string()))?;
+    let yaml =
+        serde_yml::to_string(&node.frontmatter).map_err(|e| TempyrError::Yaml(e.to_string()))?;
 
     Ok(format!("---\n{}---\n{}", yaml, node.body))
 }
@@ -108,9 +108,9 @@ fn split_frontmatter(content: &str) -> Result<(&str, &str)> {
     let frontmatter = &after_first[..closing];
     let rest = &after_first[closing + 4..]; // skip \n---
     // Skip the newline after ---
-    let body = rest.strip_prefix('\n').unwrap_or(
-        rest.strip_prefix("\r\n").unwrap_or(rest),
-    );
+    let body = rest
+        .strip_prefix('\n')
+        .unwrap_or(rest.strip_prefix("\r\n").unwrap_or(rest));
 
     Ok((frontmatter, body))
 }
@@ -149,7 +149,11 @@ Platform engineers currently debug funnel drop-offs by reading logs.
 
     #[test]
     fn test_parse_node_basic() {
-        let node = parse_node(sample_node_content(), PathBuf::from("graph/features/feat-session-replay.md")).unwrap();
+        let node = parse_node(
+            sample_node_content(),
+            PathBuf::from("graph/features/feat-session-replay.md"),
+        )
+        .unwrap();
 
         assert_eq!(node.id(), "feat-session-replay");
         assert_eq!(node.node_type(), "feature");
@@ -198,10 +202,21 @@ Platform engineers currently debug funnel drop-offs by reading logs.
         let reparsed = parse_node(&serialized, PathBuf::from("test.md")).unwrap();
 
         assert_eq!(original.frontmatter.id, reparsed.frontmatter.id);
-        assert_eq!(original.frontmatter.node_type, reparsed.frontmatter.node_type);
+        assert_eq!(
+            original.frontmatter.node_type,
+            reparsed.frontmatter.node_type
+        );
         assert_eq!(original.frontmatter.status, reparsed.frontmatter.status);
-        assert_eq!(original.frontmatter.edges.len(), reparsed.frontmatter.edges.len());
-        for (a, b) in original.frontmatter.edges.iter().zip(reparsed.frontmatter.edges.iter()) {
+        assert_eq!(
+            original.frontmatter.edges.len(),
+            reparsed.frontmatter.edges.len()
+        );
+        for (a, b) in original
+            .frontmatter
+            .edges
+            .iter()
+            .zip(reparsed.frontmatter.edges.iter())
+        {
             assert_eq!(a.target, b.target);
             assert_eq!(a.edge_type, b.edge_type);
             assert_eq!(a.valid_from, b.valid_from);

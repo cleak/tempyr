@@ -1,5 +1,5 @@
-use crate::indexer::Index;
 use crate::Result;
+use crate::indexer::Index;
 
 /// A search result from the FTS5 index.
 #[derive(Debug, Clone)]

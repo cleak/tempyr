@@ -3,10 +3,10 @@ use std::path::Path;
 
 use walkdir::WalkDir;
 
+use crate::Result;
 use crate::edge::EdgeEntry;
 use crate::node::{Node, parse_node};
 use crate::schema::Schema;
-use crate::Result;
 
 /// In-memory representation of the full knowledge graph.
 #[derive(Debug)]
@@ -158,11 +158,13 @@ mod tests {
         std::fs::write(
             features_dir.join("feat-a.md"),
             "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: test\n---\n# Feat A\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(
             features_dir.join("feat-b.md"),
             "---\nid: feat-b\ntype: feature\nstatus: active\nowner: test\n---\n# Feat B\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let schema = make_test_schema();
         let graph = Graph::load_from_directory(&graph_dir, schema).unwrap();
@@ -177,7 +179,10 @@ mod tests {
         let schema = make_test_schema();
         let mut graph = Graph::new(schema);
 
-        let node_a = make_feature_node("feat-a", "  - target: feat-b\n    type: depends_on\n  - target: feat-c\n    type: depends_on\n");
+        let node_a = make_feature_node(
+            "feat-a",
+            "  - target: feat-b\n    type: depends_on\n  - target: feat-c\n    type: depends_on\n",
+        );
         let node_b = make_feature_node("feat-b", "");
         let node_c = make_feature_node("feat-c", "");
 

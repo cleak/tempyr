@@ -6,12 +6,12 @@ use serde_json::json;
 use tempyr_core::ops;
 use tempyr_core::schema::Schema;
 
+use crate::Result;
 use crate::client::LinearClient;
 use crate::config::LinearConfig;
-use crate::mapping::{slugify, StatusMapper};
+use crate::mapping::{StatusMapper, slugify};
 use crate::queries::*;
 use crate::state::{SyncEntry, SyncState};
-use crate::Result;
 
 /// Result of a pull operation.
 #[derive(Debug, Default)]
@@ -129,9 +129,10 @@ pub async fn pull(
                             result.updated.push(entry.node_id.clone());
                         }
                         Err(e) => {
-                            result
-                                .errors
-                                .push((entry.node_id.clone(), format!("Status update failed: {e}")));
+                            result.errors.push((
+                                entry.node_id.clone(),
+                                format!("Status update failed: {e}"),
+                            ));
                         }
                     }
                 }
@@ -177,20 +178,28 @@ pub async fn pull(
                 issue.identifier
             );
 
-            match ops::create_node_file(graph_dir, &node_id, node_type, Some(&status), None, None, &body)
-            {
+            match ops::create_node_file(
+                graph_dir,
+                &node_id,
+                node_type,
+                Some(&status),
+                None,
+                None,
+                &body,
+            ) {
                 Ok(_path) => {
                     // Wire parent edge if applicable
                     if let Some(parent_ref) = &issue.parent
-                        && let Some(parent_entry) = state.get_by_linear_id(&parent_ref.id) {
-                            let _ = ops::add_edge(
-                                graph_dir,
-                                &node_id,
-                                &parent_entry.node_id,
-                                "child_of",
-                                schema,
-                            );
-                        }
+                        && let Some(parent_entry) = state.get_by_linear_id(&parent_ref.id)
+                    {
+                        let _ = ops::add_edge(
+                            graph_dir,
+                            &node_id,
+                            &parent_entry.node_id,
+                            "child_of",
+                            schema,
+                        );
+                    }
 
                     let content_hash = blake3::hash(body.as_bytes()).to_hex().to_string();
                     state.upsert(SyncEntry {
@@ -247,14 +256,16 @@ fn read_current_status(graph_dir: &Path, node_id: &str) -> Option<String> {
 fn should_import_new_issue(issue: &Issue, state: &SyncState) -> bool {
     // Import if parent issue is tracked
     if let Some(parent_ref) = &issue.parent
-        && state.get_by_linear_id(&parent_ref.id).is_some() {
-            return true;
-        }
+        && state.get_by_linear_id(&parent_ref.id).is_some()
+    {
+        return true;
+    }
     // Import if project is tracked (maps to an epic)
     if let Some(project_ref) = &issue.project
-        && state.get_by_linear_id(&project_ref.id).is_some() {
-            return true;
-        }
+        && state.get_by_linear_id(&project_ref.id).is_some()
+    {
+        return true;
+    }
     false
 }
 

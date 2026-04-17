@@ -34,12 +34,15 @@ pub fn run(
 ) -> anyhow::Result<()> {
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
 
-    let task = graph.get_node(task_id).ok_or_else(|| {
-        anyhow::anyhow!("Task not found: '{task_id}'")
-    })?;
+    let task = graph
+        .get_node(task_id)
+        .ok_or_else(|| anyhow::anyhow!("Task not found: '{task_id}'"))?;
 
     if task.node_type() != "task" {
-        anyhow::bail!("Node '{task_id}' is type '{}', not 'task'", task.node_type());
+        anyhow::bail!(
+            "Node '{task_id}' is type '{}', not 'task'",
+            task.node_type()
+        );
     }
 
     let filter = TemporalFilter::current();
@@ -59,7 +62,12 @@ pub fn run(
     Ok(())
 }
 
-fn build_prompt(graph: &Graph, task: &Node, _target: DispatchTarget, filter: &TemporalFilter) -> String {
+fn build_prompt(
+    graph: &Graph,
+    task: &Node,
+    _target: DispatchTarget,
+    filter: &TemporalFilter,
+) -> String {
     let mut out = String::new();
     let parent_features = collect_by_edge(graph, task, "child_of", Some("feature"), filter);
     let decisions = collect_decisions(graph, &parent_features, filter);
@@ -85,7 +93,9 @@ fn build_prompt(graph: &Graph, task: &Node, _target: DispatchTarget, filter: &Te
 
     // ── 2. Directive ─────────────────────────────────────────
     let deliverables = extract_body_section(&task.body, "Deliverables");
-    let deliverable_count = deliverables.as_ref().map_or(0, |d| d.lines().filter(|l| l.starts_with("- ")).count());
+    let deliverable_count = deliverables
+        .as_ref()
+        .map_or(0, |d| d.lines().filter(|l| l.starts_with("- ")).count());
     let is_complex = deliverable_count >= 4 || !blockers.is_empty();
 
     if is_complex {
@@ -130,7 +140,11 @@ fn build_prompt(graph: &Graph, task: &Node, _target: DispatchTarget, filter: &Te
 
         // Decisions are hard constraints — the agent must follow them
         for d in &decisions {
-            let status_tag = if d.status() == Some("discussing") { " (under discussion)" } else { "" };
+            let status_tag = if d.status() == Some("discussing") {
+                " (under discussion)"
+            } else {
+                ""
+            };
             out.push_str(&format!("### {}{}\n\n", d.title(), status_tag));
             let body = strip_title_heading(&d.body, d.title());
             out.push_str(body.trim());
@@ -138,9 +152,8 @@ fn build_prompt(graph: &Graph, task: &Node, _target: DispatchTarget, filter: &Te
         }
 
         // Scope guardrails — what NOT to do
-        let completed_siblings: Vec<_> = sibling_tasks.iter()
-            .filter(|(_, s)| *s == "done")
-            .collect();
+        let completed_siblings: Vec<_> =
+            sibling_tasks.iter().filter(|(_, s)| *s == "done").collect();
         if !completed_siblings.is_empty() {
             out.push_str("### Scope\n\n");
             out.push_str("Do not modify code belonging to these completed tasks:\n\n");
@@ -164,10 +177,7 @@ fn build_prompt(graph: &Graph, task: &Node, _target: DispatchTarget, filter: &Te
             out.push('\n');
 
             if is_completed {
-                out.push_str(&format!(
-                    "*Completed.* {}\n\n",
-                    first_paragraph(&feat.body),
-                ));
+                out.push_str(&format!("*Completed.* {}\n\n", first_paragraph(&feat.body),));
             } else {
                 let para = first_paragraph(&feat.body);
                 if !para.is_empty() {
@@ -186,7 +196,11 @@ fn build_prompt(graph: &Graph, task: &Node, _target: DispatchTarget, filter: &Te
                 "done" | "decided" | "answered" => "[x]",
                 _ => "[ ]",
             };
-            out.push_str(&format!("- {icon} **{}** (`{}`) — {status}\n", blocker.title(), blocker.id()));
+            out.push_str(&format!(
+                "- {icon} **{}** (`{}`) — {status}\n",
+                blocker.title(),
+                blocker.id()
+            ));
         }
         out.push('\n');
     }
@@ -206,10 +220,18 @@ fn build_prompt(graph: &Graph, task: &Node, _target: DispatchTarget, filter: &Te
     if !risks.is_empty() || !open_questions.is_empty() {
         out.push_str("## Warnings\n\n");
         for r in &risks {
-            out.push_str(&format!("- **Risk — {}**: {}\n", r.title(), first_paragraph(&r.body)));
+            out.push_str(&format!(
+                "- **Risk — {}**: {}\n",
+                r.title(),
+                first_paragraph(&r.body)
+            ));
         }
         for q in &open_questions {
-            out.push_str(&format!("- **Open question — {}**: {}\n", q.title(), first_paragraph(&q.body)));
+            out.push_str(&format!(
+                "- **Open question — {}**: {}\n",
+                q.title(),
+                first_paragraph(&q.body)
+            ));
         }
         out.push('\n');
     }
@@ -291,7 +313,11 @@ fn build_breadcrumb(graph: &Graph, features: &[&Node], filter: &TemporalFilter) 
 }
 
 /// Collect decided/discussing decisions from parent features (deduplicated).
-fn collect_decisions<'a>(graph: &'a Graph, features: &[&Node], filter: &TemporalFilter) -> Vec<&'a Node> {
+fn collect_decisions<'a>(
+    graph: &'a Graph,
+    features: &[&Node],
+    filter: &TemporalFilter,
+) -> Vec<&'a Node> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for feat in features {
@@ -307,7 +333,11 @@ fn collect_decisions<'a>(graph: &'a Graph, features: &[&Node], filter: &Temporal
 }
 
 /// Collect unmitigated risks from parent features (deduplicated).
-fn collect_risks<'a>(graph: &'a Graph, features: &[&Node], filter: &TemporalFilter) -> Vec<&'a Node> {
+fn collect_risks<'a>(
+    graph: &'a Graph,
+    features: &[&Node],
+    filter: &TemporalFilter,
+) -> Vec<&'a Node> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for feat in features {
@@ -321,7 +351,11 @@ fn collect_risks<'a>(graph: &'a Graph, features: &[&Node], filter: &TemporalFilt
 }
 
 /// Collect open questions from the task.
-fn collect_open_questions<'a>(graph: &'a Graph, task: &Node, filter: &TemporalFilter) -> Vec<&'a Node> {
+fn collect_open_questions<'a>(
+    graph: &'a Graph,
+    task: &Node,
+    filter: &TemporalFilter,
+) -> Vec<&'a Node> {
     collect_by_edge(graph, task, "has_question", Some("open_question"), filter)
         .into_iter()
         .filter(|q| q.status() == Some("open"))
@@ -450,10 +484,10 @@ fn first_paragraph(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use tempyr_core::graph::Graph;
     use tempyr_core::node::parse_node;
     use tempyr_core::schema::Schema;
-    use std::path::{Path, PathBuf};
 
     fn make_schema() -> Schema {
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))

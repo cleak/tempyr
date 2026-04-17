@@ -7,13 +7,13 @@ use tempyr_core::graph::Graph;
 use tempyr_core::schema::Schema;
 use tempyr_index::indexer::Index;
 
+use crate::Result;
 use crate::client::LinearClient;
 use crate::config::LinearConfig;
 use crate::mapping::StatusMapper;
 use crate::pull::{self, PullResult};
 use crate::push::{self, PushResult};
 use crate::state::SyncState;
-use crate::Result;
 
 /// Result of a full bidirectional sync.
 pub struct SyncResult {
@@ -43,8 +43,7 @@ pub async fn sync(
         push::push_all(client, graph, index, schema, config, state, status_mapper).await?;
 
     // Then pull remote changes
-    let pull_result =
-        pull::pull(client, graph_dir, schema, config, state, status_mapper).await?;
+    let pull_result = pull::pull(client, graph_dir, schema, config, state, status_mapper).await?;
 
     Ok(SyncResult {
         push: push_result,
@@ -115,7 +114,11 @@ pub fn status_summary(state: &SyncState, graph: &Graph) -> SyncStatusReport {
         });
     }
 
-    entries.sort_by(|a, b| a.node_type.cmp(&b.node_type).then(a.node_id.cmp(&b.node_id)));
+    entries.sort_by(|a, b| {
+        a.node_type
+            .cmp(&b.node_type)
+            .then(a.node_id.cmp(&b.node_id))
+    });
 
     let orphaned_count = state.orphaned_entries(&all_syncable).len();
 

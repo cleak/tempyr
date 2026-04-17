@@ -35,8 +35,7 @@ impl LinearConfig {
         let path = Self::config_path(gf_dir);
         if !path.exists() {
             return Err(LinearError::Config(
-                "Linear integration not configured. Run `tempyr linear setup` first."
-                    .to_string(),
+                "Linear integration not configured. Run `tempyr linear setup` first.".to_string(),
             ));
         }
         let json = std::fs::read_to_string(&path)?;

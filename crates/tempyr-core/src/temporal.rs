@@ -41,10 +41,7 @@ impl TemporalFilter {
 ///
 /// Default (no as_of, no include_history): include edges where `valid_until` is None
 /// (i.e., currently active edges).
-pub fn filter_edges<'a>(
-    edges: &'a [EdgeEntry],
-    filter: &TemporalFilter,
-) -> Vec<&'a EdgeEntry> {
+pub fn filter_edges<'a>(edges: &'a [EdgeEntry], filter: &TemporalFilter) -> Vec<&'a EdgeEntry> {
     if filter.include_history {
         return edges.iter().collect();
     }
@@ -61,14 +58,16 @@ fn is_edge_visible(edge: &EdgeEntry, filter: &TemporalFilter) -> bool {
         Some(as_of) => {
             // valid_from must be <= as_of (if set)
             if let Some(from) = edge.valid_from
-                && from > as_of {
-                    return false;
-                }
+                && from > as_of
+            {
+                return false;
+            }
             // valid_until must be None or > as_of
             if let Some(until) = edge.valid_until
-                && until <= as_of {
-                    return false;
-                }
+                && until <= as_of
+            {
+                return false;
+            }
             true
         }
         None => {
@@ -106,7 +105,12 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
     }
 
-    fn make_edge(target: &str, edge_type: &str, from: Option<NaiveDate>, until: Option<NaiveDate>) -> EdgeEntry {
+    fn make_edge(
+        target: &str,
+        edge_type: &str,
+        from: Option<NaiveDate>,
+        until: Option<NaiveDate>,
+    ) -> EdgeEntry {
         EdgeEntry {
             target: target.to_string(),
             edge_type: edge_type.to_string(),
@@ -119,9 +123,14 @@ mod tests {
     #[test]
     fn test_filter_default_hides_expired() {
         let edges = vec![
-            make_edge("a", "depends_on", None, None),                          // active
-            make_edge("b", "depends_on", Some(date(2026, 1, 1)), None),        // active (has from, no until)
-            make_edge("c", "depends_on", Some(date(2026, 1, 1)), Some(date(2026, 3, 1))), // expired
+            make_edge("a", "depends_on", None, None), // active
+            make_edge("b", "depends_on", Some(date(2026, 1, 1)), None), // active (has from, no until)
+            make_edge(
+                "c",
+                "depends_on",
+                Some(date(2026, 1, 1)),
+                Some(date(2026, 3, 1)),
+            ), // expired
         ];
 
         let filter = TemporalFilter::current();
@@ -135,8 +144,8 @@ mod tests {
     fn test_filter_as_of_date() {
         let edges = vec![
             make_edge("a", "x", Some(date(2026, 1, 15)), Some(date(2026, 3, 1))), // Jan-Mar
-            make_edge("b", "x", Some(date(2026, 4, 1)), None),                      // Apr onward
-            make_edge("c", "x", None, None),                                         // always
+            make_edge("b", "x", Some(date(2026, 4, 1)), None),                    // Apr onward
+            make_edge("c", "x", None, None),                                      // always
         ];
 
         // February: a is visible, b is not yet, c is always
@@ -158,7 +167,7 @@ mod tests {
     fn test_filter_include_history() {
         let edges = vec![
             make_edge("a", "x", None, Some(date(2020, 1, 1))), // expired long ago
-            make_edge("b", "x", None, None),                    // active
+            make_edge("b", "x", None, None),                   // active
         ];
 
         let filter = TemporalFilter::with_history();

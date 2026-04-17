@@ -1,7 +1,7 @@
 use crate::config::ProjectContext;
 use tempyr_core::graph::Graph;
 use tempyr_core::ops;
-use tempyr_core::validate::{validate_graph, Severity, ValidationKind};
+use tempyr_core::validate::{Severity, ValidationKind, validate_graph};
 
 pub fn run(ctx: &ProjectContext, json: bool, fix: bool) -> anyhow::Result<()> {
     if fix {
@@ -28,15 +28,25 @@ pub fn run(ctx: &ProjectContext, json: bool, fix: bool) -> anyhow::Result<()> {
     }
 
     if issues.is_empty() {
-        println!("Graph is valid. {} nodes, {} edges.",
-            graph.node_count(), graph.edge_count());
+        println!(
+            "Graph is valid. {} nodes, {} edges.",
+            graph.node_count(),
+            graph.edge_count()
+        );
         return Ok(());
     }
 
-    let errors = issues.iter().filter(|i| i.severity == Severity::Error).count();
-    let warnings = issues.iter().filter(|i| i.severity == Severity::Warning).count();
+    let errors = issues
+        .iter()
+        .filter(|i| i.severity == Severity::Error)
+        .count();
+    let warnings = issues
+        .iter()
+        .filter(|i| i.severity == Severity::Warning)
+        .count();
 
-    let reverse_errors = issues.iter()
+    let reverse_errors = issues
+        .iter()
         .filter(|i| i.kind == ValidationKind::MissingReverseEdge)
         .count();
 
@@ -47,7 +57,9 @@ pub fn run(ctx: &ProjectContext, json: bool, fix: bool) -> anyhow::Result<()> {
     eprintln!("\n{errors} error(s), {warnings} warning(s)");
 
     if reverse_errors > 0 {
-        eprintln!("\nTip: run `tempyr validate --fix` to add {reverse_errors} missing reverse edge(s)");
+        eprintln!(
+            "\nTip: run `tempyr validate --fix` to add {reverse_errors} missing reverse edge(s)"
+        );
     }
 
     if errors > 0 {
@@ -74,11 +86,17 @@ fn run_fix(ctx: &ProjectContext) -> anyhow::Result<()> {
     // Re-validate to show remaining issues
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
     let issues = validate_graph(&graph);
-    let errors = issues.iter().filter(|i| i.severity == Severity::Error).count();
+    let errors = issues
+        .iter()
+        .filter(|i| i.severity == Severity::Error)
+        .count();
 
     if errors == 0 {
-        println!("Graph is now valid. {} nodes, {} edges.",
-            graph.node_count(), graph.edge_count());
+        println!(
+            "Graph is now valid. {} nodes, {} edges.",
+            graph.node_count(),
+            graph.edge_count()
+        );
     } else {
         eprintln!("\n{errors} error(s) remain after repair:");
         for issue in issues.iter().filter(|i| i.severity == Severity::Error) {
