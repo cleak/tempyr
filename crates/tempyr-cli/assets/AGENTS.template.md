@@ -42,5 +42,6 @@ When Tempyr MCP is available, prefer:
 ## Environment
 
 - Embedding provider settings live in `.tempyr/config.toml`
-- API keys are typically loaded from `.env.local` or `.env`
-- Tempyr loads `.env.local` before `.env`
+- API keys are typically loaded from Tempyr's shared Git-common-dir env (`tempyr/.env.local`), `.env.local`, `.env`, or the shell environment
+- Repo-local `.env.local` overrides shared worktree defaults when both are present
+- At each location, Tempyr loads `.env.local` before `.env`

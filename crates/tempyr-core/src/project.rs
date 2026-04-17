@@ -428,12 +428,15 @@ pub fn find_project_roots_from(start: PathBuf) -> Option<ProjectRoots> {
 /// Load repo-local dotenv files for the current tempyr project without overwriting any
 /// variables that are already present in the process environment.
 ///
-/// Loading order preserves intuitive precedence:
-/// 1. Existing process environment
-/// 2. `.env.local` in the invocation project root
-/// 3. `.env` in the invocation project root
-/// 4. `.env.local` in the resolved tempyr root (for redirect setups)
-/// 5. `.env` in the resolved tempyr root (for redirect setups)
+/// Tempyr loads environment sources for the invocation project root first, then for the
+/// resolved tempyr root when a redirect is involved. For each root, Tempyr loads:
+/// 1. `.env.local`
+/// 2. `.env`
+/// 3. a shared worktree env file under the Git common dir at `tempyr/.env.local`
+/// 4. a shared worktree env file under the Git common dir at `tempyr/.env`
+///
+/// Earlier values keep precedence, so shell environment variables and repo-local
+/// overrides always win over shared worktree defaults.
 pub fn load_project_env() -> io::Result<Vec<PathBuf>> {
     let Some(start) = discovery_start_path() else {
         return Ok(Vec::new());
@@ -456,19 +459,36 @@ pub fn load_project_env_from(start: PathBuf) -> io::Result<Vec<PathBuf>> {
 
 fn load_env_dir(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut loaded = Vec::new();
-    for filename in [".env.local", ".env"] {
-        let path = dir.join(filename);
-        if !path.is_file() {
-            continue;
-        }
-
-        // `from_path` preserves variables that are already set, so earlier files and the
-        // existing process environment keep their precedence.
-        dotenvy::from_path(&path)
-            .map_err(|err| io::Error::other(format!("Failed to load {}: {err}", path.display())))?;
-        loaded.push(path);
+    for path in env_file_candidates(dir) {
+        load_env_file(&path, &mut loaded)?;
     }
     Ok(loaded)
+}
+
+fn env_file_candidates(dir: &Path) -> Vec<PathBuf> {
+    let mut candidates = vec![dir.join(".env.local"), dir.join(".env")];
+    if let Some(shared_root) = shared_env_root(dir) {
+        candidates.push(shared_root.join(".env.local"));
+        candidates.push(shared_root.join(".env"));
+    }
+    candidates
+}
+
+fn load_env_file(path: &Path, loaded: &mut Vec<PathBuf>) -> io::Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+
+    // `from_path` preserves variables that are already set, so earlier files and the
+    // existing process environment keep their precedence.
+    dotenvy::from_path(path)
+        .map_err(|err| io::Error::other(format!("Failed to load {}: {err}", path.display())))?;
+    loaded.push(path.to_path_buf());
+    Ok(())
+}
+
+pub fn shared_env_root(root: &Path) -> Option<PathBuf> {
+    resolve_git_dirs(root).map(|dirs| dirs.common_dir.join("tempyr"))
 }
 
 fn discovery_start_path() -> Option<PathBuf> {
@@ -712,9 +732,13 @@ mod tests {
         previous: Vec<(String, Option<OsString>)>,
     }
 
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
     impl EnvGuard {
         fn new(vars: &[&str]) -> Self {
-            let lock = ENV_LOCK.lock().unwrap();
+            let lock = env_lock();
             let previous = vars
                 .iter()
                 .map(|var| ((*var).to_string(), std::env::var_os(var)))
@@ -928,7 +952,7 @@ mod tests {
 
     #[test]
     fn load_project_env_prefers_env_local_within_direct_project() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         fs::create_dir(root.join(".tempyr")).unwrap();
@@ -955,7 +979,7 @@ mod tests {
 
     #[test]
     fn load_project_env_finds_project_from_graph_dir_start() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         fs::create_dir(root.join(".tempyr")).unwrap();
@@ -971,8 +995,81 @@ mod tests {
     }
 
     #[test]
+    fn load_project_env_reads_shared_git_common_env_for_repo() {
+        let _guard = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        fs::create_dir(root.join(".tempyr")).unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(".git").join("tempyr")).unwrap();
+
+        let shared_var = format!("TEMPYR_TEST_SHARED_REPO_{}", rand::random::<u64>());
+        let shared_env_path = root.join(".git").join("tempyr").join(".env.local");
+        fs::write(&shared_env_path, format!("{shared_var}=shared-value\n")).unwrap();
+
+        let loaded = load_project_env_from(root).unwrap();
+
+        assert_eq!(loaded, vec![fs::canonicalize(shared_env_path).unwrap()]);
+        assert_eq!(std::env::var(&shared_var).unwrap(), "shared-value");
+    }
+
+    #[test]
+    fn load_project_env_prefers_repo_local_env_over_shared_git_common_env() {
+        let _guard = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        fs::create_dir(root.join(".tempyr")).unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(".git").join("tempyr")).unwrap();
+
+        let shared_var = format!("TEMPYR_TEST_SHARED_OVERRIDE_{}", rand::random::<u64>());
+        let shared_env_path = root.join(".git").join("tempyr").join(".env.local");
+        fs::write(&shared_env_path, format!("{shared_var}=shared-value\n")).unwrap();
+        fs::write(
+            root.join(".env.local"),
+            format!("{shared_var}=local-value\n"),
+        )
+        .unwrap();
+
+        let loaded = load_project_env_from(root).unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(std::env::var(&shared_var).unwrap(), "local-value");
+    }
+
+    #[test]
+    fn load_project_env_reads_shared_git_common_env_for_worktree() {
+        let _guard = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let worktree = tmp.path().join("wt");
+        let common = repo.join(".git");
+        let private = common.join("worktrees").join("feature");
+
+        fs::create_dir_all(&private).unwrap();
+        fs::create_dir_all(common.join("tempyr")).unwrap();
+        fs::create_dir(&worktree).unwrap();
+        fs::create_dir(worktree.join(".tempyr")).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", private.display()),
+        )
+        .unwrap();
+        fs::write(private.join("commondir"), "../..\n").unwrap();
+
+        let shared_var = format!("TEMPYR_TEST_SHARED_WORKTREE_{}", rand::random::<u64>());
+        let shared_env_path = common.join("tempyr").join(".env.local");
+        fs::write(&shared_env_path, format!("{shared_var}=shared-worktree\n")).unwrap();
+
+        let loaded = load_project_env_from(worktree).unwrap();
+
+        assert_eq!(loaded, vec![fs::canonicalize(shared_env_path).unwrap()]);
+        assert_eq!(std::env::var(&shared_var).unwrap(), "shared-worktree");
+    }
+
+    #[test]
     fn load_project_env_uses_anchor_before_redirect_target() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let tmp = tempfile::tempdir().unwrap();
 
         let real_root = tmp.path().join("knowledge-base");
