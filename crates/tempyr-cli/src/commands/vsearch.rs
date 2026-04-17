@@ -34,7 +34,8 @@ pub fn run(
     if store_embedding_count == 0 && legacy_embedding_count == 0 {
         anyhow::bail!(
             "No embeddings found. Run `tempyr index rebuild` with an embedding \
-             API key set (VOYAGE_API_KEY or GEMINI_API_KEY)."
+             API key set in Tempyr's shared worktree env, `.env.local`, or \
+             your shell environment (VOYAGE_API_KEY or GEMINI_API_KEY)."
         );
     }
 

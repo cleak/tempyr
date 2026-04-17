@@ -123,7 +123,7 @@ impl ExistingDocs {
 pub struct OnboardingSelections {
     pub provider: EmbeddingProviderChoice,
     pub api_key: Option<String>,
-    pub write_api_key_to_env_local: bool,
+    pub write_api_key_for_tempyr: bool,
     pub create_env_local_from_template: bool,
     pub validate_provider_setup: bool,
     pub run_index_rebuild: bool,
@@ -149,7 +149,7 @@ impl OnboardingSelections {
         Self {
             provider: EmbeddingProviderChoice::Voyage,
             api_key: None,
-            write_api_key_to_env_local: true,
+            write_api_key_for_tempyr: true,
             create_env_local_from_template: true,
             validate_provider_setup: true,
             run_index_rebuild: false,
@@ -243,7 +243,7 @@ impl WizardState {
     }
 
     fn should_show_api_key_page(&self) -> bool {
-        self.selections.provider.needs_api_key() && self.selections.write_api_key_to_env_local
+        self.selections.provider.needs_api_key() && self.selections.write_api_key_for_tempyr
     }
 
     fn selected_existing_docs(&self) -> bool {
@@ -402,7 +402,7 @@ fn update_provider(state: &mut WizardState, provider: EmbeddingProviderChoice) {
 
     state.selections.provider = provider;
     if !provider.needs_api_key() {
-        state.selections.write_api_key_to_env_local = false;
+        state.selections.write_api_key_for_tempyr = false;
     }
 }
 
@@ -410,9 +410,9 @@ fn toggle_core_checkbox(state: &mut WizardState) {
     match state.core_index {
         1 => {
             if state.selections.provider.needs_api_key() {
-                state.selections.write_api_key_to_env_local =
-                    !state.selections.write_api_key_to_env_local;
-                if !state.selections.write_api_key_to_env_local {
+                state.selections.write_api_key_for_tempyr =
+                    !state.selections.write_api_key_for_tempyr;
+                if !state.selections.write_api_key_for_tempyr {
                     state.api_key_input.clear();
                 }
             }
@@ -533,7 +533,7 @@ fn current_header(state: &WizardState) -> Vec<Line<'static>> {
                 state.selections.provider.env_var().unwrap_or("the API key")
             )),
             Line::from(
-                "Tempyr will only write the value if 'Write API key to .env.local' stays enabled.",
+                "Tempyr will only write the value if 'Store API key for Tempyr' stays enabled.",
             ),
         ],
         Page::AgentIntegrations => vec![
@@ -595,11 +595,11 @@ fn render_core_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardS
         ),
         checkbox_line(
             state.core_index == 1,
-            state.selections.write_api_key_to_env_local && provider.needs_api_key(),
+            state.selections.write_api_key_for_tempyr && provider.needs_api_key(),
             if provider.needs_api_key() {
-                "Write API key to .env.local"
+                "Store API key for Tempyr"
             } else {
-                "Write API key to .env.local (not needed for local)"
+                "Store API key for Tempyr (not needed for local)"
             },
         ),
         checkbox_line(
@@ -667,9 +667,12 @@ fn render_api_key(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardStat
     let text = vec![
         Line::from(vec![
             Span::styled(env_var, Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" will be written to "),
+            Span::raw(" will be written to Tempyr's shared worktree env when Git is available,"),
+        ]),
+        Line::from(vec![
+            Span::raw("falling back to "),
             Span::styled(".env.local", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" if provided."),
+            Span::raw(" otherwise."),
         ]),
         Line::from(""),
         Line::from(vec![
@@ -841,8 +844,8 @@ fn render_review(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardState
             ),
             Span::raw(enabled_list(&[
                 (
-                    "write key",
-                    state.selections.write_api_key_to_env_local
+                    "store key",
+                    state.selections.write_api_key_for_tempyr
                         && state.selections.provider.needs_api_key(),
                 ),
                 (

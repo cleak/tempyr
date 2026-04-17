@@ -460,7 +460,7 @@ pub fn validate_api_key_value(env_var: &str, value: &str) -> Result<()> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(IndexError::General(format!(
-            "{env_var} is empty. Fill it in with a real API key in .env.local or your shell environment before using hosted embeddings."
+            "{env_var} is empty. Fill it in with a real API key in Tempyr's shared worktree env, .env.local, or your shell environment before using hosted embeddings."
         )));
     }
 
@@ -484,7 +484,7 @@ pub fn validate_api_key_value(env_var: &str, value: &str) -> Result<()> {
 fn read_required_api_key(env_var: &'static str) -> Result<String> {
     let api_key = std::env::var(env_var).map_err(|_| {
         IndexError::General(format!(
-            "{env_var} environment variable not set. Set it in .env.local or your shell environment, or switch to local embeddings with [embedding] provider = \"local\" in config.toml."
+            "{env_var} environment variable not set. Set it in Tempyr's shared worktree env, .env.local, or your shell environment, or switch to local embeddings with [embedding] provider = \"local\" in config.toml."
         ))
     })?;
     validate_api_key_value(env_var, &api_key)?;
