@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -777,28 +777,31 @@ fn run_existing_doc_agent_merge(
     let output = match run_merge_agent_command(root, docs, agent, &prompt) {
         Ok(output) => output,
         Err(err) => {
-            restore_doc_snapshots(root, &before).with_context(|| {
+            return restore_and_fallback_agent_merge(
+                root,
+                docs,
+                agent,
+                &before,
                 format!(
                     "Failed to restore original docs after {} merge failure",
                     agent.label()
-                )
-            })?;
-            return fallback_agent_merge_summary(root, docs, agent, err.to_string());
+                ),
+                err.to_string(),
+            );
         }
     };
 
     if !output.status.success() {
         let detail = summarize_process_output(&output.stdout, &output.stderr);
-        restore_doc_snapshots(root, &before).with_context(|| {
-            format!(
-                "Failed to restore original docs after {} exited unsuccessfully",
-                agent.label()
-            )
-        })?;
-        return fallback_agent_merge_summary(
+        return restore_and_fallback_agent_merge(
             root,
             docs,
             agent,
+            &before,
+            format!(
+                "Failed to restore original docs after {} exited unsuccessfully",
+                agent.label()
+            ),
             format!("{} exited with {}", agent.label(), output.status),
         )
         .map(|mut lines| {
@@ -809,7 +812,26 @@ fn run_existing_doc_agent_merge(
         });
     }
 
-    let after = doc_snapshots(root, docs)?;
+    let after = match doc_snapshots(root, docs) {
+        Ok(after) => after,
+        Err(err) => {
+            return restore_and_fallback_agent_merge(
+                root,
+                docs,
+                agent,
+                &before,
+                format!(
+                    "Failed to restore original docs after {} produced unreadable merged docs",
+                    agent.label()
+                ),
+                format!(
+                    "{} completed but Tempyr could not read the merged docs: {}",
+                    agent.label(),
+                    err
+                ),
+            );
+        }
+    };
     let mut lines = Vec::new();
     if let Some(warning) = codex_missing_config_warning(root, agent) {
         lines.push(warning);
@@ -840,6 +862,18 @@ fn run_existing_doc_agent_merge(
     }
 
     Ok(lines)
+}
+
+fn restore_and_fallback_agent_merge(
+    root: &Path,
+    docs: &[DocSpec],
+    agent: MergeAgent,
+    before: &std::collections::BTreeMap<&'static str, String>,
+    restore_context: String,
+    reason: String,
+) -> anyhow::Result<Vec<String>> {
+    restore_doc_snapshots(root, before).with_context(|| restore_context)?;
+    fallback_agent_merge_summary(root, docs, agent, reason)
 }
 
 fn fallback_agent_merge_summary(
@@ -879,6 +913,18 @@ fn run_merge_agent_command(
     let mut child = command
         .spawn()
         .with_context(|| format!("Failed to launch {} for existing-doc merge", agent.label()))?;
+    let stdout_reader = spawn_output_reader(child.stdout.take().with_context(|| {
+        format!(
+            "Failed to capture {} existing-doc merge stdout",
+            agent.label()
+        )
+    })?);
+    let stderr_reader = spawn_output_reader(child.stderr.take().with_context(|| {
+        format!(
+            "Failed to capture {} existing-doc merge stderr",
+            agent.label()
+        )
+    })?);
     let completed = wait_for_child_exit(&mut child, MERGE_AGENT_TIMEOUT).with_context(|| {
         format!(
             "Failed while waiting for {} existing-doc merge to finish",
@@ -889,6 +935,8 @@ fn run_merge_agent_command(
     if completed.is_none() {
         let _ = child.kill();
         let _ = child.wait();
+        let _ = stdout_reader.join();
+        let _ = stderr_reader.join();
         anyhow::bail!(
             "Timed out waiting for {} existing-doc merge after {} seconds",
             agent.label(),
@@ -896,12 +944,45 @@ fn run_merge_agent_command(
         );
     }
 
-    child.wait_with_output().with_context(|| {
-        format!(
-            "Failed to capture {} existing-doc merge output",
-            agent.label()
-        )
+    Ok(std::process::Output {
+        status: completed.expect("status checked above"),
+        stdout: join_output_reader(stdout_reader, agent, "stdout")?,
+        stderr: join_output_reader(stderr_reader, agent, "stderr")?,
     })
+}
+
+fn spawn_output_reader<T>(mut reader: T) -> thread::JoinHandle<std::io::Result<Vec<u8>>>
+where
+    T: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_output_reader(
+    reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    agent: MergeAgent,
+    stream_name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{} existing-doc merge {} reader thread panicked",
+                agent.label(),
+                stream_name
+            )
+        })?
+        .with_context(|| {
+            format!(
+                "Failed to read {} existing-doc merge {}",
+                agent.label(),
+                stream_name
+            )
+        })
 }
 
 fn merge_agent_command_args(docs: &[DocSpec], agent: MergeAgent, prompt: &str) -> Vec<String> {
@@ -1006,10 +1087,7 @@ fn should_write_codex_config(
     selections: &OnboardingSelections,
     existing_doc_updates: &[DocSpec],
 ) -> bool {
-    selections.install_codex_skill
-        || selections.install_codex_doc
-        || (selections.existing_doc_mode == ExistingDocMode::Codex
-            && !existing_doc_updates.is_empty())
+    selections.existing_doc_mode == ExistingDocMode::Codex && !existing_doc_updates.is_empty()
 }
 
 fn summarize_process_output(stdout: &[u8], stderr: &[u8]) -> String {
@@ -1254,6 +1332,26 @@ mod tests {
         )];
 
         assert!(should_write_codex_config(&selections, &docs));
+    }
+
+    #[test]
+    fn should_not_write_codex_config_for_plain_codex_installs() {
+        let selections = OnboardingSelections {
+            install_codex_skill: true,
+            install_codex_doc: true,
+            existing_doc_mode: ExistingDocMode::Append,
+            ..OnboardingSelections::interactive_defaults(ExistingDocs {
+                claude_md: false,
+                agents_md: false,
+            })
+        };
+        let docs = [DocSpec::new(
+            "AGENTS.md",
+            "# Agents\n",
+            "Codex / agent instructions",
+        )];
+
+        assert!(!should_write_codex_config(&selections, &docs));
     }
 
     #[test]

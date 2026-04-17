@@ -737,7 +737,7 @@ fn render_provider(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardSta
     ];
     if let Some(env_var) = selected.env_var() {
         detail_lines.push(Line::from(format!(
-            "Tempyr can collect and validate {} on the next page if you keep secret storage enabled.",
+            "Tempyr can collect and validate {} later in setup if you keep secret storage enabled.",
             env_var
         )));
     } else {
