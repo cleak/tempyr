@@ -1,6 +1,7 @@
 use std::io;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use crossterm::event::{
@@ -16,6 +17,9 @@ use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+
+const COMMAND_HELP_TIMEOUT: Duration = Duration::from_secs(2);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingProviderChoice {
@@ -133,13 +137,42 @@ fn recommended_existing_doc_mode_from_availability(
 }
 
 fn command_runs_help(program: &str) -> bool {
-    Command::new(program)
+    let mut child = match Command::new(program)
         .arg("--help")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    match wait_for_child_exit(&mut child, COMMAND_HELP_TIMEOUT) {
+        Ok(Some(status)) => status.success(),
+        Ok(None) | Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            false
+        }
+    }
+}
+
+fn wait_for_child_exit(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL.min(deadline - now));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1268,6 +1301,7 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn cancel_shortcut_is_disabled_while_typing_api_key() {
@@ -1329,6 +1363,22 @@ mod tests {
     }
 
     #[test]
+    fn command_runs_help_returns_false_for_missing_program() {
+        assert!(!command_runs_help("definitely-not-a-real-tempyr-program"));
+    }
+
+    #[test]
+    fn wait_for_child_exit_times_out_for_long_running_process() {
+        let mut child = spawn_sleep_command();
+
+        let status = wait_for_child_exit(&mut child, Duration::from_millis(10)).unwrap();
+        assert!(status.is_none());
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
     fn api_key_page_requires_a_valid_key_before_advancing() {
         let mut state = WizardState::new(ExistingDocs {
             claude_md: false,
@@ -1369,5 +1419,32 @@ mod tests {
         assert_eq!(state.selections.provider, EmbeddingProviderChoice::Gemini);
         assert!(state.api_key_input.is_empty());
         assert!(state.selections.api_key.is_none());
+    }
+
+    #[cfg(windows)]
+    fn spawn_sleep_command() -> std::process::Child {
+        Command::new("powershell")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                "Start-Sleep -Seconds 5",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(not(windows))]
+    fn spawn_sleep_command() -> std::process::Child {
+        Command::new("sh")
+            .args(["-c", "sleep 5"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
     }
 }

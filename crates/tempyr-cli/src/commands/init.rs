@@ -1,7 +1,9 @@
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::config::ProjectContext;
 use anyhow::Context;
@@ -18,10 +20,13 @@ use tempyr_index::embeddings;
 const DEFAULT_SCHEMA: &str = include_str!("../../../../schema/default-schema.toml");
 const CLAUDE_DOC_TEMPLATE: &str = include_str!("../../assets/CLAUDE.template.md");
 const AGENTS_DOC_TEMPLATE: &str = include_str!("../../assets/AGENTS.template.md");
+const CODEX_CONFIG_TEMPLATE: &str = include_str!("../../assets/codex.config.toml");
 const CODEX_SKILL_TEMPLATE: &str = include_str!("../../assets/tempyr-interview.codex.SKILL.md");
 const PRD_TEMPLATE: &str = include_str!("../../../../templates/prd.toml");
 const TDD_TEMPLATE: &str = include_str!("../../../../templates/tdd.toml");
 const TASK_PROMPT_TEMPLATE: &str = include_str!("../../../../templates/task-prompt.toml");
+const MERGE_AGENT_TIMEOUT: Duration = Duration::from_secs(30);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub fn run(json_output: bool, force_wizard: bool, no_wizard: bool) -> anyhow::Result<()> {
     if json_output && force_wizard {
@@ -193,6 +198,14 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
                 "Codex / agent instructions",
             ),
         )?;
+    }
+
+    if should_write_codex_config(selections, &existing_doc_updates) {
+        let outcome = write_codex_config(root)?;
+        summary.push(format!(
+            "  .codex/config.toml  - {}",
+            outcome.label("repo-local Codex sandbox config")
+        ));
     }
 
     if !existing_doc_updates.is_empty() {
@@ -585,6 +598,14 @@ fn write_support_file(path: &Path, content: &str) -> anyhow::Result<SupportWrite
     Ok(SupportWriteOutcome::Created)
 }
 
+fn write_codex_config(root: &Path) -> anyhow::Result<SupportWriteOutcome> {
+    write_support_file(&codex_config_path(root), CODEX_CONFIG_TEMPLATE)
+}
+
+fn codex_config_path(root: &Path) -> PathBuf {
+    root.join(".codex").join("config.toml")
+}
+
 fn append_doc_section(path: &Path, section: String) -> anyhow::Result<()> {
     let begin_marker = "<!-- tempyr:onboarding:start -->";
     if path.exists() {
@@ -727,12 +748,24 @@ fn run_existing_doc_agent_merge(
     let output = match run_merge_agent_command(root, docs, agent, &prompt) {
         Ok(output) => output,
         Err(err) => {
+            restore_doc_snapshots(root, &before).with_context(|| {
+                format!(
+                    "Failed to restore original docs after {} merge failure",
+                    agent.label()
+                )
+            })?;
             return fallback_agent_merge_summary(root, docs, agent, err.to_string());
         }
     };
 
     if !output.status.success() {
         let detail = summarize_process_output(&output.stdout, &output.stderr);
+        restore_doc_snapshots(root, &before).with_context(|| {
+            format!(
+                "Failed to restore original docs after {} exited unsuccessfully",
+                agent.label()
+            )
+        })?;
         return fallback_agent_merge_summary(
             root,
             docs,
@@ -748,10 +781,14 @@ fn run_existing_doc_agent_merge(
     }
 
     let after = doc_snapshots(root, docs)?;
-    let mut lines = vec![format!(
+    let mut lines = Vec::new();
+    if let Some(warning) = codex_missing_config_warning(root, agent) {
+        lines.push(warning);
+    }
+    lines.push(format!(
         "  existing docs       - launched {} to merge instruction docs",
         agent.label()
-    )];
+    ));
 
     let mut changed = 0usize;
     for (path, before_contents) in before {
@@ -783,18 +820,20 @@ fn fallback_agent_merge_summary(
     reason: String,
 ) -> anyhow::Result<Vec<String>> {
     let path = write_doc_follow_up(root, docs, agent.fallback_mode())?;
-    Ok(vec![
-        format!(
-            "  existing docs       - warning: could not run {} merge automatically: {}",
-            agent.label(),
-            reason
-        ),
-        format!(
-            "  {}  - {} handoff prompt",
-            display_relative(root, &path),
-            agent.label()
-        ),
-    ])
+    let mut lines = vec![format!(
+        "  existing docs       - warning: could not run {} merge automatically: {}",
+        agent.label(),
+        reason
+    )];
+    if let Some(warning) = codex_missing_config_warning(root, agent) {
+        lines.push(warning);
+    }
+    lines.push(format!(
+        "  {}  - {} handoff prompt",
+        display_relative(root, &path),
+        agent.label()
+    ));
+    Ok(lines)
 }
 
 fn run_merge_agent_command(
@@ -806,10 +845,34 @@ fn run_merge_agent_command(
     let mut command = Command::new(agent.command());
     command.current_dir(root);
     command.args(merge_agent_command_args(docs, agent, prompt));
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    command
-        .output()
-        .with_context(|| format!("Failed to launch {} for existing-doc merge", agent.label()))
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("Failed to launch {} for existing-doc merge", agent.label()))?;
+    let completed = wait_for_child_exit(&mut child, MERGE_AGENT_TIMEOUT).with_context(|| {
+        format!(
+            "Failed while waiting for {} existing-doc merge to finish",
+            agent.label()
+        )
+    })?;
+
+    if completed.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!(
+            "Timed out waiting for {} existing-doc merge after {} seconds",
+            agent.label(),
+            MERGE_AGENT_TIMEOUT.as_secs()
+        );
+    }
+
+    child.wait_with_output().with_context(|| {
+        format!(
+            "Failed to capture {} existing-doc merge output",
+            agent.label()
+        )
+    })
 }
 
 fn merge_agent_command_args(docs: &[DocSpec], agent: MergeAgent, prompt: &str) -> Vec<String> {
@@ -834,6 +897,16 @@ fn claude_allowed_tools(docs: &[DocSpec]) -> String {
         tools.push(format!("Edit(/{})", doc.path));
     }
     tools.join(",")
+}
+
+fn codex_missing_config_warning(root: &Path, agent: MergeAgent) -> Option<String> {
+    if agent == MergeAgent::Codex && !codex_config_path(root).is_file() {
+        Some(
+            "  existing docs       - warning: Codex is running without a repo-local .codex/config.toml; configure sandboxed writable roots before relying on Codex merges".to_string(),
+        )
+    } else {
+        None
+    }
 }
 
 fn render_agent_merge_prompt(docs: &[DocSpec]) -> String {
@@ -871,6 +944,43 @@ fn doc_snapshots(
         snapshots.insert(doc.path, fs::read_to_string(root.join(doc.path))?);
     }
     Ok(snapshots)
+}
+
+fn restore_doc_snapshots(
+    root: &Path,
+    snapshots: &std::collections::BTreeMap<&'static str, String>,
+) -> anyhow::Result<()> {
+    for (path, contents) in snapshots {
+        fs::write(root.join(path), contents)?;
+    }
+    Ok(())
+}
+
+fn wait_for_child_exit(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL.min(deadline - now));
+    }
+}
+
+fn should_write_codex_config(
+    selections: &OnboardingSelections,
+    existing_doc_updates: &[DocSpec],
+) -> bool {
+    selections.install_codex_skill
+        || selections.install_codex_doc
+        || (selections.existing_doc_mode == ExistingDocMode::Codex
+            && !existing_doc_updates.is_empty())
 }
 
 fn summarize_process_output(stdout: &[u8], stderr: &[u8]) -> String {
@@ -1095,6 +1205,67 @@ mod tests {
         let args = merge_agent_command_args(&[], MergeAgent::Codex, "merge prompt");
 
         assert_eq!(args, vec!["--auto-edit", "merge prompt"]);
+    }
+
+    #[test]
+    fn should_write_codex_config_for_codex_merge_mode() {
+        let selections = OnboardingSelections {
+            install_codex_skill: false,
+            install_codex_doc: false,
+            existing_doc_mode: ExistingDocMode::Codex,
+            ..OnboardingSelections::interactive_defaults(ExistingDocs {
+                claude_md: true,
+                agents_md: false,
+            })
+        };
+        let docs = [DocSpec::new(
+            "CLAUDE.md",
+            "# Claude\n",
+            "Claude Code instructions",
+        )];
+
+        assert!(should_write_codex_config(&selections, &docs));
+    }
+
+    #[test]
+    fn restore_doc_snapshots_rewrites_original_contents() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("CLAUDE.md"), "changed").unwrap();
+
+        let mut snapshots = std::collections::BTreeMap::new();
+        snapshots.insert("CLAUDE.md", "original".to_string());
+
+        restore_doc_snapshots(tmp.path(), &snapshots).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn fallback_summary_warns_when_codex_config_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = [DocSpec::new(
+            "AGENTS.md",
+            "# Agents\n",
+            "Codex / agent instructions",
+        )];
+
+        let lines = fallback_agent_merge_summary(
+            tmp.path(),
+            &docs,
+            MergeAgent::Codex,
+            "Codex exited with status 1".to_string(),
+        )
+        .unwrap();
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line
+                    .contains("Codex is running without a repo-local .codex/config.toml"))
+        );
     }
 
     #[test]
