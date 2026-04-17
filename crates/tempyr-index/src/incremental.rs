@@ -1,11 +1,10 @@
-use tempyr_core::graph::Graph;
-use crate::indexer::{Index, IndexStats};
 use crate::Result;
+use crate::indexer::{Index, IndexStats};
+use tempyr_core::graph::Graph;
 
 impl Index {
     /// Incremental update: only re-index nodes whose content hash has changed.
     pub fn incremental_update(&self, graph: &Graph) -> Result<IndexStats> {
-
         // Track which node IDs exist in the current graph
         let graph_ids: std::collections::HashSet<&str> =
             graph.nodes.keys().map(|s| s.as_str()).collect();
@@ -47,11 +46,11 @@ impl Index {
     /// Remove a node and its edges from the index.
     pub fn remove_node(&self, node_id: &str) -> Result<()> {
         // Remove FTS entry first (need the rowid)
-        let rowid_result: std::result::Result<i64, _> = self.conn.query_row(
-            "SELECT rowid FROM nodes WHERE id = ?1",
-            [node_id],
-            |row| row.get(0),
-        );
+        let rowid_result: std::result::Result<i64, _> =
+            self.conn
+                .query_row("SELECT rowid FROM nodes WHERE id = ?1", [node_id], |row| {
+                    row.get(0)
+                });
 
         if let Ok(rowid) = rowid_result {
             self.conn.execute(
@@ -66,8 +65,10 @@ impl Index {
             )?;
         }
 
-        self.conn
-            .execute("DELETE FROM edges WHERE source_id = ?1 OR target_id = ?1", [node_id])?;
+        self.conn.execute(
+            "DELETE FROM edges WHERE source_id = ?1 OR target_id = ?1",
+            [node_id],
+        )?;
         self.conn
             .execute("DELETE FROM nodes WHERE id = ?1", [node_id])?;
 
@@ -75,11 +76,11 @@ impl Index {
     }
 
     fn get_title(&self, node_id: &str) -> Result<Option<String>> {
-        let result = self.conn.query_row(
-            "SELECT title FROM nodes WHERE id = ?1",
-            [node_id],
-            |row| row.get(0),
-        );
+        let result =
+            self.conn
+                .query_row("SELECT title FROM nodes WHERE id = ?1", [node_id], |row| {
+                    row.get(0)
+                });
         match result {
             Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -88,11 +89,11 @@ impl Index {
     }
 
     fn get_tags(&self, node_id: &str) -> Result<Option<String>> {
-        let result = self.conn.query_row(
-            "SELECT tags FROM nodes WHERE id = ?1",
-            [node_id],
-            |row| row.get(0),
-        );
+        let result =
+            self.conn
+                .query_row("SELECT tags FROM nodes WHERE id = ?1", [node_id], |row| {
+                    row.get(0)
+                });
         match result {
             Ok(v) => Ok(v),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -104,10 +105,10 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
     use tempyr_core::graph::Graph;
     use tempyr_core::node::parse_node;
     use tempyr_core::schema::Schema;
-    use std::path::{Path, PathBuf};
 
     fn make_schema() -> Schema {
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))

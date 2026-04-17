@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use crate::config::ProjectContext;
-use tempyr_interview::proposer;
 use tempyr_core::graph::Graph;
+use tempyr_interview::proposer;
 
 pub fn run(ctx: &ProjectContext, file: &Path) -> anyhow::Result<()> {
     if !file.exists() {
@@ -20,7 +20,13 @@ pub fn run(ctx: &ProjectContext, file: &Path) -> anyhow::Result<()> {
 
     // Start an interview session from the imported text
     let existing_suffixes = tempyr_core::id::collect_existing_suffixes(&ctx.graph_dir);
-    let result = proposer::interview_start(&content, "feature", &ctx.schema, &existing_ids, &existing_suffixes)?;
+    let result = proposer::interview_start(
+        &content,
+        "feature",
+        &ctx.schema,
+        &existing_ids,
+        &existing_suffixes,
+    )?;
 
     let sessions_dir = ctx.tempyr_dir.join("sessions");
     let session = result.session;
@@ -28,7 +34,10 @@ pub fn run(ctx: &ProjectContext, file: &Path) -> anyhow::Result<()> {
 
     println!("Imported text from: {}", file.display());
     println!("Created interview session: {}", session.id);
-    println!("Root node: {} ({})", session.root_node.id, session.root_type);
+    println!(
+        "Root node: {} ({})",
+        session.root_node.id, session.root_type
+    );
     println!("{}", result.progress);
     println!();
     println!("The import created an interview session. Use the interview commands to");

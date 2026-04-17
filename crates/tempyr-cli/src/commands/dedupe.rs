@@ -31,19 +31,26 @@ pub fn run(ctx: &ProjectContext, threshold: f64, json: bool) -> anyhow::Result<(
         }
     }
 
-    candidates.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     if json {
-        let json_candidates: Vec<_> = candidates.iter().map(|c| {
-            serde_json::json!({
-                "node_a": c.node_a,
-                "node_b": c.node_b,
-                "type": c.node_type,
-                "title_a": c.title_a,
-                "title_b": c.title_b,
-                "similarity": c.similarity,
+        let json_candidates: Vec<_> = candidates
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "node_a": c.node_a,
+                    "node_b": c.node_b,
+                    "type": c.node_type,
+                    "title_a": c.title_a,
+                    "title_b": c.title_b,
+                    "similarity": c.similarity,
+                })
             })
-        }).collect();
+            .collect();
         println!("{}", serde_json::to_string_pretty(&json_candidates)?);
         return Ok(());
     }

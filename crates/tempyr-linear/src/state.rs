@@ -85,10 +85,7 @@ impl SyncState {
     }
 
     /// Find orphaned entries (node IDs no longer in the graph).
-    pub fn orphaned_entries<'a>(
-        &'a self,
-        graph_node_ids: &[&str],
-    ) -> Vec<&'a SyncEntry> {
+    pub fn orphaned_entries<'a>(&'a self, graph_node_ids: &[&str]) -> Vec<&'a SyncEntry> {
         self.entries
             .values()
             .filter(|e| !graph_node_ids.contains(&e.node_id.as_str()))

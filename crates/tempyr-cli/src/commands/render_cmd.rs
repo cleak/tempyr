@@ -31,7 +31,10 @@ pub fn run(
     };
 
     // Try project-local template first, then built-in
-    let local_path = ctx.tempyr_dir.join("render").join(format!("{template_name}.toml"));
+    let local_path = ctx
+        .tempyr_dir
+        .join("render")
+        .join(format!("{template_name}.toml"));
     let result = if local_path.exists() {
         tempyr_render::render(&graph, &local_path, root_id, &temporal_filter)?
     } else {

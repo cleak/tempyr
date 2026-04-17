@@ -1,5 +1,5 @@
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{LinearError, Result};
 
@@ -34,11 +34,7 @@ impl LinearClient {
     }
 
     /// Execute a GraphQL query/mutation and deserialize the `data` field.
-    pub async fn execute<T: DeserializeOwned>(
-        &self,
-        query: &str,
-        variables: Value,
-    ) -> Result<T> {
+    pub async fn execute<T: DeserializeOwned>(&self, query: &str, variables: Value) -> Result<T> {
         let body = json!({
             "query": query,
             "variables": variables,
@@ -62,9 +58,8 @@ impl LinearClient {
             .get("data")
             .ok_or_else(|| LinearError::GraphQL("No 'data' field in response".to_string()))?;
 
-        serde_json::from_value(data.clone()).map_err(|e| {
-            LinearError::GraphQL(format!("Failed to deserialize response: {e}"))
-        })
+        serde_json::from_value(data.clone())
+            .map_err(|e| LinearError::GraphQL(format!("Failed to deserialize response: {e}")))
     }
 
     /// Send a raw POST request to the GraphQL endpoint.

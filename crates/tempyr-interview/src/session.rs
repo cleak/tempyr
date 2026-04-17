@@ -103,7 +103,11 @@ pub struct Progress {
 
 impl std::fmt::Display for Progress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{} ({:.0}%)", self.filled, self.total, self.percentage)
+        write!(
+            f,
+            "{}/{} ({:.0}%)",
+            self.filled, self.total, self.percentage
+        )
     }
 }
 
@@ -181,17 +185,18 @@ impl InterviewSession {
             let entry = entry?;
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json")
-                && let Ok(session) = Self::load(&path) {
-                    summaries.push(SessionSummary {
-                        id: session.id.clone(),
-                        root_type: session.root_type.clone(),
-                        root_id: session.root_node.id.clone(),
-                        phase: session.phase,
-                        node_count: session.tentative_nodes.len() + 1, // +1 for root
-                        created_at: session.created_at,
-                        updated_at: session.updated_at,
-                    });
-                }
+                && let Ok(session) = Self::load(&path)
+            {
+                summaries.push(SessionSummary {
+                    id: session.id.clone(),
+                    root_type: session.root_type.clone(),
+                    root_id: session.root_node.id.clone(),
+                    phase: session.phase,
+                    node_count: session.tentative_nodes.len() + 1, // +1 for root
+                    created_at: session.created_at,
+                    updated_at: session.updated_at,
+                });
+            }
         }
 
         summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -288,7 +293,9 @@ impl InterviewSession {
         if self.root_node.node_type == node_type {
             return true;
         }
-        self.tentative_nodes.iter().any(|n| n.node_type == node_type)
+        self.tentative_nodes
+            .iter()
+            .any(|n| n.node_type == node_type)
     }
 
     /// Check if an edge of the given type exists from the root.
@@ -300,8 +307,16 @@ impl InterviewSession {
 
     /// Count tentative nodes of a given type.
     pub fn count_nodes_of_type(&self, node_type: &str) -> usize {
-        let root = if self.root_node.node_type == node_type { 1 } else { 0 };
-        let others = self.tentative_nodes.iter().filter(|n| n.node_type == node_type).count();
+        let root = if self.root_node.node_type == node_type {
+            1
+        } else {
+            0
+        };
+        let others = self
+            .tentative_nodes
+            .iter()
+            .filter(|n| n.node_type == node_type)
+            .count();
         root + others
     }
 
@@ -334,7 +349,11 @@ impl InterviewSession {
             let target_exists = tempyr_core::ops::find_node_file(graph_dir, &edge.target).is_ok();
 
             if !source_exists || !target_exists {
-                let missing = if !source_exists { &edge.source } else { &edge.target };
+                let missing = if !source_exists {
+                    &edge.source
+                } else {
+                    &edge.target
+                };
                 warnings.push(format!(
                     "Skipped edge {} --{}--> {}: node '{}' not found on disk",
                     edge.source, edge.edge_type, edge.target, missing
@@ -342,18 +361,26 @@ impl InterviewSession {
                 continue;
             }
 
-            match ops::add_edge(graph_dir, &edge.source, &edge.target, &edge.edge_type, schema) {
+            match ops::add_edge(
+                graph_dir,
+                &edge.source,
+                &edge.target,
+                &edge.edge_type,
+                schema,
+            ) {
                 Ok(()) => {
                     edges_written += 1;
                     // Track modified files
                     if let Ok(p) = ops::find_node_file(graph_dir, &edge.source)
-                        && !created_files.contains(&p) {
-                            modified_files.push(p);
-                        }
+                        && !created_files.contains(&p)
+                    {
+                        modified_files.push(p);
+                    }
                     if let Ok(p) = ops::find_node_file(graph_dir, &edge.target)
-                        && !created_files.contains(&p) {
-                            modified_files.push(p);
-                        }
+                        && !created_files.contains(&p)
+                    {
+                        modified_files.push(p);
+                    }
                 }
                 Err(tempyr_core::TempyrError::Edge(msg)) if msg.contains("already exists") => {
                     edges_written += 1; // Already exists counts as success
@@ -418,7 +445,11 @@ pub struct CommitResult {
 }
 
 /// Write a tentative node to disk as a markdown file.
-fn write_tentative_node(graph_dir: &Path, node: &TentativeNode, schema: &Schema) -> Result<PathBuf> {
+fn write_tentative_node(
+    graph_dir: &Path,
+    node: &TentativeNode,
+    schema: &Schema,
+) -> Result<PathBuf> {
     let mut owner = node.fields.get("owner").cloned();
     let tags: Option<Vec<String>> = node
         .fields
@@ -428,12 +459,17 @@ fn write_tentative_node(graph_dir: &Path, node: &TentativeNode, schema: &Schema)
     // If owner is required but not set, default to "unknown"
     if owner.is_none()
         && let Some(node_def) = schema.node_types.get(&node.node_type)
-            && node_def.required_fields.contains(&"owner".to_string()) {
-                owner = Some("unknown".to_string());
-            }
+        && node_def.required_fields.contains(&"owner".to_string())
+    {
+        owner = Some("unknown".to_string());
+    }
 
     // If status is empty but required, use "draft"
-    let status = if node.status.is_empty() { "draft" } else { &node.status };
+    let status = if node.status.is_empty() {
+        "draft"
+    } else {
+        &node.status
+    };
 
     let path = ops::create_node_file(
         graph_dir,
@@ -583,7 +619,11 @@ mod tests {
     fn test_record_answer() {
         let mut session = InterviewSession::new("feature", "feat-a", "# A\n");
 
-        session.record_answer("Who is the target user?", "Platform engineers", vec!["persona-eng".to_string()]);
+        session.record_answer(
+            "Who is the target user?",
+            "Platform engineers",
+            vec!["persona-eng".to_string()],
+        );
 
         assert_eq!(session.answered.len(), 1);
         assert_eq!(session.answered[0].phase, InterviewPhase::Discovery);
@@ -593,11 +633,16 @@ mod tests {
     fn test_adjust_node() {
         let mut session = InterviewSession::new("feature", "feat-a", "# A\n");
 
-        session.adjust_node("feat-a", NodePatch {
-            body: Some("# Updated Body\n".to_string()),
-            status: Some("active".to_string()),
-            ..Default::default()
-        }).unwrap();
+        session
+            .adjust_node(
+                "feat-a",
+                NodePatch {
+                    body: Some("# Updated Body\n".to_string()),
+                    status: Some("active".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
         assert_eq!(session.root_node.body, "# Updated Body\n");
         assert_eq!(session.root_node.status, "active");
@@ -616,10 +661,15 @@ mod tests {
             source_qa: vec![],
         });
 
-        session.adjust_node("persona-eng", NodePatch {
-            body: Some("# Updated Persona\n".to_string()),
-            ..Default::default()
-        }).unwrap();
+        session
+            .adjust_node(
+                "persona-eng",
+                NodePatch {
+                    body: Some("# Updated Persona\n".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
         assert!(session.tentative_nodes[0].body.contains("Updated Persona"));
     }
@@ -643,12 +693,19 @@ mod tests {
         }
 
         let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap().parent().unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
             .join("schema/default-schema.toml");
         let schema = tempyr_core::schema::Schema::load(&schema_path).unwrap();
 
-        let mut session = InterviewSession::new("feature", "feat-test", "# Test Feature\n\nA test.\n");
-        session.root_node.fields.insert("owner".to_string(), "caleb".to_string());
+        let mut session =
+            InterviewSession::new("feature", "feat-test", "# Test Feature\n\nA test.\n");
+        session
+            .root_node
+            .fields
+            .insert("owner".to_string(), "caleb".to_string());
 
         session.add_tentative_node(TentativeNode {
             id: "persona-dev".to_string(),
@@ -668,7 +725,11 @@ mod tests {
         assert!(graph_dir.join("personas/persona-dev.md").exists());
 
         // Session file should be deleted
-        assert!(InterviewSession::list_sessions(&sessions_dir).unwrap().is_empty());
+        assert!(
+            InterviewSession::list_sessions(&sessions_dir)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

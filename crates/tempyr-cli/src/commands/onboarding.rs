@@ -1,16 +1,19 @@
 use std::io;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::Context;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
@@ -84,27 +87,59 @@ impl ExistingDocMode {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Append => "Append Tempyr section",
-            Self::ClaudeCode => "Prepare Claude Code handoff",
-            Self::Codex => "Prepare Codex handoff",
-            Self::Manual => "Leave unchanged, write manual steps",
+            Self::ClaudeCode => "Run Claude Code merge now (recommended)",
+            Self::Codex => "Run Codex merge now",
+            Self::Append => "Opt out: append Tempyr section directly",
+            Self::Manual => "Opt out: leave unchanged, write manual steps",
         }
     }
 
     fn detail(self) -> &'static str {
         match self {
-            Self::Append => {
-                "Tempyr appends a marked Tempyr block into the selected existing markdown file."
-            }
             Self::ClaudeCode => {
-                "Tempyr leaves existing docs untouched and writes a Claude Code merge prompt."
+                "Tempyr launches Claude Code immediately to merge the Tempyr guidance into the selected docs."
             }
-            Self::Codex => "Tempyr leaves existing docs untouched and writes a Codex merge prompt.",
+            Self::Codex => {
+                "Tempyr launches Codex immediately to merge the Tempyr guidance into the selected docs."
+            }
+            Self::Append => {
+                "Tempyr appends a marked Tempyr block into the selected existing markdown file without launching an agent."
+            }
             Self::Manual => {
                 "Tempyr leaves docs untouched and writes manual snippets under .tempyr/onboarding/."
             }
         }
     }
+}
+
+fn recommended_existing_doc_mode() -> ExistingDocMode {
+    recommended_existing_doc_mode_from_availability(
+        command_runs_help("claude"),
+        command_runs_help("codex"),
+    )
+}
+
+fn recommended_existing_doc_mode_from_availability(
+    has_claude: bool,
+    has_codex: bool,
+) -> ExistingDocMode {
+    if has_claude {
+        ExistingDocMode::ClaudeCode
+    } else if has_codex {
+        ExistingDocMode::Codex
+    } else {
+        ExistingDocMode::Append
+    }
+}
+
+fn command_runs_help(program: &str) -> bool {
+    Command::new(program)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,12 +175,6 @@ pub struct OnboardingSelections {
 
 impl OnboardingSelections {
     pub fn interactive_defaults(existing_docs: ExistingDocs) -> Self {
-        let existing_doc_mode = if existing_docs.any() {
-            ExistingDocMode::ClaudeCode
-        } else {
-            ExistingDocMode::Append
-        };
-
         Self {
             provider: EmbeddingProviderChoice::Voyage,
             api_key: None,
@@ -161,7 +190,11 @@ impl OnboardingSelections {
             install_codex_skill: true,
             install_codex_doc: true,
             write_mcp_setup_notes: true,
-            existing_doc_mode,
+            existing_doc_mode: if existing_docs.any() {
+                recommended_existing_doc_mode()
+            } else {
+                ExistingDocMode::Append
+            },
         }
     }
 }
@@ -169,11 +202,28 @@ impl OnboardingSelections {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
     Welcome,
+    Provider,
     CoreSetup,
     ApiKey,
     AgentIntegrations,
     ExistingDocs,
     Review,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoreOption {
+    StoreApiKey,
+    CreateEnvLocal,
+    ValidateProvider,
+    RunIndexRebuild,
+    InstallRenderOverrides,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ApiKeyValidation {
+    Empty,
+    Valid,
+    Invalid(String),
 }
 
 #[derive(Debug)]
@@ -201,7 +251,7 @@ impl WizardState {
     }
 
     fn pages(&self) -> Vec<Page> {
-        let mut pages = vec![Page::Welcome, Page::CoreSetup];
+        let mut pages = vec![Page::Welcome, Page::Provider, Page::CoreSetup];
         if self.should_show_api_key_page() {
             pages.push(Page::ApiKey);
         }
@@ -266,31 +316,39 @@ pub fn run(existing_docs: ExistingDocs) -> anyhow::Result<Option<OnboardingSelec
             continue;
         }
 
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-
-        if is_cancel_key(state.current_page(), key.code) {
-            return Ok(None);
-        }
-
-        match state.current_page() {
-            Page::Welcome => handle_welcome(&mut state, key.code),
-            Page::CoreSetup => handle_core_setup(&mut state, key.code),
-            Page::ApiKey => handle_api_key(&mut state, key.code),
-            Page::AgentIntegrations => handle_agent_integrations(&mut state, key.code),
-            Page::ExistingDocs => handle_existing_docs(&mut state, key.code),
-            Page::Review => match key.code {
-                KeyCode::Enter => {
-                    state.commit_transient_inputs();
-                    return Ok(Some(state.selections));
+        match event::read()? {
+            Event::Key(key) => {
+                if key.kind != KeyEventKind::Press {
+                    continue;
                 }
-                KeyCode::Left | KeyCode::Backspace | KeyCode::Char('b') => state.prev_page(),
-                _ => {}
-            },
+
+                if is_cancel_key(state.current_page(), key.code) {
+                    return Ok(None);
+                }
+
+                match state.current_page() {
+                    Page::Welcome => handle_welcome(&mut state, key.code),
+                    Page::Provider => handle_provider(&mut state, key.code),
+                    Page::CoreSetup => handle_core_setup(&mut state, key.code),
+                    Page::ApiKey => handle_api_key(&mut state, key.code),
+                    Page::AgentIntegrations => handle_agent_integrations(&mut state, key.code),
+                    Page::ExistingDocs => handle_existing_docs(&mut state, key.code),
+                    Page::Review => match key.code {
+                        KeyCode::Enter => {
+                            state.commit_transient_inputs();
+                            return Ok(Some(state.selections));
+                        }
+                        KeyCode::Left | KeyCode::Backspace | KeyCode::Char('b') => {
+                            state.prev_page()
+                        }
+                        _ => {}
+                    },
+                }
+            }
+            Event::Paste(text) if state.current_page() == Page::ApiKey => {
+                append_api_key_input(&mut state, &text);
+            }
+            _ => {}
         }
     }
 }
@@ -305,49 +363,52 @@ fn handle_welcome(state: &mut WizardState, key: KeyCode) {
     }
 }
 
+fn handle_provider(state: &mut WizardState, key: KeyCode) {
+    let current = provider_index(state.selections.provider);
+    let all = EmbeddingProviderChoice::all();
+
+    match key {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if current > 0 {
+                update_provider(state, all[current - 1]);
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if current + 1 < all.len() {
+                update_provider(state, all[current + 1]);
+            }
+        }
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('n') => state.next_page(),
+        KeyCode::Left | KeyCode::Backspace | KeyCode::Char('b') => state.prev_page(),
+        _ => {}
+    }
+}
+
 fn handle_core_setup(state: &mut WizardState, key: KeyCode) {
-    const MAX_INDEX: usize = 5;
+    let max_index = core_options(state).len().saturating_sub(1);
+    state.core_index = state.core_index.min(max_index);
 
     match key {
         KeyCode::Up | KeyCode::Char('k') => state.core_index = state.core_index.saturating_sub(1),
         KeyCode::Down | KeyCode::Char('j') => {
-            state.core_index = (state.core_index + 1).min(MAX_INDEX)
+            state.core_index = (state.core_index + 1).min(max_index)
         }
-        KeyCode::Left | KeyCode::Char('h') => {
-            if state.core_index == 0 {
-                let current = provider_index(state.selections.provider);
-                if current > 0 {
-                    update_provider(state, EmbeddingProviderChoice::all()[current - 1]);
-                }
-            } else {
-                state.prev_page();
-            }
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            if state.core_index == 0 {
-                let current = provider_index(state.selections.provider);
-                let all = EmbeddingProviderChoice::all();
-                if current + 1 < all.len() {
-                    update_provider(state, all[current + 1]);
-                }
-            } else {
-                state.next_page();
-            }
-        }
-        KeyCode::Char(' ') => toggle_core_checkbox(state),
+        KeyCode::Char(' ') => toggle_core_option(state),
         KeyCode::Enter | KeyCode::Char('n') => state.next_page(),
-        KeyCode::Backspace | KeyCode::Char('b') => state.prev_page(),
+        KeyCode::Left | KeyCode::Backspace | KeyCode::Char('b') => state.prev_page(),
+        KeyCode::Right | KeyCode::Char('l') => state.next_page(),
         _ => {}
     }
 }
 
 fn handle_api_key(state: &mut WizardState, key: KeyCode) {
     match key {
-        KeyCode::Enter | KeyCode::Right => state.next_page(),
+        KeyCode::Enter | KeyCode::Right if api_key_can_continue(state) => state.next_page(),
         KeyCode::Left => state.prev_page(),
         KeyCode::Backspace => {
             state.api_key_input.pop();
         }
+        KeyCode::Delete => state.api_key_input.clear(),
         KeyCode::Char(ch) => {
             state.api_key_input.push(ch);
         }
@@ -395,42 +456,49 @@ fn provider_index(provider: EmbeddingProviderChoice) -> usize {
 }
 
 fn update_provider(state: &mut WizardState, provider: EmbeddingProviderChoice) {
-    if state.selections.provider != provider {
+    let previous = state.selections.provider;
+    if previous != provider {
         state.api_key_input.clear();
         state.selections.api_key = None;
     }
 
     state.selections.provider = provider;
-    if !provider.needs_api_key() {
+    if provider.needs_api_key() {
+        if !previous.needs_api_key() {
+            state.selections.write_api_key_to_env_local = true;
+        }
+    } else {
         state.selections.write_api_key_to_env_local = false;
     }
+    state.core_index = state
+        .core_index
+        .min(core_options(state).len().saturating_sub(1));
 }
 
-fn toggle_core_checkbox(state: &mut WizardState) {
-    match state.core_index {
-        1 => {
-            if state.selections.provider.needs_api_key() {
-                state.selections.write_api_key_to_env_local =
-                    !state.selections.write_api_key_to_env_local;
-                if !state.selections.write_api_key_to_env_local {
-                    state.api_key_input.clear();
-                }
+fn toggle_core_option(state: &mut WizardState) {
+    match core_options(state).get(state.core_index).copied() {
+        Some(CoreOption::StoreApiKey) => {
+            state.selections.write_api_key_to_env_local =
+                !state.selections.write_api_key_to_env_local;
+            if !state.selections.write_api_key_to_env_local {
+                state.api_key_input.clear();
+                state.selections.api_key = None;
             }
         }
-        2 => {
+        Some(CoreOption::CreateEnvLocal) => {
             state.selections.create_env_local_from_template =
                 !state.selections.create_env_local_from_template;
         }
-        3 => {
+        Some(CoreOption::ValidateProvider) => {
             state.selections.validate_provider_setup = !state.selections.validate_provider_setup;
         }
-        4 => {
+        Some(CoreOption::RunIndexRebuild) => {
             state.selections.run_index_rebuild = !state.selections.run_index_rebuild;
         }
-        5 => {
+        Some(CoreOption::InstallRenderOverrides) => {
             state.selections.install_render_overrides = !state.selections.install_render_overrides;
         }
-        _ => {}
+        None => {}
     }
 }
 
@@ -504,6 +572,7 @@ fn render(area: Rect, frame: &mut ratatui::Frame<'_>, state: &WizardState) {
 
     match state.current_page() {
         Page::Welcome => render_welcome(frame, chunks[1]),
+        Page::Provider => render_provider(frame, chunks[1], state),
         Page::CoreSetup => render_core_setup(frame, chunks[1], state),
         Page::ApiKey => render_api_key(frame, chunks[1], state),
         Page::AgentIntegrations => render_agent_integrations(frame, chunks[1], state),
@@ -520,21 +589,31 @@ fn render(area: Rect, frame: &mut ratatui::Frame<'_>, state: &WizardState) {
 fn current_header(state: &WizardState) -> Vec<Line<'static>> {
     match state.current_page() {
         Page::Welcome => vec![
-            Line::from("Set up Tempyr with grouped onboarding pages and opinionated defaults."),
-            Line::from("Most pages combine several setup decisions so the flow stays short."),
+            Line::from(
+                "This setup walks through the project choices Tempyr needs before it writes files.",
+            ),
+            Line::from(
+                "You will choose embeddings, optional secrets, integrations, and then confirm the plan.",
+            ),
+        ],
+        Page::Provider => vec![
+            Line::from("Choose the embedding provider for retrieval and search."),
+            Line::from(
+                "Hosted providers can collect an API key in-flow; local embeddings need a special build.",
+            ),
         ],
         Page::CoreSetup => vec![
-            Line::from("Choose the embedding provider, then toggle the adjacent setup actions."),
-            Line::from("Voyage is the premium default, then Gemini, then local as the fallback."),
+            Line::from("Choose the setup actions Tempyr should perform during initialization."),
+            Line::from(
+                "These options control file scaffolding, validation, and optional post-setup work.",
+            ),
         ],
         Page::ApiKey => vec![
             Line::from(format!(
-                "Enter {} now or leave it blank to fill in later.",
+                "Enter a real {} now.",
                 state.selections.provider.env_var().unwrap_or("the API key")
             )),
-            Line::from(
-                "Tempyr will only write the value if 'Write API key to .env.local' stays enabled.",
-            ),
+            Line::from("Tempyr validates it as you type and only stores it if you continue."),
         ],
         Page::AgentIntegrations => vec![
             Line::from("Toggle the agent integrations you want Tempyr to scaffold."),
@@ -554,11 +633,12 @@ fn current_header(state: &WizardState) -> Vec<Line<'static>> {
 fn current_footer(state: &WizardState) -> &'static str {
     match state.current_page() {
         Page::Welcome => "Enter: continue  q/Esc: cancel",
+        Page::Provider => "Up/Down: choose provider  Enter: continue  Backspace/Left: back",
         Page::CoreSetup => {
-            "Up/Down: move  Left/Right: change provider  Space: toggle option  Enter: continue"
+            "Up/Down: move  Space: toggle option  Enter: continue  Backspace/Left: back"
         }
         Page::ApiKey => {
-            "Type to enter the key  Backspace: delete  Enter/Right: continue  Left: back  Esc: cancel"
+            "Type or paste the key  Backspace: delete  Delete: clear  Enter: continue when valid  Left: back  Esc: cancel"
         }
         Page::AgentIntegrations | Page::ExistingDocs => {
             "Up/Down: move  Space: toggle/select  Enter: continue  Backspace/Left: back"
@@ -569,14 +649,77 @@ fn current_footer(state: &WizardState) -> &'static str {
 
 fn render_welcome(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let text = vec![
-        Line::from("Tempyr will:"),
+        Line::from("This init flow will:"),
         Line::from(""),
-        Line::from("- create .tempyr/ and graph/"),
-        Line::from("- configure embeddings and optional secrets"),
-        Line::from("- scaffold Claude Code and Codex integrations"),
-        Line::from("- write follow-up notes instead of clobbering existing docs"),
+        Line::from("1. Create .tempyr/, graph/, and the base project config."),
+        Line::from("2. Ask which embedding provider this repo should use."),
+        Line::from("3. Collect and validate an API key if you want Tempyr to store one."),
+        Line::from("4. Scaffold Claude Code and Codex integration files."),
+        Line::from("5. Review the plan before anything is written."),
     ];
     frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), area);
+}
+
+fn render_provider(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardState) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .split(area);
+
+    let selected = state.selections.provider;
+    let rows: Vec<ListItem<'_>> = EmbeddingProviderChoice::all()
+        .into_iter()
+        .map(|provider| {
+            ListItem::new(radio_line(
+                provider == selected,
+                provider == selected,
+                provider.label(),
+            ))
+        })
+        .collect();
+    let list = List::new(rows)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Embedding provider "),
+        );
+    let mut list_state = ListState::default();
+    list_state.select(Some(provider_index(selected)));
+    frame.render_stateful_widget(list, columns[0], &mut list_state);
+
+    let mut detail_lines = vec![
+        Line::from(vec![
+            Span::styled(
+                selected.label(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::raw(format!("({})", selected.recommendation())),
+        ]),
+        Line::from(""),
+        Line::from(selected.detail()),
+        Line::from(""),
+    ];
+    if let Some(env_var) = selected.env_var() {
+        detail_lines.push(Line::from(format!(
+            "Tempyr can collect and validate {} on the next page if you keep secret storage enabled.",
+            env_var
+        )));
+    } else {
+        detail_lines.push(Line::from(
+            "No secret entry screen is needed for local embeddings.",
+        ));
+    }
+
+    let detail = Paragraph::new(detail_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Provider details "),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(detail, columns[1]);
 }
 
 fn render_core_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardState) {
@@ -585,72 +728,36 @@ fn render_core_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardS
         .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
         .split(area);
 
-    let provider = state.selections.provider;
-    let rows = [
-        format!(
-            "{} Embedding provider: {} ({})",
-            if state.core_index == 0 { ">" } else { " " },
-            provider.label(),
-            provider.recommendation()
-        ),
-        checkbox_line(
-            state.core_index == 1,
-            state.selections.write_api_key_to_env_local && provider.needs_api_key(),
-            if provider.needs_api_key() {
-                "Write API key to .env.local"
-            } else {
-                "Write API key to .env.local (not needed for local)"
-            },
-        ),
-        checkbox_line(
-            state.core_index == 2,
-            state.selections.create_env_local_from_template,
-            "Create .env.local from template if missing",
-        ),
-        checkbox_line(
-            state.core_index == 3,
-            state.selections.validate_provider_setup,
-            "Validate provider setup now",
-        ),
-        checkbox_line(
-            state.core_index == 4,
-            state.selections.run_index_rebuild,
-            "Run initial index rebuild after setup",
-        ),
-        checkbox_line(
-            state.core_index == 5,
-            state.selections.install_render_overrides,
-            "Copy built-in render templates into .tempyr/render",
-        ),
-    ];
-
-    let items: Vec<ListItem<'_>> = rows.iter().map(|row| ListItem::new(row.as_str())).collect();
+    let options = core_options(state);
+    let items: Vec<ListItem<'_>> = options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            ListItem::new(checkbox_line(
+                state.core_index == index,
+                core_option_enabled(state, *option),
+                &core_option_label(*option),
+            ))
+        })
+        .collect();
     let list = List::new(items)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .block(Block::default().borders(Borders::ALL).title(" Core setup "));
     let mut list_state = ListState::default();
-    list_state.select(Some(state.core_index));
+    list_state.select(Some(state.core_index.min(options.len().saturating_sub(1))));
     frame.render_stateful_widget(list, columns[0], &mut list_state);
 
-    let detail = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled(
-                provider.label(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::raw(format!("({})", provider.recommendation())),
-        ]),
-        Line::from(""),
-        Line::from(provider.detail()),
-        Line::from(""),
-        Line::from("Local note: local embeddings only work when this binary was built with"),
-        Line::from("`--features local-embeddings`."),
-    ])
+    let detail = Paragraph::new(core_option_detail_lines(
+        state,
+        options
+            .get(state.core_index.min(options.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(CoreOption::CreateEnvLocal),
+    ))
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Provider details "),
+            .title(" Option details "),
     )
     .wrap(Wrap { trim: true });
     frame.render_widget(detail, columns[1]);
@@ -659,35 +766,89 @@ fn render_core_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardS
 fn render_api_key(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardState) {
     let env_var = state.selections.provider.env_var().unwrap_or("API key");
     let masked = if state.api_key_input.is_empty() {
-        "<leave blank to configure later>".to_string()
+        String::new()
     } else {
         "*".repeat(state.api_key_input.chars().count())
     };
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(5),
+            Constraint::Min(3),
+        ])
+        .split(area);
 
-    let text = vec![
+    let intro = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(env_var, Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" will be written to "),
             Span::styled(".env.local", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" if provided."),
+            Span::raw(" when this page is valid."),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "Current input: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(masked),
-        ]),
-        Line::from(""),
-        Line::from(
-            "Leave this empty if you want Tempyr to scaffold config without storing the secret yet.",
+        Line::from("Paste the key here, or go back and disable secret storage for this provider."),
+    ])
+    .wrap(Wrap { trim: true });
+    frame.render_widget(intro, sections[0]);
+
+    let input = Paragraph::new(masked.as_str())
+        .style(Style::default().fg(Color::Yellow))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {env_var} ")),
+        );
+    frame.render_widget(input, sections[1]);
+
+    let cursor_offset = masked
+        .chars()
+        .count()
+        .min(sections[1].width.saturating_sub(2) as usize) as u16;
+    frame.set_cursor_position(Position::new(
+        sections[1]
+            .x
+            .saturating_add(1)
+            .saturating_add(cursor_offset),
+        sections[1].y.saturating_add(1),
+    ));
+
+    let (status_style, status_lines) = match api_key_validation(state) {
+        ApiKeyValidation::Empty => (
+            Style::default().fg(Color::Yellow),
+            vec![
+                Line::from("A real API key is required to continue from this page."),
+                Line::from("Go back and turn off key storage if you want to configure it later."),
+            ],
         ),
-    ];
-    let widget = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title(" API key "))
+        ApiKeyValidation::Valid => (
+            Style::default().fg(Color::Green),
+            vec![
+                Line::from("Key format looks valid."),
+                Line::from("Press Enter to keep going."),
+            ],
+        ),
+        ApiKeyValidation::Invalid(message) => {
+            (Style::default().fg(Color::Red), vec![Line::from(message)])
+        }
+    };
+    let status = Paragraph::new(status_lines)
+        .style(status_style)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Validation status "),
+        )
         .wrap(Wrap { trim: true });
-    frame.render_widget(widget, area);
+    frame.render_widget(status, sections[2]);
+
+    let help = Paragraph::new(vec![
+        Line::from("The input is masked on screen and validated with Tempyr's provider checks."),
+        Line::from("Delete clears the field if you want to paste a replacement."),
+    ])
+    .wrap(Wrap { trim: true });
+    frame.render_widget(help, sections[3]);
 }
 
 fn render_agent_integrations(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardState) {
@@ -911,6 +1072,150 @@ fn checkbox_line(active: bool, enabled: bool, label: &str) -> String {
     )
 }
 
+fn radio_line(active: bool, selected: bool, label: &str) -> String {
+    format!(
+        "{} ({}) {}",
+        if active { ">" } else { " " },
+        if selected { "x" } else { " " },
+        label
+    )
+}
+
+fn core_options(state: &WizardState) -> Vec<CoreOption> {
+    let mut options = Vec::new();
+    if state.selections.provider.needs_api_key() {
+        options.push(CoreOption::StoreApiKey);
+    }
+    options.extend([
+        CoreOption::CreateEnvLocal,
+        CoreOption::ValidateProvider,
+        CoreOption::RunIndexRebuild,
+        CoreOption::InstallRenderOverrides,
+    ]);
+    options
+}
+
+fn core_option_enabled(state: &WizardState, option: CoreOption) -> bool {
+    match option {
+        CoreOption::StoreApiKey => state.selections.write_api_key_to_env_local,
+        CoreOption::CreateEnvLocal => state.selections.create_env_local_from_template,
+        CoreOption::ValidateProvider => state.selections.validate_provider_setup,
+        CoreOption::RunIndexRebuild => state.selections.run_index_rebuild,
+        CoreOption::InstallRenderOverrides => state.selections.install_render_overrides,
+    }
+}
+
+fn core_option_label(option: CoreOption) -> String {
+    match option {
+        CoreOption::StoreApiKey => "Store API key in .env.local".to_string(),
+        CoreOption::CreateEnvLocal => "Create .env.local from template if missing".to_string(),
+        CoreOption::ValidateProvider => "Validate provider setup now".to_string(),
+        CoreOption::RunIndexRebuild => "Run initial index rebuild after setup".to_string(),
+        CoreOption::InstallRenderOverrides => {
+            "Copy built-in render templates into .tempyr/render".to_string()
+        }
+    }
+}
+
+fn core_option_detail_lines(state: &WizardState, option: CoreOption) -> Vec<Line<'static>> {
+    match option {
+        CoreOption::StoreApiKey => vec![
+            Line::from(vec![
+                Span::styled(
+                    "Store API key",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::raw(format!(
+                    "({})",
+                    state
+                        .selections
+                        .provider
+                        .env_var()
+                        .unwrap_or("not required")
+                )),
+            ]),
+            Line::from(""),
+            Line::from(
+                "If enabled, Tempyr opens a dedicated input screen and writes the validated key to .env.local.",
+            ),
+            Line::from(
+                "Disable this if you want to keep the secret in your shell environment instead.",
+            ),
+        ],
+        CoreOption::CreateEnvLocal => vec![
+            Line::from(Span::styled(
+                "Create .env.local",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("Copies .env.example into .env.local when the file does not already exist."),
+            Line::from("Tempyr also adds .env.local to .gitignore if needed."),
+        ],
+        CoreOption::ValidateProvider => vec![
+            Line::from(Span::styled(
+                "Validate provider setup",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(
+                "Checks that the configured provider can be constructed from the current project config and environment.",
+            ),
+            Line::from(
+                "If no hosted API key is configured yet, Tempyr reports that validation was skipped instead of failing init.",
+            ),
+        ],
+        CoreOption::RunIndexRebuild => vec![
+            Line::from(Span::styled(
+                "Initial index rebuild",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("Runs `tempyr index rebuild` after the project files are written."),
+            Line::from("Leave this off if you want to initialize first and index later."),
+        ],
+        CoreOption::InstallRenderOverrides => vec![
+            Line::from(Span::styled(
+                "Render overrides",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(
+                "Copies the built-in PRD, TDD, and task prompt templates into .tempyr/render for local customization.",
+            ),
+            Line::from("Leave this off if the defaults are enough for now."),
+        ],
+    }
+}
+
+fn api_key_validation(state: &WizardState) -> ApiKeyValidation {
+    let Some(env_var) = state.selections.provider.env_var() else {
+        return ApiKeyValidation::Valid;
+    };
+    let trimmed = state.api_key_input.trim();
+    if trimmed.is_empty() {
+        return ApiKeyValidation::Empty;
+    }
+
+    match tempyr_index::embeddings::validate_api_key_value(env_var, trimmed) {
+        Ok(()) => ApiKeyValidation::Valid,
+        Err(err) => ApiKeyValidation::Invalid(err.to_string()),
+    }
+}
+
+fn api_key_can_continue(state: &WizardState) -> bool {
+    matches!(api_key_validation(state), ApiKeyValidation::Valid)
+}
+
+fn append_api_key_input(state: &mut WizardState, text: &str) {
+    state.api_key_input.push_str(
+        &text
+            .chars()
+            .filter(|ch| *ch != '\r' && *ch != '\n')
+            .collect::<String>(),
+    );
+}
+
 fn enabled_list(entries: &[(&str, bool)]) -> String {
     let selected = entries
         .iter()
@@ -931,7 +1236,7 @@ impl TerminalGuard {
     fn enter() -> anyhow::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(err) = execute!(stdout, EnterAlternateScreen) {
+        if let Err(err) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
             let _ = disable_raw_mode();
             return Err(err.into());
         }
@@ -951,7 +1256,11 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -980,6 +1289,70 @@ mod tests {
 
         assert_eq!(state.api_key_input, "nbq");
         assert_eq!(state.page_index, 0);
+    }
+
+    #[test]
+    fn pages_include_dedicated_provider_step() {
+        let state = WizardState::new(ExistingDocs {
+            claude_md: false,
+            agents_md: false,
+        });
+
+        assert_eq!(
+            state.pages(),
+            vec![
+                Page::Welcome,
+                Page::Provider,
+                Page::CoreSetup,
+                Page::ApiKey,
+                Page::AgentIntegrations,
+                Page::Review,
+            ]
+        );
+    }
+
+    #[test]
+    fn existing_docs_default_prefers_live_runner() {
+        assert_eq!(
+            recommended_existing_doc_mode_from_availability(true, true),
+            ExistingDocMode::ClaudeCode
+        );
+        assert_eq!(
+            recommended_existing_doc_mode_from_availability(false, true),
+            ExistingDocMode::Codex
+        );
+        assert_eq!(
+            recommended_existing_doc_mode_from_availability(false, false),
+            ExistingDocMode::Append
+        );
+        assert_eq!(ExistingDocMode::all()[0], ExistingDocMode::ClaudeCode);
+    }
+
+    #[test]
+    fn api_key_page_requires_a_valid_key_before_advancing() {
+        let mut state = WizardState::new(ExistingDocs {
+            claude_md: false,
+            agents_md: false,
+        });
+        state.page_index = state
+            .pages()
+            .iter()
+            .position(|page| *page == Page::ApiKey)
+            .unwrap();
+
+        handle_api_key(&mut state, KeyCode::Enter);
+        assert_eq!(state.current_page(), Page::ApiKey);
+
+        append_api_key_input(&mut state, "changeme");
+        handle_api_key(&mut state, KeyCode::Enter);
+        assert_eq!(state.current_page(), Page::ApiKey);
+
+        state.api_key_input.clear();
+        append_api_key_input(&mut state, "pa-1234567890abcdef\n");
+        handle_api_key(&mut state, KeyCode::Enter);
+
+        assert_eq!(state.api_key_input, "pa-1234567890abcdef");
+        assert_eq!(state.current_page(), Page::AgentIntegrations);
     }
 
     #[test]

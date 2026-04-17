@@ -1,7 +1,7 @@
+use serde_json::{Value, json};
 use tempyr_core::graph::Graph;
 use tempyr_core::node::Node;
 use tempyr_core::schema::Schema;
-use serde_json::{json, Value};
 
 use crate::mapping::{body_summary, node_title};
 
@@ -26,9 +26,7 @@ pub fn build_issue_description(node: &Node, graph: &Graph, _schema: &Schema) -> 
     // Parent context (child_of edges → epics and features)
     let parent_section = build_parent_section(node, graph);
     if !parent_section.is_empty() {
-        sections.push(format!(
-            "+++ Parent Context\n{parent_section}\n+++"
-        ));
+        sections.push(format!("+++ Parent Context\n{parent_section}\n+++"));
     }
 
     // Decisions & constraints
@@ -46,9 +44,7 @@ pub fn build_issue_description(node: &Node, graph: &Graph, _schema: &Schema) -> 
     // Blocking items
     let blocking_section = build_blocking_section(node, graph);
     if !blocking_section.is_empty() {
-        sections.push(format!(
-            "+++ Blocking Items\n{blocking_section}\n+++"
-        ));
+        sections.push(format!("+++ Blocking Items\n{blocking_section}\n+++"));
     }
 
     // Components & APIs
@@ -64,13 +60,7 @@ pub fn build_issue_description(node: &Node, graph: &Graph, _schema: &Schema) -> 
     }
 
     // Risks
-    let risks_section = build_related_section(
-        node,
-        graph,
-        &["has_risk"],
-        &["risk"],
-        "Risks",
-    );
+    let risks_section = build_related_section(node, graph, &["has_risk"], &["risk"], "Risks");
     if !risks_section.is_empty() {
         sections.push(risks_section);
     }
@@ -109,8 +99,14 @@ pub fn build_attachments(node: &Node, graph: &Graph, _schema: &Schema) -> Vec<At
         let target_type = target.node_type();
         if !matches!(
             target_type,
-            "decision" | "constraint" | "persona" | "metric" | "risk"
-                | "component" | "api_surface" | "open_question"
+            "decision"
+                | "constraint"
+                | "persona"
+                | "metric"
+                | "risk"
+                | "component"
+                | "api_surface"
+                | "open_question"
         ) {
             continue;
         }
@@ -221,7 +217,10 @@ fn build_blocking_section(node: &Node, graph: &Graph) -> String {
             continue;
         }
         let Some(blocker) = graph.get_node(&edge.target) else {
-            items.push(format!("- **{}** (unresolved — node not found)", edge.target));
+            items.push(format!(
+                "- **{}** (unresolved — node not found)",
+                edge.target
+            ));
             continue;
         };
 
@@ -251,12 +250,18 @@ fn build_blocking_section(node: &Node, graph: &Graph) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempyr_core::edge::EdgeEntry;
     use tempyr_core::node::{Node, NodeFrontmatter};
     use tempyr_core::schema::Schema;
-    use std::path::PathBuf;
 
-    fn make_node(id: &str, node_type: &str, status: &str, body: &str, edges: Vec<EdgeEntry>) -> Node {
+    fn make_node(
+        id: &str,
+        node_type: &str,
+        status: &str,
+        body: &str,
+        edges: Vec<EdgeEntry>,
+    ) -> Node {
         Node {
             frontmatter: NodeFrontmatter {
                 id: id.to_string(),
@@ -277,11 +282,19 @@ mod tests {
     #[test]
     fn test_build_issue_description_includes_footer() {
         let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
-            .parent().unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
             .join("schema/default-schema.toml");
         let schema = Schema::load(&schema_path).unwrap();
-        let node = make_node("task-build-auth", "task", "backlog", "# Build Auth\n\nImplement OAuth2 login.", vec![]);
+        let node = make_node(
+            "task-build-auth",
+            "task",
+            "backlog",
+            "# Build Auth\n\nImplement OAuth2 login.",
+            vec![],
+        );
         let graph = Graph::new(schema.clone());
 
         let desc = build_issue_description(&node, &graph, &schema);
@@ -293,13 +306,18 @@ mod tests {
     #[test]
     fn test_build_attachments_filters_context_types() {
         let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
-            .parent().unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
             .join("schema/default-schema.toml");
         let schema = Schema::load(&schema_path).unwrap();
 
         let task = make_node(
-            "task-build-auth", "task", "backlog", "# Build Auth",
+            "task-build-auth",
+            "task",
+            "backlog",
+            "# Build Auth",
             vec![
                 EdgeEntry::new("decision-storage", "depends_on"),
                 EdgeEntry::new("feat-replay", "child_of"),
@@ -308,8 +326,20 @@ mod tests {
 
         let mut graph = Graph::new(schema.clone());
         graph.add_node(task.clone());
-        graph.add_node(make_node("decision-storage", "decision", "decided", "# Storage Decision\n\nUse S3.", vec![]));
-        graph.add_node(make_node("feat-replay", "feature", "active", "# Replay", vec![]));
+        graph.add_node(make_node(
+            "decision-storage",
+            "decision",
+            "decided",
+            "# Storage Decision\n\nUse S3.",
+            vec![],
+        ));
+        graph.add_node(make_node(
+            "feat-replay",
+            "feature",
+            "active",
+            "# Replay",
+            vec![],
+        ));
 
         let attachments = build_attachments(&task, &graph, &schema);
         // Should include decision but not feature (feature is not a "context" type)

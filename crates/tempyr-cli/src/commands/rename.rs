@@ -15,8 +15,8 @@ pub fn run(
         }
         (None, Some(slug)) => {
             let files = ops::rename_node_slug(&ctx.graph_dir, old_id, slug)?;
-            let parsed = tempyr_core::id::parse_node_id(old_id)
-                .expect("slug rename requires hybrid ID");
+            let parsed =
+                tempyr_core::id::parse_node_id(old_id).expect("slug rename requires hybrid ID");
             println!("Renamed {old_id} -> {slug}-{}", parsed.suffix);
             files
         }

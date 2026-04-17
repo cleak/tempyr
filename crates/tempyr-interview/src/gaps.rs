@@ -125,9 +125,7 @@ pub fn detect_gaps_with_graph(
     let root_title = &session.root_node.id;
 
     // Check for unclear problem statement
-    if session.root_node.body.trim().is_empty()
-        || session.root_node.body.len() < 30
-    {
+    if session.root_node.body.trim().is_empty() || session.root_node.body.len() < 30 {
         let gap_type = GapType::UnclearProblemStatement;
         gaps.push(Gap {
             id: format!("gap-{}-{}", gap_type, root_type),
@@ -140,7 +138,8 @@ pub fn detect_gaps_with_graph(
                 "What problem does '{root_title}' solve? Who experiences this problem and what \
                  happens if it's not addressed?"
             ),
-            suggested_angle: "Ask what problem this solves and what happens if it's not addressed.".to_string(),
+            suggested_angle: "Ask what problem this solves and what happens if it's not addressed."
+                .to_string(),
             existing_related: vec![],
             question_type: QuestionType::Open,
             phase: InterviewPhase::Discovery,
@@ -158,7 +157,10 @@ pub fn detect_gaps_with_graph(
             // Check if this edge type is already covered
             let has_edge = session.has_edge_type_from_root(edge_type);
             let has_target_type = session.has_node_of_type(target_type)
-                || session.graph_context.iter().any(|ctx| ctx.starts_with(&format!("{target_type}-")));
+                || session
+                    .graph_context
+                    .iter()
+                    .any(|ctx| ctx.starts_with(&format!("{target_type}-")));
 
             if has_edge || has_target_type {
                 continue;
@@ -207,7 +209,9 @@ pub fn detect_gaps_with_graph(
 
     // Sort by phase, then by priority (required first)
     gaps.sort_by(|a, b| {
-        a.phase.index().cmp(&b.phase.index())
+        a.phase
+            .index()
+            .cmp(&b.phase.index())
             .then(a.priority.cmp(&b.priority))
     });
 
@@ -296,9 +300,15 @@ fn build_suggested_angle(gap_type: &GapType, root_body: &str) -> String {
         GapType::MissingConstraint => {
             if body_lower.contains("data") || body_lower.contains("storage") {
                 "User mentioned data. Ask about volume, cost, or retention constraints.".to_string()
-            } else if body_lower.contains("latency") || body_lower.contains("performance") || body_lower.contains("fast") {
+            } else if body_lower.contains("latency")
+                || body_lower.contains("performance")
+                || body_lower.contains("fast")
+            {
                 "User mentioned performance. Ask for specific P99/throughput targets.".to_string()
-            } else if body_lower.contains("compliance") || body_lower.contains("gdpr") || body_lower.contains("pii") {
+            } else if body_lower.contains("compliance")
+                || body_lower.contains("gdpr")
+                || body_lower.contains("pii")
+            {
                 "User mentioned compliance. Ask about specific regulatory requirements.".to_string()
             } else {
                 "Ask about technical, business, or regulatory constraints.".to_string()
@@ -306,7 +316,8 @@ fn build_suggested_angle(gap_type: &GapType, root_body: &str) -> String {
         }
         GapType::MissingRisk => {
             if body_lower.contains("migration") || body_lower.contains("legacy") {
-                "User mentioned migration/legacy. Ask about backward-compatibility risks.".to_string()
+                "User mentioned migration/legacy. Ask about backward-compatibility risks."
+                    .to_string()
             } else if body_lower.contains("scale") || body_lower.contains("volume") {
                 "User mentioned scale. Ask about capacity and failure-mode risks.".to_string()
             } else {
@@ -334,9 +345,7 @@ fn build_suggested_angle(gap_type: &GapType, root_body: &str) -> String {
         GapType::MissingDependency => {
             "Ask about external dependencies or prerequisites.".to_string()
         }
-        GapType::MissingOwner => {
-            "Ask who owns or is responsible for this.".to_string()
-        }
+        GapType::MissingOwner => "Ask who owns or is responsible for this.".to_string(),
         GapType::InsufficientDetail => {
             "Ask the user to elaborate — the description is too brief.".to_string()
         }
@@ -382,9 +391,7 @@ fn generate_question(edge_type: &str, target_type: &str, root_title: &str) -> St
             "Are there any open questions or unknowns about '{root_title}' that \
              need to be resolved before or during implementation?"
         ),
-        _ => format!(
-            "Is there a {target_type} related to '{root_title}' via {edge_type}?"
-        ),
+        _ => format!("Is there a {target_type} related to '{root_title}' via {edge_type}?"),
     }
 }
 
@@ -402,12 +409,15 @@ pub fn next_questions(session: &InterviewSession, max: usize) -> Vec<&Gap> {
 mod tests {
     use super::*;
     use crate::session::InterviewSession;
-    use tempyr_core::schema::Schema;
     use std::path::Path;
+    use tempyr_core::schema::Schema;
 
     fn make_schema() -> Schema {
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap().parent().unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
             .join("schema/default-schema.toml");
         Schema::load(&schema_path).unwrap()
     }
@@ -422,13 +432,19 @@ mod tests {
         assert!(!gaps.is_empty());
 
         // Should have an unclear problem statement gap
-        assert!(gaps.iter().any(|g| g.gap_type == GapType::UnclearProblemStatement));
+        assert!(
+            gaps.iter()
+                .any(|g| g.gap_type == GapType::UnclearProblemStatement)
+        );
 
         // Should have a missing persona gap
         assert!(gaps.iter().any(|g| g.gap_type == GapType::MissingPersona));
 
         // Should have a missing metric gap
-        assert!(gaps.iter().any(|g| g.gap_type == GapType::MissingSuccessMetric));
+        assert!(
+            gaps.iter()
+                .any(|g| g.gap_type == GapType::MissingSuccessMetric)
+        );
     }
 
     #[test]
@@ -447,7 +463,10 @@ mod tests {
             }
             assert!(phase >= last_phase, "Gaps not sorted by phase");
             if phase == last_phase {
-                assert!(gap.priority >= last_priority, "Gaps not sorted by priority within phase");
+                assert!(
+                    gap.priority >= last_priority,
+                    "Gaps not sorted by priority within phase"
+                );
             }
             last_phase = phase;
             last_priority = gap.priority;
@@ -457,13 +476,17 @@ mod tests {
     #[test]
     fn test_gaps_reduced_with_nodes() {
         let mut session = InterviewSession::new(
-            "feature", "feat-test",
-            "# Test Feature\n\nA long enough problem statement that should pass the check.\n"
+            "feature",
+            "feat-test",
+            "# Test Feature\n\nA long enough problem statement that should pass the check.\n",
         );
         let schema = make_schema();
 
         let gaps_before = detect_gaps(&session, &schema);
-        let persona_gaps_before = gaps_before.iter().filter(|g| g.gap_type == GapType::MissingPersona).count();
+        let persona_gaps_before = gaps_before
+            .iter()
+            .filter(|g| g.gap_type == GapType::MissingPersona)
+            .count();
         assert!(persona_gaps_before > 0);
 
         // Add a persona
@@ -484,7 +507,10 @@ mod tests {
         });
 
         let gaps_after = detect_gaps(&session, &schema);
-        let persona_gaps_after = gaps_after.iter().filter(|g| g.gap_type == GapType::MissingPersona).count();
+        let persona_gaps_after = gaps_after
+            .iter()
+            .filter(|g| g.gap_type == GapType::MissingPersona)
+            .count();
         assert_eq!(persona_gaps_after, 0, "Persona gap should be resolved");
     }
 
@@ -510,13 +536,17 @@ mod tests {
     #[test]
     fn test_no_problem_statement_gap_when_body_sufficient() {
         let session = InterviewSession::new(
-            "feature", "feat-test",
-            "# Test Feature\n\nA well-described problem that is sufficiently long.\n"
+            "feature",
+            "feat-test",
+            "# Test Feature\n\nA well-described problem that is sufficiently long.\n",
         );
         let schema = make_schema();
         let gaps = detect_gaps(&session, &schema);
 
-        assert!(gaps.iter().all(|g| g.gap_type != GapType::UnclearProblemStatement));
+        assert!(
+            gaps.iter()
+                .all(|g| g.gap_type != GapType::UnclearProblemStatement)
+        );
     }
 
     #[test]
@@ -547,7 +577,9 @@ mod tests {
             .expect("Should have a MissingPersona gap");
 
         assert!(
-            persona_gap.existing_related.contains(&"persona-eng".to_string()),
+            persona_gap
+                .existing_related
+                .contains(&"persona-eng".to_string()),
             "existing_related should contain persona-eng, got: {:?}",
             persona_gap.existing_related,
         );

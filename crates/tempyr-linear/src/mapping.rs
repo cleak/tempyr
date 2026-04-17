@@ -35,9 +35,10 @@ impl StatusMapper {
     ) -> Option<String> {
         // Check user overrides first
         if let Some(type_overrides) = overrides.get(node_type)
-            && let Some(linear_name) = type_overrides.get(gf_status) {
-                return self.name_to_id.get(&linear_name.to_lowercase()).cloned();
-            }
+            && let Some(linear_name) = type_overrides.get(gf_status)
+        {
+            return self.name_to_id.get(&linear_name.to_lowercase()).cloned();
+        }
 
         // Default mapping
         let linear_name = default_status_to_linear(node_type, gf_status)?;
@@ -45,11 +46,7 @@ impl StatusMapper {
     }
 
     /// Get Tempyr status from a Linear workflow state name.
-    pub fn from_linear_state(
-        &self,
-        node_type: &str,
-        linear_state_name: &str,
-    ) -> Option<String> {
+    pub fn from_linear_state(&self, node_type: &str, linear_state_name: &str) -> Option<String> {
         default_linear_to_status(node_type, linear_state_name)
     }
 
@@ -205,7 +202,10 @@ mod tests {
 
     #[test]
     fn test_slugify_basic() {
-        assert_eq!(slugify("Build Auth System", "task"), "task-build-auth-system");
+        assert_eq!(
+            slugify("Build Auth System", "task"),
+            "task-build-auth-system"
+        );
         assert_eq!(slugify("Session Replay", "feature"), "feat-session-replay");
         assert_eq!(slugify("Platform V2", "epic"), "epic-platform-v2");
     }
@@ -232,35 +232,72 @@ mod tests {
     #[test]
     fn test_status_mapping_task() {
         let states = vec![
-            WorkflowState { id: "s1".into(), name: "Backlog".into(), state_type: "backlog".into() },
-            WorkflowState { id: "s2".into(), name: "In Progress".into(), state_type: "started".into() },
-            WorkflowState { id: "s3".into(), name: "Done".into(), state_type: "completed".into() },
-            WorkflowState { id: "s4".into(), name: "Canceled".into(), state_type: "canceled".into() },
+            WorkflowState {
+                id: "s1".into(),
+                name: "Backlog".into(),
+                state_type: "backlog".into(),
+            },
+            WorkflowState {
+                id: "s2".into(),
+                name: "In Progress".into(),
+                state_type: "started".into(),
+            },
+            WorkflowState {
+                id: "s3".into(),
+                name: "Done".into(),
+                state_type: "completed".into(),
+            },
+            WorkflowState {
+                id: "s4".into(),
+                name: "Canceled".into(),
+                state_type: "canceled".into(),
+            },
         ];
         let mapper = StatusMapper::new(states);
         let no_overrides = HashMap::new();
 
-        assert_eq!(mapper.to_linear_state_id("task", "backlog", &no_overrides), Some("s1".into()));
-        assert_eq!(mapper.to_linear_state_id("task", "in_progress", &no_overrides), Some("s2".into()));
-        assert_eq!(mapper.to_linear_state_id("task", "done", &no_overrides), Some("s3".into()));
-        assert_eq!(mapper.to_linear_state_id("task", "cut", &no_overrides), Some("s4".into()));
+        assert_eq!(
+            mapper.to_linear_state_id("task", "backlog", &no_overrides),
+            Some("s1".into())
+        );
+        assert_eq!(
+            mapper.to_linear_state_id("task", "in_progress", &no_overrides),
+            Some("s2".into())
+        );
+        assert_eq!(
+            mapper.to_linear_state_id("task", "done", &no_overrides),
+            Some("s3".into())
+        );
+        assert_eq!(
+            mapper.to_linear_state_id("task", "cut", &no_overrides),
+            Some("s4".into())
+        );
     }
 
     #[test]
     fn test_status_mapping_reverse() {
-        let states = vec![
-            WorkflowState { id: "s1".into(), name: "Backlog".into(), state_type: "backlog".into() },
-        ];
+        let states = vec![WorkflowState {
+            id: "s1".into(),
+            name: "Backlog".into(),
+            state_type: "backlog".into(),
+        }];
         let mapper = StatusMapper::new(states);
 
-        assert_eq!(mapper.from_linear_state("task", "Backlog"), Some("backlog".into()));
-        assert_eq!(mapper.from_linear_state("feature", "Backlog"), Some("draft".into()));
+        assert_eq!(
+            mapper.from_linear_state("task", "Backlog"),
+            Some("backlog".into())
+        );
+        assert_eq!(
+            mapper.from_linear_state("feature", "Backlog"),
+            Some("draft".into())
+        );
         assert_eq!(mapper.from_linear_state("task", "Unknown"), None);
     }
 
     #[test]
     fn test_body_summary() {
-        let body = "# My Feature\n\nThis is the first paragraph of the description.\n\nSecond paragraph.";
+        let body =
+            "# My Feature\n\nThis is the first paragraph of the description.\n\nSecond paragraph.";
         assert_eq!(
             body_summary(body, 200),
             "This is the first paragraph of the description."

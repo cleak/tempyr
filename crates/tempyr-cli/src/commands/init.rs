@@ -1,8 +1,10 @@
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::config::ProjectContext;
+use anyhow::Context;
 
 use super::git_hooks;
 use super::index_cmd;
@@ -195,6 +197,20 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
 
     if !existing_doc_updates.is_empty() {
         match selections.existing_doc_mode {
+            ExistingDocMode::ClaudeCode => {
+                summary.extend(run_existing_doc_agent_merge(
+                    root,
+                    &existing_doc_updates,
+                    MergeAgent::ClaudeCode,
+                )?);
+            }
+            ExistingDocMode::Codex => {
+                summary.extend(run_existing_doc_agent_merge(
+                    root,
+                    &existing_doc_updates,
+                    MergeAgent::Codex,
+                )?);
+            }
             ExistingDocMode::Append => {
                 for spec in &existing_doc_updates {
                     append_doc_section(&root.join(spec.path), spec.section())?;
@@ -208,21 +224,6 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
                 let path = write_doc_follow_up(root, &existing_doc_updates, FollowUpMode::Manual)?;
                 summary.push(format!(
                     "  {}  - manual merge instructions",
-                    display_relative(root, &path)
-                ));
-            }
-            ExistingDocMode::ClaudeCode => {
-                let path =
-                    write_doc_follow_up(root, &existing_doc_updates, FollowUpMode::ClaudeCode)?;
-                summary.push(format!(
-                    "  {}  - Claude Code handoff prompt",
-                    display_relative(root, &path)
-                ));
-            }
-            ExistingDocMode::Codex => {
-                let path = write_doc_follow_up(root, &existing_doc_updates, FollowUpMode::Codex)?;
-                summary.push(format!(
-                    "  {}  - Codex handoff prompt",
                     display_relative(root, &path)
                 ));
             }
@@ -552,9 +553,11 @@ fn validate_provider_setup(root: &Path) -> anyhow::Result<String> {
     let _loaded = project::load_project_env_from(root.to_path_buf())?;
     let ctx = ProjectContext::find(Some(root.join("graph").as_path()))?;
     let resolved = ctx.resolved_embedding_config()?;
-    if let Some(env_var) = embeddings::provider_api_key_env_var(&resolved.provider)
-        && let Ok(value) = std::env::var(env_var)
-    {
+    if let Some(env_var) = embeddings::provider_api_key_env_var(&resolved.provider) {
+        let value = match std::env::var(env_var) {
+            Ok(value) => value,
+            Err(_) => return Ok(format!("skipped ({env_var} not set yet)")),
+        };
         embeddings::validate_api_key_value(env_var, &value)?;
     }
     let provider = embeddings::create_provider_from_resolved(&resolved)?;
@@ -684,6 +687,215 @@ fn render_follow_up_body(docs: &[DocSpec], mode: FollowUpMode) -> String {
     body
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeAgent {
+    ClaudeCode,
+    Codex,
+}
+
+impl MergeAgent {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+
+    fn command(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    fn fallback_mode(self) -> FollowUpMode {
+        match self {
+            Self::ClaudeCode => FollowUpMode::ClaudeCode,
+            Self::Codex => FollowUpMode::Codex,
+        }
+    }
+}
+
+fn run_existing_doc_agent_merge(
+    root: &Path,
+    docs: &[DocSpec],
+    agent: MergeAgent,
+) -> anyhow::Result<Vec<String>> {
+    let before = doc_snapshots(root, docs)?;
+    let prompt = render_agent_merge_prompt(docs);
+
+    let output = match run_merge_agent_command(root, docs, agent, &prompt) {
+        Ok(output) => output,
+        Err(err) => {
+            return fallback_agent_merge_summary(root, docs, agent, err.to_string());
+        }
+    };
+
+    if !output.status.success() {
+        let detail = summarize_process_output(&output.stdout, &output.stderr);
+        return fallback_agent_merge_summary(
+            root,
+            docs,
+            agent,
+            format!("{} exited with {}", agent.label(), output.status),
+        )
+        .map(|mut lines| {
+            if !detail.is_empty() {
+                lines.push(format!("  existing docs       - {}", detail));
+            }
+            lines
+        });
+    }
+
+    let after = doc_snapshots(root, docs)?;
+    let mut lines = vec![format!(
+        "  existing docs       - launched {} to merge instruction docs",
+        agent.label()
+    )];
+
+    let mut changed = 0usize;
+    for (path, before_contents) in before {
+        let after_contents = after.get(&path).map(String::as_str).unwrap_or_default();
+        if before_contents != after_contents {
+            changed += 1;
+            lines.push(format!(
+                "  {}               - merged by {}",
+                path,
+                agent.label()
+            ));
+        }
+    }
+
+    if changed == 0 {
+        lines.push(format!(
+            "  existing docs       - {} completed but no doc changes were detected",
+            agent.label()
+        ));
+    }
+
+    Ok(lines)
+}
+
+fn fallback_agent_merge_summary(
+    root: &Path,
+    docs: &[DocSpec],
+    agent: MergeAgent,
+    reason: String,
+) -> anyhow::Result<Vec<String>> {
+    let path = write_doc_follow_up(root, docs, agent.fallback_mode())?;
+    Ok(vec![
+        format!(
+            "  existing docs       - warning: could not run {} merge automatically: {}",
+            agent.label(),
+            reason
+        ),
+        format!(
+            "  {}  - {} handoff prompt",
+            display_relative(root, &path),
+            agent.label()
+        ),
+    ])
+}
+
+fn run_merge_agent_command(
+    root: &Path,
+    docs: &[DocSpec],
+    agent: MergeAgent,
+    prompt: &str,
+) -> anyhow::Result<std::process::Output> {
+    let mut command = Command::new(agent.command());
+    command.current_dir(root);
+    command.args(merge_agent_command_args(docs, agent, prompt));
+
+    command
+        .output()
+        .with_context(|| format!("Failed to launch {} for existing-doc merge", agent.label()))
+}
+
+fn merge_agent_command_args(docs: &[DocSpec], agent: MergeAgent, prompt: &str) -> Vec<String> {
+    match agent {
+        MergeAgent::ClaudeCode => vec![
+            "--print".to_string(),
+            "--permission-mode".to_string(),
+            "acceptEdits".to_string(),
+            "--allowedTools".to_string(),
+            claude_allowed_tools(docs),
+            "--output-format".to_string(),
+            "text".to_string(),
+            prompt.to_string(),
+        ],
+        MergeAgent::Codex => vec!["--auto-edit".to_string(), prompt.to_string()],
+    }
+}
+
+fn claude_allowed_tools(docs: &[DocSpec]) -> String {
+    let mut tools = vec!["Read".to_string(), "Grep".to_string(), "Glob".to_string()];
+    for doc in docs {
+        tools.push(format!("Edit(/{})", doc.path));
+    }
+    tools.join(",")
+}
+
+fn render_agent_merge_prompt(docs: &[DocSpec]) -> String {
+    let mut body = String::from(
+        "Merge the Tempyr guidance into the existing instruction docs in this repository.\n\n",
+    );
+    body.push_str("Rules:\n");
+    body.push_str("- Edit only the files listed below.\n");
+    body.push_str("- Preserve project-specific instructions and formatting.\n");
+    body.push_str("- Merge the Tempyr guidance where it fits naturally instead of blindly appending duplicates.\n");
+    body.push_str("- If a Tempyr section already exists, update it in place so each file ends up with one coherent Tempyr section.\n");
+    body.push_str("- Do not create prompt files, notes, or any non-target files.\n");
+    body.push_str("- When finished, briefly report which files changed.\n\n");
+
+    for doc in docs {
+        body.push_str(&format!("Target file: {}\n\n", doc.path));
+        body.push_str("Required Tempyr guidance:\n");
+        body.push_str("```md\n");
+        body.push_str(&doc.section());
+        if !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push_str("```\n\n");
+    }
+
+    body
+}
+
+fn doc_snapshots(
+    root: &Path,
+    docs: &[DocSpec],
+) -> anyhow::Result<std::collections::BTreeMap<&'static str, String>> {
+    let mut snapshots = std::collections::BTreeMap::new();
+    for doc in docs {
+        snapshots.insert(doc.path, fs::read_to_string(root.join(doc.path))?);
+    }
+    Ok(snapshots)
+}
+
+fn summarize_process_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return truncate_summary_line(&stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(stdout).trim().to_string();
+    truncate_summary_line(&stdout)
+}
+
+fn truncate_summary_line(text: &str) -> String {
+    let first_line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let trimmed = first_line.trim();
+    if trimmed.chars().count() <= 160 {
+        trimmed.to_string()
+    } else {
+        format!("{}...", trimmed.chars().take(157).collect::<String>())
+    }
+}
+
 fn display_relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -752,6 +964,48 @@ fn markdown_section(full_doc: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{LazyLock, Mutex, MutexGuard};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous: Vec<(String, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn new(vars: &[&str]) -> Self {
+            let lock = ENV_LOCK.lock().unwrap();
+            let previous = vars
+                .iter()
+                .map(|var| ((*var).to_string(), std::env::var_os(var)))
+                .collect();
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+
+        fn clear(&self, var: &str) {
+            unsafe {
+                std::env::remove_var(var);
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (var, previous) in self.previous.drain(..) {
+                unsafe {
+                    match previous {
+                        Some(value) => std::env::set_var(&var, value),
+                        None => std::env::remove_var(&var),
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn render_config_uses_provider_defaults() {
@@ -790,6 +1044,73 @@ mod tests {
 
         assert!(err.to_string().contains("still looks like a placeholder"));
         assert!(!tmp.path().join(".env.local").exists());
+    }
+
+    #[test]
+    fn validate_provider_setup_skips_missing_hosted_key() {
+        let env = EnvGuard::new(&["VOYAGE_API_KEY"]);
+        env.clear("VOYAGE_API_KEY");
+
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".tempyr")).unwrap();
+        fs::create_dir_all(tmp.path().join("graph")).unwrap();
+        fs::write(tmp.path().join(".tempyr/schema.toml"), DEFAULT_SCHEMA).unwrap();
+        fs::write(
+            tmp.path().join(".tempyr/config.toml"),
+            render_config(EmbeddingProviderChoice::Voyage),
+        )
+        .unwrap();
+
+        let message = validate_provider_setup(tmp.path()).unwrap();
+
+        assert_eq!(message, "skipped (VOYAGE_API_KEY not set yet)");
+    }
+
+    #[test]
+    fn claude_merge_uses_accept_edits_and_restricted_tools() {
+        let docs = [
+            DocSpec::new("CLAUDE.md", "# Claude\n", "Claude Code instructions"),
+            DocSpec::new("AGENTS.md", "# Agents\n", "Codex / agent instructions"),
+        ];
+
+        let args = merge_agent_command_args(&docs, MergeAgent::ClaudeCode, "merge prompt");
+
+        assert_eq!(
+            args,
+            vec![
+                "--print",
+                "--permission-mode",
+                "acceptEdits",
+                "--allowedTools",
+                "Read,Grep,Glob,Edit(/CLAUDE.md),Edit(/AGENTS.md)",
+                "--output-format",
+                "text",
+                "merge prompt",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_merge_uses_auto_edit_mode() {
+        let args = merge_agent_command_args(&[], MergeAgent::Codex, "merge prompt");
+
+        assert_eq!(args, vec!["--auto-edit", "merge prompt"]);
+    }
+
+    #[test]
+    fn truncate_summary_line_handles_unicode_safely() {
+        let text = format!("{}\nsecond line", "é".repeat(170));
+
+        let truncated = truncate_summary_line(&text);
+
+        assert_eq!(truncated, format!("{}...", "é".repeat(157)));
+    }
+
+    #[test]
+    fn summarize_process_output_prefers_stderr() {
+        let detail = summarize_process_output(b"stdout detail", "stderr detail".as_bytes());
+
+        assert_eq!(detail, "stderr detail");
     }
 
     #[test]
