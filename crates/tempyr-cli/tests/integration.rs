@@ -45,6 +45,18 @@ fn spawn_mcp_child(cwd: &Path) -> Child {
         .unwrap()
 }
 
+fn spawn_mcp_child_with_project_root(cwd: &Path, project_root: &Path) -> Child {
+    ProcessCommand::new(tempyr_bin())
+        .arg("--mcp")
+        .current_dir(cwd)
+        .env(tempyr_core::project::PROJECT_ROOT_ENV_VAR, project_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
 fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> ExitStatus {
     let deadline = Instant::now() + timeout;
     loop {
@@ -117,6 +129,54 @@ fn initialize_mcp_session(child: &mut Child) {
     );
 
     child.stdin = Some(stdin);
+    child.stdout = Some(stdout.into_inner());
+}
+
+fn read_json_response(child: &mut Child) -> serde_json::Value {
+    let stdout = child.stdout.take().unwrap();
+    let mut stdout = BufReader::new(stdout);
+    let mut response = String::new();
+    stdout.read_line(&mut response).unwrap();
+    child.stdout = Some(stdout.into_inner());
+
+    assert!(
+        !response.trim().is_empty(),
+        "expected JSON-RPC response but stdout was empty"
+    );
+
+    serde_json::from_str(response.trim()).unwrap()
+}
+
+fn call_mcp_tool(
+    child: &mut Child,
+    id: u64,
+    name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    write_json_line(
+        child.stdin.as_mut().unwrap(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments
+            }
+        }),
+    );
+
+    read_json_response(child)
+}
+
+fn tool_result_text(response: &serde_json::Value) -> &str {
+    assert!(
+        response.get("error").is_none(),
+        "unexpected JSON-RPC error: {response}"
+    );
+    response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("expected text content in MCP tool response")
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -398,6 +458,32 @@ fn test_mcp_exits_cleanly_on_stdin_eof_after_initialize() {
         stderr.contains("tempyr shutting down: stdin EOF"),
         "{stderr}"
     );
+}
+
+#[test]
+fn test_mcp_uses_tempyr_project_root_env_when_server_cwd_is_wrong() {
+    let tmp = TempDir::new().unwrap();
+    let project_root = tmp.path().join("project");
+    let launch_root = tmp.path().join("launch");
+    fs::create_dir(&project_root).unwrap();
+    fs::create_dir(&launch_root).unwrap();
+
+    tempyr()
+        .current_dir(&project_root)
+        .arg("init")
+        .assert()
+        .success();
+
+    let mut child = spawn_mcp_child_with_project_root(&launch_root, &project_root);
+    initialize_mcp_session(&mut child);
+
+    let response = call_mcp_tool(&mut child, 2, "graph_validate", serde_json::json!({}));
+    assert_eq!(response["id"], 2);
+    assert!(tool_result_text(&response).starts_with("Graph is valid."));
+
+    drop(child.stdin.take());
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(0));
 }
 
 #[test]

@@ -4,6 +4,10 @@
 //! A `.tempyr-redirect` file contains a path (relative or absolute) pointing to
 //! the real tempyr project root. This lets you run tempyr commands from a working
 //! project that stores its knowledge graph in a separate repository.
+//!
+//! Project discovery can also be anchored explicitly with `TEMPYR_PROJECT_ROOT`
+//! or `TEMPYR_GRAPH_DIR`, which is useful for MCP clients that launch `tempyr --mcp`
+//! from a different working directory than the active repo.
 
 use std::cell::RefCell;
 use std::fs;
@@ -32,6 +36,9 @@ pub struct CacheLayout {
     pub shared_root: PathBuf,
     pub worktree_root: PathBuf,
 }
+
+pub const PROJECT_ROOT_ENV_VAR: &str = "TEMPYR_PROJECT_ROOT";
+pub const GRAPH_DIR_ENV_VAR: &str = "TEMPYR_GRAPH_DIR";
 
 const SNAPSHOT_KEY_CACHE_VERSION: u32 = 1;
 
@@ -368,6 +375,9 @@ fn sqlite_auxiliary_path(path: &Path, suffix: &str) -> PathBuf {
 /// 1. `.tempyr-redirect` - a file whose first non-empty line is a path to the real project root
 /// 2. `.tempyr/` - a directory indicating this is the project root
 ///
+/// If `TEMPYR_GRAPH_DIR` or `TEMPYR_PROJECT_ROOT` is set, discovery starts from that
+/// path instead of the process current working directory.
+///
 /// Redirect paths are resolved relative to the directory containing the redirect file.
 /// Only one level of redirect is followed (no chaining).
 pub fn find_project_root() -> Option<PathBuf> {
@@ -377,7 +387,7 @@ pub fn find_project_root() -> Option<PathBuf> {
 /// Same as [`find_project_root`] but also returns the directory where the project marker
 /// (`.tempyr/` or `.tempyr-redirect`) was discovered.
 pub fn find_project_roots() -> Option<ProjectRoots> {
-    find_project_roots_from(std::env::current_dir().ok()?)
+    find_project_roots_from(discovery_start_path()?)
 }
 
 /// Same as [`find_project_root`] but starting from a given directory.
@@ -425,7 +435,7 @@ pub fn find_project_roots_from(start: PathBuf) -> Option<ProjectRoots> {
 /// 4. `.env.local` in the resolved tempyr root (for redirect setups)
 /// 5. `.env` in the resolved tempyr root (for redirect setups)
 pub fn load_project_env() -> io::Result<Vec<PathBuf>> {
-    let Some(start) = std::env::current_dir().ok() else {
+    let Some(start) = discovery_start_path() else {
         return Ok(Vec::new());
     };
     load_project_env_from(start)
@@ -459,6 +469,33 @@ fn load_env_dir(dir: &Path) -> io::Result<Vec<PathBuf>> {
         loaded.push(path);
     }
     Ok(loaded)
+}
+
+fn discovery_start_path() -> Option<PathBuf> {
+    discovery_override_path().or_else(|| std::env::current_dir().ok())
+}
+
+fn discovery_override_path() -> Option<PathBuf> {
+    env_path(GRAPH_DIR_ENV_VAR).or_else(|| env_path(PROJECT_ROOT_ENV_VAR))
+}
+
+fn env_path(var: &str) -> Option<PathBuf> {
+    let raw = std::env::var_os(var)?;
+    let path = PathBuf::from(raw);
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+
+    match fs::canonicalize(&resolved) {
+        Ok(canonical) => Some(canonical),
+        Err(_) => Some(resolved),
+    }
 }
 
 /// Read a `.tempyr-redirect` file and resolve the path it contains.
@@ -663,10 +700,76 @@ fn short_path_hash(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::fs;
-    use std::sync::{LazyLock, Mutex};
+    use std::path::Path;
+    use std::sync::{LazyLock, Mutex, MutexGuard};
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous: Vec<(String, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn new(vars: &[&str]) -> Self {
+            let lock = ENV_LOCK.lock().unwrap();
+            let previous = vars
+                .iter()
+                .map(|var| ((*var).to_string(), std::env::var_os(var)))
+                .collect();
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+
+        fn clear(&self, var: &str) {
+            unsafe {
+                std::env::remove_var(var);
+            }
+        }
+
+        fn set_path(&self, var: &str, value: &Path) {
+            unsafe {
+                std::env::set_var(var, value);
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (var, previous) in self.previous.drain(..) {
+                unsafe {
+                    match previous {
+                        Some(value) => std::env::set_var(&var, value),
+                        None => std::env::remove_var(&var),
+                    }
+                }
+            }
+        }
+    }
+
+    fn with_discovery_env<T>(
+        preserved_vars: &[&str],
+        project_root: Option<&Path>,
+        graph_dir: Option<&Path>,
+        f: impl FnOnce() -> T,
+    ) -> T {
+        let mut vars = vec![PROJECT_ROOT_ENV_VAR, GRAPH_DIR_ENV_VAR];
+        vars.extend_from_slice(preserved_vars);
+        let guard = EnvGuard::new(&vars);
+        guard.clear(PROJECT_ROOT_ENV_VAR);
+        guard.clear(GRAPH_DIR_ENV_VAR);
+        if let Some(path) = project_root {
+            guard.set_path(PROJECT_ROOT_ENV_VAR, path);
+        }
+        if let Some(path) = graph_dir {
+            guard.set_path(GRAPH_DIR_ENV_VAR, path);
+        }
+        f()
+    }
 
     #[test]
     fn finds_direct_project_root() {
@@ -758,6 +861,36 @@ mod tests {
         let found = find_project_root_from(work_root);
         let expected = fs::canonicalize(&real_root).unwrap();
         assert_eq!(found, Some(expected));
+    }
+
+    #[test]
+    fn find_project_roots_uses_tempyr_project_root_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("kb");
+        fs::create_dir_all(root.join(".tempyr")).unwrap();
+
+        let roots = with_discovery_env(&[], Some(&root), None, find_project_roots).unwrap();
+        let expected = fs::canonicalize(&root).unwrap();
+
+        assert_eq!(roots.anchor_root, expected);
+        assert_eq!(roots.project_root, expected);
+    }
+
+    #[test]
+    fn load_project_env_uses_tempyr_graph_dir_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("kb");
+        fs::create_dir_all(root.join(".tempyr")).unwrap();
+        fs::create_dir(root.join("graph")).unwrap();
+
+        let graph_var = format!("TEMPYR_TEST_ENV_OVERRIDE_{}", rand::random::<u64>());
+        fs::write(root.join(".env"), format!("{graph_var}=from-dotenv\n")).unwrap();
+
+        with_discovery_env(&[&graph_var], None, Some(&root.join("graph")), || {
+            let loaded = load_project_env().unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(std::env::var(&graph_var).unwrap(), "from-dotenv");
+        });
     }
 
     #[test]
