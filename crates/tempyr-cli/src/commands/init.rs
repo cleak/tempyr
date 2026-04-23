@@ -448,6 +448,13 @@ fn write_provider_api_key(
     Ok((env_var, path))
 }
 
+const CODEX_PROJECT_ROOT_ENV_SNIPPET: &str = r#"env = { TEMPYR_PROJECT_ROOT = ".." }"#;
+const CODEX_PROJECT_ROOT_ENV_SETUP_NOTE: &str = "- For reliable worktree-local discovery, prefer setting `TEMPYR_PROJECT_ROOT = \"..\"` in the MCP server `env` so Tempyr can resolve the repo root even if Codex launches the server from another directory.\n";
+const CODEX_PROJECT_ROOT_ENV_FOLLOW_UP_NOTE: &str = "- For Tempyr MCP in that project config, prefer `env = { TEMPYR_PROJECT_ROOT = \"..\" }` so Tempyr can still find the repo root if Codex launches the server from the wrong directory.\n";
+const CODEX_OPTIONAL_CWD_SETUP_NOTE: &str = "- If your Codex build reliably honors relative `cwd`, `cwd = \"..\"` is still fine, but it should be treated as optional rather than required.\n";
+const CODEX_OPTIONAL_CWD_FOLLOW_UP_NOTE: &str = "- If your Codex build reliably honors relative `cwd`, `cwd = \"..\"` is still acceptable, but it should be treated as optional rather than required.\n";
+const CODEX_AVOID_ABSOLUTE_PATHS_NOTE: &str = "- Avoid absolute MCP `cwd` or `TEMPYR_PROJECT_ROOT` values in shared or user-level config if you want the same setup to follow Git worktrees cleanly.\n";
+
 fn provider_api_key_path(root: &Path) -> PathBuf {
     project::shared_env_root(root)
         .unwrap_or_else(|| root.to_path_buf())
@@ -533,7 +540,8 @@ fn write_mcp_setup_notes(root: &Path) -> anyhow::Result<PathBuf> {
     let onboarding_dir = root.join(".tempyr").join("onboarding");
     fs::create_dir_all(&onboarding_dir)?;
     let path = onboarding_dir.join("mcp-setup.md");
-    let body = r#"# Tempyr MCP Setup
+    let body = format!(
+        r#"# Tempyr MCP Setup
 
 Register a stdio MCP server named `tempyr` that runs:
 
@@ -549,15 +557,15 @@ tempyr --mcp
 - If `tempyr` is already on `PATH`, use a minimal project config like:
 
 ```json
-{
-  "mcpServers": {
-    "tempyr": {
+{{
+  "mcpServers": {{
+    "tempyr": {{
       "command": "tempyr",
       "args": ["--mcp"],
-      "env": {}
-    }
-  }
-}
+      "env": {{}}
+    }}
+  }}
+}}
 ```
 
 - If `tempyr` is not reliably on `PATH`, or you want deterministic worktree-local project discovery regardless of subprocess launch details, point `.mcp.json` at a repo-relative launcher script that sets `TEMPYR_PROJECT_ROOT` from its own location before execing `tempyr --mcp`.
@@ -568,23 +576,26 @@ tempyr --mcp
 ## Codex
 
 - Prefer a project-scoped `.codex/config.toml` entry instead of a user-level `~/.codex/config.toml` entry when you want MCP to follow Git worktrees.
-- In that project config, set `cwd = ".."` so the MCP server starts from the repo root even though `.codex/config.toml` lives under `.codex/`.
-- For hosted embedding keys shared across worktrees, prefer Tempyr's shared Git-common-dir env file at `<git-common-dir>/tempyr/.env.local`. Tempyr loads that automatically without committing it.
+{codex_project_root_env_setup_note}- For hosted embedding keys shared across worktrees, prefer Tempyr's shared Git-common-dir env file at `<git-common-dir>/tempyr/.env.local`. Tempyr loads that automatically without committing it.
 - Example:
 
 ```toml
 [mcp_servers.tempyr]
 command = "tempyr"
 args = ["--mcp"]
-cwd = ".."
+{codex_project_root_env_snippet}
 startup_timeout_sec = 5
 ```
 
-- Avoid an absolute `cwd` in shared or user-level config if you want the same checked-in config to work across multiple worktrees.
-- Use `TEMPYR_PROJECT_ROOT` (or `TEMPYR_GRAPH_DIR`) only as a fallback escape hatch when the MCP client cannot launch the server from the correct working directory.
+{codex_optional_cwd_setup_note}{codex_avoid_absolute_paths_note}- Use `TEMPYR_GRAPH_DIR` only when you need to anchor directly to a nonstandard graph path.
 - If you want Codex to update existing instruction docs, use project config with narrow writable roots for those markdown files.
 - Repo-local `.codex` and `.agents` paths can remain protected even when writable roots are restricted, so Tempyr installs supporting assets directly and limits merge handoffs to markdown docs.
-"#;
+"#,
+        codex_project_root_env_setup_note = CODEX_PROJECT_ROOT_ENV_SETUP_NOTE,
+        codex_project_root_env_snippet = CODEX_PROJECT_ROOT_ENV_SNIPPET,
+        codex_optional_cwd_setup_note = CODEX_OPTIONAL_CWD_SETUP_NOTE,
+        codex_avoid_absolute_paths_note = CODEX_AVOID_ABSOLUTE_PATHS_NOTE,
+    );
     fs::write(&path, body)?;
     Ok(path)
 }
@@ -716,9 +727,10 @@ fn render_follow_up_body(docs: &[DocSpec], mode: FollowUpMode) -> String {
         FollowUpMode::Codex => {
             body.push_str("Suggested Codex setup notes:\n");
             body.push_str("- Use project-scoped `.codex/config.toml` with `sandbox_mode`, `approval_policy`, and `sandbox_workspace_write.writable_roots` tuned to the doc files you want updated.\n");
-            body.push_str("- For Tempyr MCP in that project config, set `cwd = \"..\"` so Codex launches `tempyr --mcp` from the repo root while keeping the config worktree-portable.\n");
+            body.push_str(CODEX_PROJECT_ROOT_ENV_FOLLOW_UP_NOTE);
             body.push_str("- For hosted embedding keys shared across worktrees, prefer Tempyr's shared Git-common-dir env file at `<git-common-dir>/tempyr/.env.local`; Tempyr loads it automatically.\n");
-            body.push_str("- Avoid an absolute MCP `cwd` in shared or user-level config if you want the same setup to follow Git worktrees cleanly.\n");
+            body.push_str(CODEX_OPTIONAL_CWD_FOLLOW_UP_NOTE);
+            body.push_str(CODEX_AVOID_ABSOLUTE_PATHS_NOTE);
             body.push_str("- OpenAI's docs note that repo-local `.codex` and `.agents` paths remain protected inside default writable roots, so Tempyr installs supporting skill files directly and limits Codex handoff to markdown docs.\n");
             body.push_str("- After opening Codex in the repo, point it at this file and ask it to merge the snippets below.\n\n");
         }
@@ -1462,5 +1474,31 @@ mod tests {
 
         let updated = fs::read_to_string(path).unwrap();
         assert_eq!(updated.matches("tempyr:onboarding:start").count(), 1);
+    }
+
+    #[test]
+    fn mcp_setup_notes_prefer_project_root_env_for_codex() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let path = write_mcp_setup_notes(tmp.path()).unwrap();
+        let body = fs::read_to_string(path).unwrap();
+
+        assert!(body.contains(CODEX_PROJECT_ROOT_ENV_SNIPPET));
+        assert!(body.contains(CODEX_OPTIONAL_CWD_SETUP_NOTE.trim()));
+        assert!(!body.contains(
+            "Use `TEMPYR_PROJECT_ROOT` (or `TEMPYR_GRAPH_DIR`) only as a fallback escape hatch"
+        ));
+    }
+
+    #[test]
+    fn codex_follow_up_body_prefers_project_root_env() {
+        let body = render_follow_up_body(&[], FollowUpMode::Codex);
+
+        assert!(body.contains(CODEX_PROJECT_ROOT_ENV_SNIPPET));
+        assert!(body.contains(CODEX_OPTIONAL_CWD_FOLLOW_UP_NOTE.trim()));
+        assert!(
+            !body
+                .contains("set `cwd = \"..\"` so Codex launches `tempyr --mcp` from the repo root")
+        );
     }
 }
