@@ -1485,6 +1485,7 @@ mod tests {
 
         assert!(body.contains(CODEX_PROJECT_ROOT_ENV_SNIPPET));
         assert!(body.contains(CODEX_OPTIONAL_CWD_SETUP_NOTE.trim()));
+        assert!(body.contains(CODEX_AVOID_ABSOLUTE_PATHS_NOTE.trim()));
         assert!(!body.contains(
             "Use `TEMPYR_PROJECT_ROOT` (or `TEMPYR_GRAPH_DIR`) only as a fallback escape hatch"
         ));
@@ -1496,6 +1497,7 @@ mod tests {
 
         assert!(body.contains(CODEX_PROJECT_ROOT_ENV_SNIPPET));
         assert!(body.contains(CODEX_OPTIONAL_CWD_FOLLOW_UP_NOTE.trim()));
+        assert!(body.contains(CODEX_AVOID_ABSOLUTE_PATHS_NOTE.trim()));
         assert!(
             !body
                 .contains("set `cwd = \"..\"` so Codex launches `tempyr --mcp` from the repo root")
