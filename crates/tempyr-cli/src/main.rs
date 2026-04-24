@@ -330,7 +330,7 @@ pub enum LinearAction {
 #[derive(Debug, PartialEq, Eq)]
 enum LaunchMode {
     Cli,
-    Mcp,
+    Mcp { project_root: Option<PathBuf> },
     InvalidMcpArgs,
 }
 
@@ -343,27 +343,39 @@ where
     let _program = args.next();
 
     match args.next() {
-        Some(arg) if arg == OsStr::new("--mcp") => {
-            if args.next().is_none() {
-                LaunchMode::Mcp
-            } else {
-                LaunchMode::InvalidMcpArgs
-            }
-        }
+        Some(arg) if arg == OsStr::new("--mcp") => parse_mcp_launch_args(args),
         _ => LaunchMode::Cli,
+    }
+}
+
+fn parse_mcp_launch_args<I>(mut args: I) -> LaunchMode
+where
+    I: Iterator<Item = OsString>,
+{
+    match args.next() {
+        None => LaunchMode::Mcp { project_root: None },
+        Some(arg) if arg == OsStr::new("--project-root") => match (args.next(), args.next()) {
+            (Some(project_root), None) => LaunchMode::Mcp {
+                project_root: Some(PathBuf::from(project_root)),
+            },
+            _ => LaunchMode::InvalidMcpArgs,
+        },
+        _ => LaunchMode::InvalidMcpArgs,
     }
 }
 
 fn mcp_args_error() -> anyhow::Error {
     anyhow::anyhow!(
-        "`--mcp` must be the first and only argument. Launch the MCP server with `tempyr --mcp`."
+        "`--mcp` must be the first argument, and if using `--project-root` it must be \
+provided with a valid value. Launch the MCP server with `tempyr --mcp` or \
+`tempyr --mcp --project-root <path>`."
     )
 }
 
 fn main() {
     let result: anyhow::Result<()> = match detect_launch_mode_from_args(std::env::args_os()) {
         LaunchMode::Cli => run_cli_mode(),
-        LaunchMode::Mcp => run_mcp_mode(),
+        LaunchMode::Mcp { project_root } => run_mcp_mode(project_root),
         LaunchMode::InvalidMcpArgs => Err(mcp_args_error()),
     };
 
@@ -379,7 +391,24 @@ fn run_cli_mode() -> anyhow::Result<()> {
     run(cli)
 }
 
-fn run_mcp_mode() -> anyhow::Result<()> {
+fn run_mcp_mode(project_root: Option<PathBuf>) -> anyhow::Result<()> {
+    if let Some(project_root) = project_root {
+        let roots = tempyr_core::project::find_project_roots_from(project_root.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Not a tempyr project from --project-root {} (no .tempyr/ or .tempyr-redirect found)",
+                    project_root.display()
+                )
+            })?;
+        std::env::set_current_dir(&roots.anchor_root)?;
+        // The explicit CLI anchor must win over stale process environment left by
+        // an MCP client or parent shell before the MCP layer loads project env.
+        unsafe {
+            std::env::remove_var(tempyr_core::project::PROJECT_ROOT_ENV_VAR);
+            std::env::remove_var(tempyr_core::project::GRAPH_DIR_ENV_VAR);
+        }
+    }
+
     let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(tempyr_mcp::serve_stdio());
     rt.shutdown_timeout(std::time::Duration::from_secs(1));
@@ -618,12 +647,23 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 mod tests {
     use super::{Cli, LaunchMode, detect_launch_mode_from_args};
     use clap::Parser;
+    use std::path::PathBuf;
 
     #[test]
     fn detect_mcp_mode_when_flag_is_first_arg() {
         assert_eq!(
             detect_launch_mode_from_args(["tempyr", "--mcp"]),
-            LaunchMode::Mcp
+            LaunchMode::Mcp { project_root: None }
+        );
+    }
+
+    #[test]
+    fn detect_mcp_project_root_arg() {
+        assert_eq!(
+            detect_launch_mode_from_args(["tempyr", "--mcp", "--project-root", "C:\\repo"]),
+            LaunchMode::Mcp {
+                project_root: Some(PathBuf::from("C:\\repo"))
+            }
         );
     }
 
@@ -639,6 +679,14 @@ mod tests {
     fn reject_extra_args_after_mcp_flag() {
         assert_eq!(
             detect_launch_mode_from_args(["tempyr", "--mcp", "validate"]),
+            LaunchMode::InvalidMcpArgs
+        );
+    }
+
+    #[test]
+    fn reject_missing_mcp_project_root_value() {
+        assert_eq!(
+            detect_launch_mode_from_args(["tempyr", "--mcp", "--project-root"]),
             LaunchMode::InvalidMcpArgs
         );
     }

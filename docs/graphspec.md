@@ -1037,6 +1037,8 @@ COMMANDS:
 
     # ─── MCP Server ──────────────────────────
     --mcp                   Start the MCP server on stdio (for Claude Code / other clients)
+    --mcp --project-root <path>
+                            Start MCP anchored to a Tempyr project root, for clients that launch from another cwd
 
 OPTIONS:
     --graph-dir <path>      Path to graph directory (default: ./graph)
