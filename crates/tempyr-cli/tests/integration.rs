@@ -57,6 +57,36 @@ fn spawn_mcp_child_with_project_root(cwd: &Path, project_root: &Path) -> Child {
         .unwrap()
 }
 
+fn spawn_mcp_child_with_project_root_arg(cwd: &Path, project_root: &Path) -> Child {
+    ProcessCommand::new(tempyr_bin())
+        .args(["--mcp", "--project-root"])
+        .arg(project_root)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn spawn_mcp_child_with_project_root_arg_and_bad_env(
+    cwd: &Path,
+    project_root: &Path,
+    bad_root: &Path,
+) -> Child {
+    ProcessCommand::new(tempyr_bin())
+        .args(["--mcp", "--project-root"])
+        .arg(project_root)
+        .current_dir(cwd)
+        .env(tempyr_core::project::PROJECT_ROOT_ENV_VAR, bad_root)
+        .env(tempyr_core::project::GRAPH_DIR_ENV_VAR, bad_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
 fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> ExitStatus {
     let deadline = Instant::now() + timeout;
     loop {
@@ -397,7 +427,7 @@ fn test_mcp_flag_rejects_extra_args() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "`--mcp` must be the first and only argument",
+            "`--mcp` must be the first argument, and if using `--project-root` it must be provided with a valid value. Launch the MCP server with `tempyr --mcp` or `tempyr --mcp --project-root <path>`.",
         ));
 }
 
@@ -475,6 +505,61 @@ fn test_mcp_uses_tempyr_project_root_env_when_server_cwd_is_wrong() {
         .success();
 
     let mut child = spawn_mcp_child_with_project_root(&launch_root, &project_root);
+    initialize_mcp_session(&mut child);
+
+    let response = call_mcp_tool(&mut child, 2, "graph_validate", serde_json::json!({}));
+    assert_eq!(response["id"], 2);
+    assert!(tool_result_text(&response).starts_with("Graph is valid."));
+
+    drop(child.stdin.take());
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn test_mcp_uses_project_root_arg_when_server_cwd_is_wrong() {
+    let tmp = TempDir::new().unwrap();
+    let project_root = tmp.path().join("project");
+    let launch_root = tmp.path().join("launch");
+    fs::create_dir(&project_root).unwrap();
+    fs::create_dir(&launch_root).unwrap();
+
+    tempyr()
+        .current_dir(&project_root)
+        .arg("init")
+        .assert()
+        .success();
+
+    let mut child = spawn_mcp_child_with_project_root_arg(&launch_root, &project_root);
+    initialize_mcp_session(&mut child);
+
+    let response = call_mcp_tool(&mut child, 2, "graph_validate", serde_json::json!({}));
+    assert_eq!(response["id"], 2);
+    assert!(tool_result_text(&response).starts_with("Graph is valid."));
+
+    drop(child.stdin.take());
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn test_mcp_project_root_arg_wins_over_stale_env() {
+    let tmp = TempDir::new().unwrap();
+    let project_root = tmp.path().join("project");
+    let launch_root = tmp.path().join("launch");
+    let stale_root = tmp.path().join("stale");
+    fs::create_dir(&project_root).unwrap();
+    fs::create_dir(&launch_root).unwrap();
+    fs::create_dir(&stale_root).unwrap();
+
+    tempyr()
+        .current_dir(&project_root)
+        .arg("init")
+        .assert()
+        .success();
+
+    let mut child =
+        spawn_mcp_child_with_project_root_arg_and_bad_env(&launch_root, &project_root, &stale_root);
     initialize_mcp_session(&mut child);
 
     let response = call_mcp_tool(&mut child, 2, "graph_validate", serde_json::json!({}));
