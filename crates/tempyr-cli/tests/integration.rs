@@ -4,7 +4,7 @@ use rmcp::model::ProtocolVersion;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command as ProcessCommand, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -117,7 +117,10 @@ fn write_json_line(stdin: &mut ChildStdin, value: serde_json::Value) {
     stdin.flush().unwrap();
 }
 
-fn initialize_mcp_session(child: &mut Child) {
+fn initialize_mcp_session_core(
+    child: &mut Child,
+    capabilities: serde_json::Value,
+) -> (ChildStdin, BufReader<ChildStdout>) {
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let mut stdout = BufReader::new(stdout);
@@ -130,7 +133,7 @@ fn initialize_mcp_session(child: &mut Child) {
             "method": "initialize",
             "params": {
                 "protocolVersion": ProtocolVersion::V_2025_06_18,
-                "capabilities": {},
+                "capabilities": capabilities,
                 "clientInfo": {
                     "name": "integration-test",
                     "version": "0.1.0"
@@ -158,8 +161,55 @@ fn initialize_mcp_session(child: &mut Child) {
         }),
     );
 
+    (stdin, stdout)
+}
+
+fn initialize_mcp_session(child: &mut Child) {
+    let (stdin, stdout) = initialize_mcp_session_core(child, serde_json::json!({}));
+
     child.stdin = Some(stdin);
     child.stdout = Some(stdout.into_inner());
+}
+
+fn initialize_mcp_session_with_roots(child: &mut Child, roots: &[&Path]) {
+    let (mut stdin, mut stdout) =
+        initialize_mcp_session_core(child, serde_json::json!({ "roots": {} }));
+
+    let mut roots_request = String::new();
+    stdout.read_line(&mut roots_request).unwrap();
+    assert!(
+        !roots_request.trim().is_empty(),
+        "expected roots/list request but stdout was empty"
+    );
+    let roots_request: serde_json::Value = serde_json::from_str(roots_request.trim()).unwrap();
+    assert_eq!(roots_request["method"], "roots/list");
+
+    let root_entries: Vec<_> = roots
+        .iter()
+        .map(|root| serde_json::json!({ "uri": file_uri(root) }))
+        .collect();
+    write_json_line(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": roots_request["id"].clone(),
+            "result": {
+                "roots": root_entries
+            }
+        }),
+    );
+
+    child.stdin = Some(stdin);
+    child.stdout = Some(stdout.into_inner());
+}
+
+fn file_uri(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
 }
 
 fn read_json_response(child: &mut Child) -> serde_json::Value {
@@ -536,6 +586,99 @@ fn test_mcp_uses_project_root_arg_when_server_cwd_is_wrong() {
     let response = call_mcp_tool(&mut child, 2, "graph_validate", serde_json::json!({}));
     assert_eq!(response["id"], 2);
     assert!(tool_result_text(&response).starts_with("Graph is valid."));
+
+    drop(child.stdin.take());
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn test_mcp_uses_client_roots_when_server_cwd_is_wrong() {
+    let tmp = TempDir::new().unwrap();
+    let project_root = tmp.path().join("project");
+    let launch_root = tmp.path().join("launch");
+    fs::create_dir(&project_root).unwrap();
+    fs::create_dir(&launch_root).unwrap();
+
+    tempyr()
+        .current_dir(&project_root)
+        .arg("init")
+        .assert()
+        .success();
+
+    let mut child = spawn_mcp_child(&launch_root);
+    initialize_mcp_session_with_roots(&mut child, &[&project_root]);
+
+    let response = call_mcp_tool(&mut child, 2, "graph_validate", serde_json::json!({}));
+    assert_eq!(response["id"], 2);
+    assert!(tool_result_text(&response).starts_with("Graph is valid."));
+
+    drop(child.stdin.take());
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn test_mcp_relative_project_root_arg_uses_client_roots_when_server_cwd_is_wrong() {
+    let tmp = TempDir::new().unwrap();
+    let workspace_root = tmp.path().join("workspace");
+    let project_root = workspace_root.join("project");
+    let launch_root = tmp.path().join("launch");
+    fs::create_dir(&workspace_root).unwrap();
+    fs::create_dir(&project_root).unwrap();
+    fs::create_dir(&launch_root).unwrap();
+
+    tempyr()
+        .current_dir(&project_root)
+        .arg("init")
+        .assert()
+        .success();
+
+    let mut child = spawn_mcp_child_with_project_root_arg(&launch_root, Path::new("project"));
+    initialize_mcp_session_with_roots(&mut child, &[&workspace_root]);
+
+    let response = call_mcp_tool(&mut child, 2, "graph_validate", serde_json::json!({}));
+    assert_eq!(response["id"], 2);
+    assert!(tool_result_text(&response).starts_with("Graph is valid."));
+
+    drop(child.stdin.take());
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn test_mcp_relative_project_root_arg_prefers_client_roots_over_launch_project() {
+    let tmp = TempDir::new().unwrap();
+    let launch_root = tmp.path().join("launch-project");
+    let client_root = tmp.path().join("client-project");
+    fs::create_dir(&launch_root).unwrap();
+    fs::create_dir(&client_root).unwrap();
+
+    tempyr()
+        .current_dir(&launch_root)
+        .arg("init")
+        .assert()
+        .success();
+    tempyr()
+        .current_dir(&client_root)
+        .arg("init")
+        .assert()
+        .success();
+
+    fs::write(
+        client_root.join("graph/features/client-only.md"),
+        "---\nid: client-only\ntype: feature\nstatus: draft\nowner: caleb\nedges: []\n---\n# Client Only\n",
+    )
+    .unwrap();
+
+    let mut child = spawn_mcp_child_with_project_root_arg(&launch_root, Path::new("."));
+    initialize_mcp_session_with_roots(&mut child, &[&client_root]);
+
+    let response = call_mcp_tool(&mut child, 2, "graph_stats", serde_json::json!({}));
+    assert_eq!(response["id"], 2);
+    let stats: serde_json::Value = serde_json::from_str(tool_result_text(&response)).unwrap();
+    assert_eq!(stats["node_count"], 1);
+    assert_eq!(stats["nodes_by_type"]["feature"], 1);
 
     drop(child.stdin.take());
     let status = wait_for_child_exit(&mut child, Duration::from_secs(5));

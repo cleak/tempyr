@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
+use rmcp::RoleServer;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{Peer, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -250,7 +253,104 @@ fn default_confidence() -> f64 {
 
 // Helpers
 
-fn find_project() -> Result<(PathBuf, PathBuf, Schema), String> {
+const ROOTS_LIST_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Clone)]
+struct ProjectAnchorState {
+    ready: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl ProjectAnchorState {
+    fn ready() -> Self {
+        Self {
+            ready: Arc::new((Mutex::new(true), Condvar::new())),
+        }
+    }
+
+    fn pending() -> Self {
+        Self {
+            ready: Arc::new((Mutex::new(false), Condvar::new())),
+        }
+    }
+
+    fn mark_ready(&self) {
+        let (lock, condvar) = &*self.ready;
+        let mut ready = lock.lock().expect("project anchor state poisoned");
+        *ready = true;
+        condvar.notify_all();
+    }
+
+    fn wait_ready(&self) {
+        let (lock, condvar) = &*self.ready;
+        let mut ready = lock.lock().expect("project anchor state poisoned");
+        while !*ready {
+            ready = condvar
+                .wait(ready)
+                .expect("project anchor state poisoned while waiting");
+        }
+    }
+}
+
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    let raw = uri.strip_prefix("file://")?;
+    let (raw, is_unc_path) = match raw.strip_prefix("localhost") {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => (rest, false),
+        _ if raw.starts_with("//") => (raw.trim_start_matches('/'), true),
+        _ if raw.starts_with('/') => (raw, false),
+        _ => (raw, true),
+    };
+    let decoded = percent_decode(raw)?;
+
+    #[cfg(windows)]
+    {
+        let normalized = decoded.replace('/', "\\");
+        if is_unc_path {
+            Some(PathBuf::from(format!(
+                "\\\\{}",
+                normalized.trim_start_matches('\\')
+            )))
+        } else {
+            Some(PathBuf::from(
+                normalized.strip_prefix('\\').unwrap_or(&normalized),
+            ))
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = is_unc_path;
+        Some(PathBuf::from(decoded))
+    }
+}
+
+fn percent_decode(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hi = bytes.get(i + 1).copied().and_then(hex_value)?;
+            let lo = bytes.get(i + 2).copied().and_then(hex_value)?;
+            decoded.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn find_project_now() -> Result<(PathBuf, PathBuf, Schema), String> {
     let root = tempyr_core::project::find_project_root().ok_or_else(|| {
         let cwd = std::env::current_dir()
             .map(|path| path.display().to_string())
@@ -478,8 +578,10 @@ fn resolve_interview_node_id(
     }
 }
 
-fn build_linear_deps() -> Result<(LinearClient, LinearConfig, PathBuf, PathBuf, Schema), String> {
-    let (graph_dir, gf_dir, schema) = find_project()?;
+fn build_linear_deps(
+    project: (PathBuf, PathBuf, Schema),
+) -> Result<(LinearClient, LinearConfig, PathBuf, PathBuf, Schema), String> {
+    let (graph_dir, gf_dir, schema) = project;
     let client = LinearClient::from_env().map_err(|e| e.to_string())?;
     let config = LinearConfig::load(&gf_dir).map_err(|e| e.to_string())?;
     Ok((client, config, gf_dir, graph_dir, schema))
@@ -503,6 +605,8 @@ fn build_status_mapper_from_config(config: &LinearConfig) -> StatusMapper {
 #[derive(Clone)]
 pub struct TempyrServer {
     tool_router: ToolRouter<Self>,
+    relative_project_root_fallback: Option<PathBuf>,
+    project_anchor_state: ProjectAnchorState,
 }
 
 #[tool_router]
@@ -510,6 +614,63 @@ impl TempyrServer {
     pub fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
+            relative_project_root_fallback: None,
+            project_anchor_state: ProjectAnchorState::ready(),
+        }
+    }
+
+    pub(crate) fn with_relative_project_root_fallback(mut self, fallback: Option<PathBuf>) -> Self {
+        self.relative_project_root_fallback = fallback;
+        self
+    }
+
+    pub(crate) fn with_deferred_project_anchor(mut self) -> Self {
+        self.project_anchor_state = ProjectAnchorState::pending();
+        self
+    }
+
+    pub(crate) fn mark_project_anchor_ready(&self) {
+        self.project_anchor_state.mark_ready();
+    }
+
+    fn find_project(&self) -> Result<(PathBuf, PathBuf, Schema), String> {
+        self.project_anchor_state.wait_ready();
+        find_project_now()
+    }
+
+    pub(crate) async fn try_anchor_from_client_roots(&self, peer: Peer<RoleServer>) {
+        if self.relative_project_root_fallback.is_none()
+            && tempyr_core::project::find_project_roots().is_some()
+        {
+            return;
+        }
+
+        let supports_roots = peer
+            .peer_info()
+            .and_then(|client| client.capabilities.roots.as_ref())
+            .is_some();
+        if !supports_roots {
+            return;
+        }
+
+        let Ok(Ok(result)) = tokio::time::timeout(ROOTS_LIST_TIMEOUT, peer.list_roots()).await
+        else {
+            return;
+        };
+
+        for root in result.roots {
+            let Some(mut path) = file_uri_to_path(&root.uri) else {
+                continue;
+            };
+            if let Some(relative) = &self.relative_project_root_fallback {
+                path = path.join(relative);
+            }
+            if let Some(roots) = tempyr_core::project::find_project_roots_from(path)
+                && std::env::set_current_dir(&roots.anchor_root).is_ok()
+            {
+                let _ = tempyr_core::project::load_project_env_from(roots.anchor_root);
+                return;
+            }
         }
     }
     // Graph query tools
@@ -520,7 +681,7 @@ impl TempyrServer {
     )]
     fn graph_search(&self, Parameters(p): Parameters<GraphSearchParams>) -> Result<String, String> {
         let max_results = p.max_results.unwrap_or(10) as usize;
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let index_path = ensure_index_path(&graph_dir, &gf_dir, &schema, None)?;
         let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
 
@@ -555,7 +716,7 @@ impl TempyrServer {
     )]
     fn graph_list(&self, Parameters(p): Parameters<GraphListParams>) -> Result<String, String> {
         let max_results = p.max_results.unwrap_or(50) as usize;
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let index_path = ensure_index_path(&graph_dir, &gf_dir, &schema, None)?;
         let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
 
@@ -593,7 +754,7 @@ impl TempyrServer {
         Parameters(p): Parameters<GraphContextParams>,
     ) -> Result<String, String> {
         let budget = p.token_budget.unwrap_or(8000) as usize;
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let resolved_root = p
             .root_node
             .as_deref()
@@ -643,7 +804,7 @@ impl TempyrServer {
         Parameters(p): Parameters<GraphTraverseParams>,
     ) -> Result<String, String> {
         let depth = p.depth.unwrap_or(2) as usize;
-        let (graph_dir, _, schema) = find_project()?;
+        let (graph_dir, _, schema) = self.find_project()?;
         let resolved = ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
         let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
 
@@ -672,7 +833,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<GraphGetNodeParams>,
     ) -> Result<String, String> {
-        let (graph_dir, _, _) = find_project()?;
+        let (graph_dir, _, _) = self.find_project()?;
         let resolved = ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
         let path = ops::find_node_file(&graph_dir, &resolved).map_err(|e| e.to_string())?;
         std::fs::read_to_string(&path).map_err(|e| e.to_string())
@@ -683,7 +844,7 @@ impl TempyrServer {
         description = "Get graph statistics: node counts by type, edge counts"
     )]
     fn graph_stats(&self) -> Result<String, String> {
-        let (graph_dir, _, schema) = find_project()?;
+        let (graph_dir, _, schema) = self.find_project()?;
         let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
 
         let mut type_counts: HashMap<String, usize> = HashMap::new();
@@ -708,7 +869,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<GraphAddNodeParams>,
     ) -> Result<String, String> {
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let (generated_id, path) = ops::create_node_file_auto_id(
             &graph_dir,
             &p.slug,
@@ -735,7 +896,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<GraphUpdateNodeParams>,
     ) -> Result<String, String> {
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let resolved = ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
         let path = ops::update_node(
             &graph_dir,
@@ -781,7 +942,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<GraphAddEdgeParams>,
     ) -> Result<String, String> {
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let resolved_source =
             ops::resolve_node_id(&graph_dir, &p.source).map_err(|e| e.to_string())?;
         let resolved_target =
@@ -811,7 +972,7 @@ impl TempyrServer {
         description = "Validate graph consistency. Returns any errors or warnings."
     )]
     fn graph_validate(&self) -> Result<String, String> {
-        let (graph_dir, _, schema) = find_project()?;
+        let (graph_dir, _, schema) = self.find_project()?;
         let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
         let issues = validate_graph(&graph);
 
@@ -832,7 +993,7 @@ impl TempyrServer {
         description = "Render a document (PRD, TDD) from a root node"
     )]
     fn graph_render(&self, Parameters(p): Parameters<GraphRenderParams>) -> Result<String, String> {
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let root_id = ops::resolve_node_id(&graph_dir, &p.root_node).map_err(|e| e.to_string())?;
         let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
 
@@ -867,7 +1028,7 @@ impl TempyrServer {
         Parameters(p): Parameters<InterviewStartParams>,
     ) -> Result<String, String> {
         let root_type = p.root_type.as_deref().unwrap_or("feature");
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let sessions = sessions_dir(&gf_dir);
         let graph = Graph::load_from_directory(&graph_dir, schema.clone()).ok();
 
@@ -921,7 +1082,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<InterviewAnswerParams>,
     ) -> Result<String, String> {
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let sessions = sessions_dir(&gf_dir);
         let graph = Graph::load_from_directory(&graph_dir, schema.clone()).ok();
 
@@ -964,7 +1125,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<InterviewSessionParams>,
     ) -> Result<String, String> {
-        let (_, gf_dir, schema) = find_project()?;
+        let (_, gf_dir, schema) = self.find_project()?;
         let sessions = sessions_dir(&gf_dir);
         let session =
             InterviewSession::load_by_id(&sessions, &p.session_id).map_err(|e| e.to_string())?;
@@ -981,7 +1142,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<InterviewSessionParams>,
     ) -> Result<String, String> {
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let sessions = sessions_dir(&gf_dir);
         let session =
             InterviewSession::load_by_id(&sessions, &p.session_id).map_err(|e| e.to_string())?;
@@ -1021,7 +1182,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<InterviewAdjustParams>,
     ) -> Result<String, String> {
-        let (_, gf_dir, schema) = find_project()?;
+        let (_, gf_dir, schema) = self.find_project()?;
         let sessions = sessions_dir(&gf_dir);
         let mut session =
             InterviewSession::load_by_id(&sessions, &p.session_id).map_err(|e| e.to_string())?;
@@ -1063,7 +1224,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<InterviewSessionParams>,
     ) -> Result<String, String> {
-        let (_, gf_dir, schema) = find_project()?;
+        let (_, gf_dir, schema) = self.find_project()?;
         let sessions = sessions_dir(&gf_dir);
         let session =
             InterviewSession::load_by_id(&sessions, &p.session_id).map_err(|e| e.to_string())?;
@@ -1083,7 +1244,7 @@ impl TempyrServer {
         let status = p.status.as_deref().unwrap_or("draft");
         let confidence = p.confidence.unwrap_or(0.9) as f32;
 
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let sessions = sessions_dir(&gf_dir);
         let graph = Graph::load_from_directory(&graph_dir, schema.clone()).ok();
 
@@ -1141,7 +1302,7 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<InterviewAddEdgeParams>,
     ) -> Result<String, String> {
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let sessions = sessions_dir(&gf_dir);
         let graph = Graph::load_from_directory(&graph_dir, schema.clone()).ok();
 
@@ -1186,7 +1347,7 @@ impl TempyrServer {
     )]
     fn linear_push(&self, Parameters(p): Parameters<LinearPushParams>) -> Result<String, String> {
         let dry_run = p.dry_run.unwrap_or(false);
-        let (client, config, gf_dir, graph_dir, schema) = build_linear_deps()?;
+        let (client, config, gf_dir, graph_dir, schema) = build_linear_deps(self.find_project()?)?;
         let resolved_node_id = p
             .node_id
             .as_deref()
@@ -1297,7 +1458,7 @@ impl TempyrServer {
     )]
     fn linear_pull(&self, Parameters(p): Parameters<LinearDryRunParams>) -> Result<String, String> {
         let dry_run = p.dry_run.unwrap_or(false);
-        let (client, config, gf_dir, graph_dir, schema) = build_linear_deps()?;
+        let (client, config, gf_dir, graph_dir, schema) = build_linear_deps(self.find_project()?)?;
         let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
         let status_mapper = build_status_mapper_from_config(&config);
 
@@ -1350,7 +1511,7 @@ impl TempyrServer {
     )]
     fn linear_sync(&self, Parameters(p): Parameters<LinearDryRunParams>) -> Result<String, String> {
         let dry_run = p.dry_run.unwrap_or(false);
-        let (client, config, gf_dir, graph_dir, schema) = build_linear_deps()?;
+        let (client, config, gf_dir, graph_dir, schema) = build_linear_deps(self.find_project()?)?;
         let graph =
             Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
         let mut sync_state = SyncState::load(&gf_dir).map_err(|e| e.to_string())?;
@@ -1415,7 +1576,7 @@ impl TempyrServer {
         description = "Show Linear sync state: linked nodes, pending changes, stale entries, and conflicts."
     )]
     fn linear_status(&self) -> Result<String, String> {
-        let (graph_dir, gf_dir, schema) = find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
 
         if LinearConfig::load(&gf_dir).is_err() {
             return serde_json::to_string_pretty(&json!({
@@ -1453,5 +1614,65 @@ impl ServerHandler for TempyrServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("tempyr-mcp", env!("CARGO_PKG_VERSION")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_decodes_hex_bytes() {
+        assert_eq!(percent_decode("space%20path"), Some("space path".into()));
+    }
+
+    #[test]
+    fn percent_decode_rejects_invalid_hex() {
+        assert_eq!(percent_decode("bad%zzpath"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_uri_to_path_converts_windows_file_uri() {
+        assert_eq!(
+            file_uri_to_path("file:///C:/Projects/Rust/tempyr"),
+            Some(PathBuf::from(r"C:\Projects\Rust\tempyr"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_uri_to_path_accepts_localhost_authority() {
+        assert_eq!(
+            file_uri_to_path("file://localhost/C:/Projects/Rust/tempyr"),
+            Some(PathBuf::from(r"C:\Projects\Rust\tempyr"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_uri_to_path_preserves_unc_authority() {
+        assert_eq!(
+            file_uri_to_path("file://server/share/project"),
+            Some(PathBuf::from(r"\\server\share\project"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_uri_to_path_preserves_unc_path_without_authority() {
+        assert_eq!(
+            file_uri_to_path("file:////server/share/project"),
+            Some(PathBuf::from(r"\\server\share\project"))
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn file_uri_to_path_converts_unix_file_uri() {
+        assert_eq!(
+            file_uri_to_path("file:///tmp/tempyr"),
+            Some(PathBuf::from("/tmp/tempyr"))
+        );
     }
 }

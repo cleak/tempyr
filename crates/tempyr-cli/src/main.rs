@@ -392,27 +392,47 @@ fn run_cli_mode() -> anyhow::Result<()> {
 }
 
 fn run_mcp_mode(project_root: Option<PathBuf>) -> anyhow::Result<()> {
+    let mut relative_project_root_fallback = None;
     if let Some(project_root) = project_root {
-        let roots = tempyr_core::project::find_project_roots_from(project_root.clone())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Not a tempyr project from --project-root {} (no .tempyr/ or .tempyr-redirect found)",
-                    project_root.display()
-                )
-            })?;
-        std::env::set_current_dir(&roots.anchor_root)?;
-        // The explicit CLI anchor must win over stale process environment left by
-        // an MCP client or parent shell before the MCP layer loads project env.
-        unsafe {
-            std::env::remove_var(tempyr_core::project::PROJECT_ROOT_ENV_VAR);
-            std::env::remove_var(tempyr_core::project::GRAPH_DIR_ENV_VAR);
+        let is_relative = project_root.is_relative();
+        if is_relative {
+            // Resolve relative anchors against MCP client roots after initialization;
+            // the process cwd may be unrelated to the active workspace.
+            relative_project_root_fallback = Some(project_root);
+        } else {
+            let roots = tempyr_core::project::find_project_roots_from(project_root.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Not a tempyr project from --project-root {} (no .tempyr/ or .tempyr-redirect found)",
+                        project_root.display()
+                    )
+                })?;
+            std::env::set_current_dir(&roots.anchor_root)?;
+            // The explicit CLI anchor must win over stale process environment left by
+            // an MCP client or parent shell before the MCP layer loads project env.
+            clear_mcp_project_env_overrides();
         }
     }
 
+    if relative_project_root_fallback.is_some() {
+        clear_mcp_project_env_overrides();
+    }
+
     let rt = tokio::runtime::Runtime::new()?;
-    let result = rt.block_on(tempyr_mcp::serve_stdio());
+    let result = rt.block_on(tempyr_mcp::serve_stdio_with_project_root_fallback(
+        relative_project_root_fallback,
+    ));
     rt.shutdown_timeout(std::time::Duration::from_secs(1));
     result
+}
+
+fn clear_mcp_project_env_overrides() {
+    // Rust 2024 marks environment mutation unsafe because other threads may read it.
+    // This runs before the MCP Tokio runtime is started.
+    unsafe {
+        std::env::remove_var(tempyr_core::project::PROJECT_ROOT_ENV_VAR);
+        std::env::remove_var(tempyr_core::project::GRAPH_DIR_ENV_VAR);
+    }
 }
 
 fn load_cli_project_env(graph_dir: Option<&Path>) -> anyhow::Result<()> {
