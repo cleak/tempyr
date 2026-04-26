@@ -451,8 +451,7 @@ fn write_provider_api_key(
 const CODEX_MCP_SNIPPET: &str = "args = [\"--mcp\"]";
 const CODEX_MCP_NO_CWD_SETUP_NOTE: &str = "- Do NOT set the `cwd` field in the project config. Codex Desktop launches MCP servers in the workspace directory by default, which is what Tempyr's project-root walk-up needs. A relative parent-directory `cwd` triggers a Codex Desktop bug where the path resolves against the desktop process cwd (e.g. `C:\\WINDOWS\\system32` on Windows), stranding Tempyr in `C:\\WINDOWS`.\n";
 const CODEX_MCP_NO_CWD_FOLLOW_UP_NOTE: &str = "- For Tempyr MCP in shared project config, use `args = [\"--mcp\"]` with no `cwd` field — Codex Desktop launches the server in the workspace directory by default, and a relative `cwd` triggers a Codex bug that strands the server in `C:\\WINDOWS`. Use `--project-root <absolute-project-root>` only in machine-local config for clients that don't put the MCP child in the workspace directory.\n";
-const CODEX_MCP_LOCAL_OVERRIDE_SETUP_NOTE: &str = "- If your client doesn't launch MCP servers in the workspace directory, keep any absolute `--project-root` fallback in local user or machine config, not in checked-in project config.\n";
-const CODEX_MCP_LOCAL_OVERRIDE_FOLLOW_UP_NOTE: &str = "- If your client doesn't launch MCP servers in the workspace directory, keep any absolute `--project-root` fallback in local user or machine config, not in checked-in project config.\n";
+const CODEX_MCP_LOCAL_OVERRIDE_NOTE: &str = "- If your client doesn't launch MCP servers in the workspace directory, keep any absolute `--project-root` fallback in local user or machine config, not in checked-in project config.\n";
 const CODEX_MCP_AVOID_ABSOLUTE_SHARED_NOTE: &str = "- Avoid absolute MCP `cwd`, `--project-root`, or `TEMPYR_PROJECT_ROOT` values in shared config if you want the same setup to follow Git worktrees cleanly.\n";
 
 fn provider_api_key_path(root: &Path) -> PathBuf {
@@ -586,13 +585,13 @@ command = "tempyr"
 startup_timeout_sec = 5
 ```
 
-{codex_mcp_local_override_setup_note}{codex_mcp_avoid_absolute_shared_note}- Use `TEMPYR_GRAPH_DIR` only when you need to anchor directly to a nonstandard graph path.
+{codex_mcp_local_override_note}{codex_mcp_avoid_absolute_shared_note}- Use `TEMPYR_GRAPH_DIR` only when you need to anchor directly to a nonstandard graph path.
 - If you want Codex to update existing instruction docs, use project config with narrow writable roots for those markdown files.
 - Repo-local `.codex` and `.agents` paths can remain protected even when writable roots are restricted, so Tempyr installs supporting assets directly and limits merge handoffs to markdown docs.
 "#,
         codex_mcp_no_cwd_setup_note = CODEX_MCP_NO_CWD_SETUP_NOTE,
         codex_mcp_snippet = CODEX_MCP_SNIPPET,
-        codex_mcp_local_override_setup_note = CODEX_MCP_LOCAL_OVERRIDE_SETUP_NOTE,
+        codex_mcp_local_override_note = CODEX_MCP_LOCAL_OVERRIDE_NOTE,
         codex_mcp_avoid_absolute_shared_note = CODEX_MCP_AVOID_ABSOLUTE_SHARED_NOTE,
     );
     fs::write(&path, body)?;
@@ -728,7 +727,7 @@ fn render_follow_up_body(docs: &[DocSpec], mode: FollowUpMode) -> String {
             body.push_str("- Use project-scoped `.codex/config.toml` with `sandbox_mode`, `approval_policy`, and `sandbox_workspace_write.writable_roots` tuned to the doc files you want updated.\n");
             body.push_str(CODEX_MCP_NO_CWD_FOLLOW_UP_NOTE);
             body.push_str("- For hosted embedding keys shared across worktrees, prefer Tempyr's shared Git-common-dir env file at `<git-common-dir>/tempyr/.env.local`; Tempyr loads it automatically.\n");
-            body.push_str(CODEX_MCP_LOCAL_OVERRIDE_FOLLOW_UP_NOTE);
+            body.push_str(CODEX_MCP_LOCAL_OVERRIDE_NOTE);
             body.push_str(CODEX_MCP_AVOID_ABSOLUTE_SHARED_NOTE);
             body.push_str("- OpenAI's docs note that repo-local `.codex` and `.agents` paths remain protected inside default writable roots, so Tempyr installs supporting skill files directly and limits Codex handoff to markdown docs.\n");
             body.push_str("- After opening Codex in the repo, point it at this file and ask it to merge the snippets below.\n\n");
@@ -1475,6 +1474,22 @@ mod tests {
         assert_eq!(updated.matches("tempyr:onboarding:start").count(), 1);
     }
 
+    /// Returns true if `body` contains any TOML-style `cwd =` assignment.
+    ///
+    /// Catches `cwd = "..."`, `cwd="..."`, `cwd  =  "..."` etc. — i.e. any
+    /// form where Codex would parse a `cwd` field. Backticked prose mentions
+    /// like `` `cwd` `` don't match because they have no `=`.
+    fn body_recommends_cwd(body: &str) -> bool {
+        body.lines().any(|line| {
+            let trimmed = line.trim_start();
+            let after_cwd = match trimmed.strip_prefix("cwd") {
+                Some(rest) => rest,
+                None => return false,
+            };
+            after_cwd.trim_start().starts_with('=')
+        })
+    }
+
     #[test]
     fn mcp_setup_notes_omit_cwd_for_codex() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1484,11 +1499,11 @@ mod tests {
 
         assert!(body.contains(CODEX_MCP_SNIPPET));
         assert!(body.contains(CODEX_MCP_NO_CWD_SETUP_NOTE.trim()));
-        assert!(body.contains(CODEX_MCP_LOCAL_OVERRIDE_SETUP_NOTE.trim()));
+        assert!(body.contains(CODEX_MCP_LOCAL_OVERRIDE_NOTE.trim()));
         assert!(body.contains(CODEX_MCP_AVOID_ABSOLUTE_SHARED_NOTE.trim()));
         assert!(
-            !body.contains("cwd = \"..\""),
-            "onboarding doc must not recommend `cwd = \"..\"` (triggers Codex Desktop bug)"
+            !body_recommends_cwd(&body),
+            "onboarding doc must not recommend any `cwd =` value (triggers Codex Desktop bug)"
         );
     }
 
@@ -1499,10 +1514,10 @@ mod tests {
         assert!(body.contains(CODEX_MCP_NO_CWD_FOLLOW_UP_NOTE.trim()));
         assert!(body.contains("args = [\"--mcp\"]"));
         assert!(
-            !body.contains("cwd = \"..\""),
-            "follow-up body must not recommend `cwd = \"..\"` (triggers Codex Desktop bug)"
+            !body_recommends_cwd(&body),
+            "follow-up body must not recommend any `cwd =` value (triggers Codex Desktop bug)"
         );
-        assert!(body.contains(CODEX_MCP_LOCAL_OVERRIDE_FOLLOW_UP_NOTE.trim()));
+        assert!(body.contains(CODEX_MCP_LOCAL_OVERRIDE_NOTE.trim()));
         assert!(body.contains(CODEX_MCP_AVOID_ABSOLUTE_SHARED_NOTE.trim()));
     }
 }
