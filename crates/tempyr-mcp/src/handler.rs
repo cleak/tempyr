@@ -20,6 +20,7 @@ use tempyr_core::temporal::TemporalFilter;
 use tempyr_core::traverse::bfs;
 use tempyr_core::validate::validate_graph;
 use tempyr_index::fts::MetadataFilter;
+use tempyr_index::health::{self, HealthInputs};
 use tempyr_index::hybrid::{RetrievalConfig, hybrid_retrieve};
 use tempyr_index::indexer::Index;
 use tempyr_index::refresh::refresh_index_for_graph;
@@ -1569,6 +1570,30 @@ impl TempyrServer {
                 .map_err(|e| e.to_string())
             })
         })
+    }
+
+    #[tool(
+        name = "system_doctor",
+        description = "Report system health: active embedding provider/model, paths to all config files, index state, env files, and warnings. API key VALUES are never returned — only env var names and a boolean indicating whether the key is set."
+    )]
+    fn system_doctor(&self) -> Result<String, String> {
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
+        let root = graph_dir
+            .parent()
+            .ok_or_else(|| "Failed to resolve project root from graph dir".to_string())?
+            .to_path_buf();
+        let cache = tempyr_core::project::cache_layout(&root, &gf_dir);
+
+        let inputs = HealthInputs {
+            root: &root,
+            graph_dir: &graph_dir,
+            tempyr_dir: &gf_dir,
+            cache: &cache,
+            schema: &schema,
+            tempyr_version: env!("CARGO_PKG_VERSION"),
+        };
+        let report = health::build_report(&inputs);
+        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
     }
 
     #[tool(

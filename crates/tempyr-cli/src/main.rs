@@ -253,6 +253,9 @@ pub enum Commands {
         #[arg(long)]
         force: bool,
     },
+
+    /// Report system health: embedding provider, config files, paths, and warnings
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -660,6 +663,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Commands::Update { check, force } => commands::update::run(check, force),
+        Commands::Doctor => {
+            let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
+            commands::doctor::run(&ctx, cli.json)
+        }
     }
 }
 

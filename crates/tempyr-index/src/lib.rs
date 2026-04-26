@@ -1,5 +1,6 @@
 pub mod embeddings;
 pub mod fts;
+pub mod health;
 pub mod hybrid;
 pub mod incremental;
 pub mod indexer;

@@ -5,6 +5,7 @@ pub mod ask;
 pub mod context;
 pub mod dedupe;
 pub mod dispatch;
+pub mod doctor;
 pub mod edge;
 pub mod git_hooks;
 pub mod import;

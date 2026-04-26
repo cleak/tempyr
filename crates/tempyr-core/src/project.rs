@@ -465,7 +465,9 @@ fn load_env_dir(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(loaded)
 }
 
-fn env_file_candidates(dir: &Path) -> Vec<PathBuf> {
+/// List the env files Tempyr would consider loading from the given directory,
+/// in load-order (earliest-first wins via dotenvy semantics).
+pub fn env_file_candidates(dir: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![dir.join(".env.local"), dir.join(".env")];
     if let Some(shared_root) = shared_env_root(dir) {
         candidates.push(shared_root.join(".env.local"));
