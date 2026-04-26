@@ -448,11 +448,11 @@ fn write_provider_api_key(
     Ok((env_var, path))
 }
 
-const CODEX_MCP_CWD_SNIPPET: &str = "args = [\"--mcp\"]\ncwd = \"..\"";
-const CODEX_MCP_CWD_SETUP_NOTE: &str = "- For shared repo config, prefer `args = [\"--mcp\"]` with `cwd = \"..\"` so Tempyr starts from the worktree root without baking in a machine-specific path.\n";
-const CODEX_MCP_CWD_FOLLOW_UP_NOTE: &str = "- For Tempyr MCP in shared project config, prefer `args = [\"--mcp\"]` with `cwd = \"..\"`; use `--project-root <absolute-project-root>` only in machine-local config for clients or builds that ignore `cwd`.\n";
-const CODEX_MCP_LOCAL_OVERRIDE_SETUP_NOTE: &str = "- If your Codex build does not honor relative `cwd`, keep any absolute `--project-root` fallback in local user or machine config, not in checked-in project config.\n";
-const CODEX_MCP_LOCAL_OVERRIDE_FOLLOW_UP_NOTE: &str = "- If your Codex build does not honor relative `cwd`, keep any absolute `--project-root` fallback in local user or machine config, not in checked-in project config.\n";
+const CODEX_MCP_SNIPPET: &str = "args = [\"--mcp\"]";
+const CODEX_MCP_NO_CWD_SETUP_NOTE: &str = "- Do NOT set the `cwd` field in the project config. Codex Desktop launches MCP servers in the workspace directory by default, which is what Tempyr's project-root walk-up needs. A relative parent-directory `cwd` triggers a Codex Desktop bug where the path resolves against the desktop process cwd (e.g. `C:\\WINDOWS\\system32` on Windows), stranding Tempyr in `C:\\WINDOWS`.\n";
+const CODEX_MCP_NO_CWD_FOLLOW_UP_NOTE: &str = "- For Tempyr MCP in shared project config, use `args = [\"--mcp\"]` with no `cwd` field — Codex Desktop launches the server in the workspace directory by default, and a relative `cwd` triggers a Codex bug that strands the server in `C:\\WINDOWS`. Use `--project-root <absolute-project-root>` only in machine-local config for clients that don't put the MCP child in the workspace directory.\n";
+const CODEX_MCP_LOCAL_OVERRIDE_SETUP_NOTE: &str = "- If your client doesn't launch MCP servers in the workspace directory, keep any absolute `--project-root` fallback in local user or machine config, not in checked-in project config.\n";
+const CODEX_MCP_LOCAL_OVERRIDE_FOLLOW_UP_NOTE: &str = "- If your client doesn't launch MCP servers in the workspace directory, keep any absolute `--project-root` fallback in local user or machine config, not in checked-in project config.\n";
 const CODEX_MCP_AVOID_ABSOLUTE_SHARED_NOTE: &str = "- Avoid absolute MCP `cwd`, `--project-root`, or `TEMPYR_PROJECT_ROOT` values in shared config if you want the same setup to follow Git worktrees cleanly.\n";
 
 fn provider_api_key_path(root: &Path) -> PathBuf {
@@ -576,13 +576,13 @@ tempyr --mcp
 ## Codex
 
 - Prefer a project-scoped `.codex/config.toml` entry instead of a user-level `~/.codex/config.toml` entry when you want MCP to follow Git worktrees.
-{codex_mcp_cwd_setup_note}- For hosted embedding keys shared across worktrees, prefer Tempyr's shared Git-common-dir env file at `<git-common-dir>/tempyr/.env.local`. Tempyr loads that automatically without committing it.
+{codex_mcp_no_cwd_setup_note}- For hosted embedding keys shared across worktrees, prefer Tempyr's shared Git-common-dir env file at `<git-common-dir>/tempyr/.env.local`. Tempyr loads that automatically without committing it.
 - Example:
 
 ```toml
 [mcp_servers.tempyr]
 command = "tempyr"
-{codex_mcp_cwd_snippet}
+{codex_mcp_snippet}
 startup_timeout_sec = 5
 ```
 
@@ -590,8 +590,8 @@ startup_timeout_sec = 5
 - If you want Codex to update existing instruction docs, use project config with narrow writable roots for those markdown files.
 - Repo-local `.codex` and `.agents` paths can remain protected even when writable roots are restricted, so Tempyr installs supporting assets directly and limits merge handoffs to markdown docs.
 "#,
-        codex_mcp_cwd_setup_note = CODEX_MCP_CWD_SETUP_NOTE,
-        codex_mcp_cwd_snippet = CODEX_MCP_CWD_SNIPPET,
+        codex_mcp_no_cwd_setup_note = CODEX_MCP_NO_CWD_SETUP_NOTE,
+        codex_mcp_snippet = CODEX_MCP_SNIPPET,
         codex_mcp_local_override_setup_note = CODEX_MCP_LOCAL_OVERRIDE_SETUP_NOTE,
         codex_mcp_avoid_absolute_shared_note = CODEX_MCP_AVOID_ABSOLUTE_SHARED_NOTE,
     );
@@ -726,7 +726,7 @@ fn render_follow_up_body(docs: &[DocSpec], mode: FollowUpMode) -> String {
         FollowUpMode::Codex => {
             body.push_str("Suggested Codex setup notes:\n");
             body.push_str("- Use project-scoped `.codex/config.toml` with `sandbox_mode`, `approval_policy`, and `sandbox_workspace_write.writable_roots` tuned to the doc files you want updated.\n");
-            body.push_str(CODEX_MCP_CWD_FOLLOW_UP_NOTE);
+            body.push_str(CODEX_MCP_NO_CWD_FOLLOW_UP_NOTE);
             body.push_str("- For hosted embedding keys shared across worktrees, prefer Tempyr's shared Git-common-dir env file at `<git-common-dir>/tempyr/.env.local`; Tempyr loads it automatically.\n");
             body.push_str(CODEX_MCP_LOCAL_OVERRIDE_FOLLOW_UP_NOTE);
             body.push_str(CODEX_MCP_AVOID_ABSOLUTE_SHARED_NOTE);
@@ -1476,33 +1476,33 @@ mod tests {
     }
 
     #[test]
-    fn mcp_setup_notes_prefer_cwd_for_codex() {
+    fn mcp_setup_notes_omit_cwd_for_codex() {
         let tmp = tempfile::tempdir().unwrap();
 
         let path = write_mcp_setup_notes(tmp.path()).unwrap();
         let body = fs::read_to_string(path).unwrap();
 
-        assert!(body.contains(CODEX_MCP_CWD_SNIPPET));
-        assert!(body.contains(CODEX_MCP_CWD_SETUP_NOTE.trim()));
+        assert!(body.contains(CODEX_MCP_SNIPPET));
+        assert!(body.contains(CODEX_MCP_NO_CWD_SETUP_NOTE.trim()));
         assert!(body.contains(CODEX_MCP_LOCAL_OVERRIDE_SETUP_NOTE.trim()));
         assert!(body.contains(CODEX_MCP_AVOID_ABSOLUTE_SHARED_NOTE.trim()));
-        assert!(!body.contains(
-            "Use `TEMPYR_PROJECT_ROOT` (or `TEMPYR_GRAPH_DIR`) only as a fallback escape hatch"
-        ));
+        assert!(
+            !body.contains("cwd = \"..\""),
+            "onboarding doc must not recommend `cwd = \"..\"` (triggers Codex Desktop bug)"
+        );
     }
 
     #[test]
-    fn codex_follow_up_body_prefers_cwd() {
+    fn codex_follow_up_body_omits_cwd() {
         let body = render_follow_up_body(&[], FollowUpMode::Codex);
 
-        assert!(body.contains(CODEX_MCP_CWD_FOLLOW_UP_NOTE.trim()));
+        assert!(body.contains(CODEX_MCP_NO_CWD_FOLLOW_UP_NOTE.trim()));
         assert!(body.contains("args = [\"--mcp\"]"));
-        assert!(body.contains("cwd = \"..\""));
+        assert!(
+            !body.contains("cwd = \"..\""),
+            "follow-up body must not recommend `cwd = \"..\"` (triggers Codex Desktop bug)"
+        );
         assert!(body.contains(CODEX_MCP_LOCAL_OVERRIDE_FOLLOW_UP_NOTE.trim()));
         assert!(body.contains(CODEX_MCP_AVOID_ABSOLUTE_SHARED_NOTE.trim()));
-        assert!(
-            !body
-                .contains("set `cwd = \"..\"` so Codex launches `tempyr --mcp` from the repo root")
-        );
     }
 }
