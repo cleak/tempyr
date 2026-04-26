@@ -163,6 +163,9 @@ fn render_text(report: &HealthReport) {
     if let Some(err) = &report.index.snapshot_key_error {
         println!("  snapshot key error: {err}");
     }
+    if let Some(err) = &report.index.current_snapshot_index_error {
+        println!("  snapshot lookup error: {err}");
+    }
     if let Some(fts) = report.index.fts_entries {
         println!("  FTS entries: {fts}");
     }

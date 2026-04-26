@@ -100,6 +100,10 @@ pub struct IndexSection {
     pub legacy_index_exists: bool,
     pub current_snapshot_index_path: Option<PathBuf>,
     pub current_snapshot_index_exists: Option<bool>,
+    /// Set when [`IndexLayout::current_index_path`] returned an error
+    /// (e.g. the snapshot-key cache could not be read). Surfaces failures
+    /// that would otherwise look identical to "no snapshot exists".
+    pub current_snapshot_index_error: Option<String>,
     pub snapshot_key: Option<String>,
     pub snapshot_key_error: Option<String>,
     pub fts_entries: Option<usize>,
@@ -134,6 +138,9 @@ pub fn build_report(inputs: &HealthInputs<'_>) -> HealthReport {
             "No queryable index found. Run `tempyr index rebuild` to populate the index."
                 .to_string(),
         );
+    }
+    if let Some(err) = &index_section.current_snapshot_index_error {
+        warnings.push(format!("Failed to resolve current snapshot index: {err}"));
     }
     if matches!(embedding.store_exists, Some(false)) && embedding.api_key_set != Some(false) {
         warnings.push(format!(
@@ -346,6 +353,7 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
                 legacy_index_exists: inputs.tempyr_dir.join("index.db").exists(),
                 current_snapshot_index_path: None,
                 current_snapshot_index_exists: None,
+                current_snapshot_index_error: None,
                 snapshot_key: None,
                 snapshot_key_error: Some(err.to_string()),
                 fts_entries: None,
@@ -364,8 +372,11 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
         Err(err) => (None, Some(err.to_string())),
     };
 
-    let current_snapshot_index_path: Option<PathBuf> =
-        layout.current_index_path().unwrap_or_default();
+    let (current_snapshot_index_path, current_snapshot_index_error) =
+        match layout.current_index_path() {
+            Ok(path) => (path, None),
+            Err(err) => (None, Some(err.to_string())),
+        };
     let current_snapshot_index_exists = current_snapshot_index_path.as_ref().map(|p| p.exists());
 
     let (fts_entries, embedding_count_for_index) = match current_snapshot_index_path.as_deref() {
@@ -380,6 +391,7 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
         legacy_index_exists,
         current_snapshot_index_path,
         current_snapshot_index_exists,
+        current_snapshot_index_error,
         snapshot_key,
         snapshot_key_error,
         fts_entries,
@@ -471,38 +483,12 @@ allowed_edges = []
         assert_eq!(report.tempyr_version, "test-version");
     }
 
-    #[test]
-    fn report_never_includes_api_key_value() {
-        // Set a fake API key in the environment, ensure it's never present in any field.
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let tempyr_dir = root.join(".tempyr");
-        fs::create_dir_all(&tempyr_dir).unwrap();
-        let cache = project::cache_layout(root, &tempyr_dir);
-        let schema = test_schema();
-
-        let secret = "sk-this-must-not-leak-12345";
-        // SAFETY: single-threaded test, no other thread reads VOYAGE_API_KEY here.
-        unsafe {
-            std::env::set_var("VOYAGE_API_KEY", secret);
-        }
-
-        let graph_dir = root.join("graph");
-        let inputs = make_inputs(root, &graph_dir, &tempyr_dir, &cache, &schema);
-        let report = build_report(&inputs);
-        let serialized = serde_json::to_string(&report).unwrap();
-
-        // SAFETY: same thread, immediate cleanup.
-        unsafe {
-            std::env::remove_var("VOYAGE_API_KEY");
-        }
-
-        assert!(
-            !serialized.contains(secret),
-            "API key value leaked into report: {serialized}"
-        );
-        assert_eq!(report.embedding.api_key_set, Some(true));
-    }
+    // The "never leaks the API key value" property is covered by the
+    // integration tests `test_doctor_does_not_leak_api_key_value` and
+    // `test_mcp_system_doctor_returns_report_without_api_key`. Those run
+    // `tempyr` in a child process with `Command::env(...)`, so the env var is
+    // isolated. Doing the same at the unit-test layer would require mutating
+    // `VOYAGE_API_KEY` in this process, which races with other tests.
 
     #[test]
     fn report_flags_invalid_embedding_provider() {

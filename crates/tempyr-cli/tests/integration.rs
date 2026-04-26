@@ -1594,6 +1594,10 @@ fn test_doctor_json_output_is_structured() {
     assert!(report["embedding"]["api_key_env_var"].is_string());
     assert!(report["embedding"]["api_key_set"].is_boolean());
     assert!(report.get("api_key").is_none());
+    assert!(
+        report["embedding"].get("api_key").is_none(),
+        "report.embedding.api_key must not exist (would risk leaking the secret value)"
+    );
 }
 
 #[test]
@@ -1621,6 +1625,10 @@ fn test_doctor_does_not_leak_api_key_value() {
     assert_eq!(
         report["embedding"]["api_key_set"],
         serde_json::Value::Bool(true)
+    );
+    assert!(
+        report["embedding"].get("api_key").is_none(),
+        "report.embedding.api_key must not exist (would risk leaking the secret value)"
     );
 }
 
@@ -1655,6 +1663,10 @@ fn test_mcp_system_doctor_returns_report_without_api_key() {
     assert_eq!(
         report["embedding"]["api_key_set"],
         serde_json::Value::Bool(true)
+    );
+    assert!(
+        report["embedding"].get("api_key").is_none(),
+        "report.embedding.api_key must not exist (would risk leaking the secret value)"
     );
     assert!(report["config_files"].is_array());
     assert!(report["project"]["root"].is_string());
