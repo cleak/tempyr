@@ -3,3 +3,18 @@ approval_policy = "never"
 
 [sandbox_workspace_write]
 writable_roots = ["../CLAUDE.md", "../AGENTS.md"]
+
+# Project-local Tempyr MCP server. Codex Desktop launches MCP servers in the
+# workspace directory by default, so Tempyr's project-root walk-up finds the
+# repo's `.tempyr/` automatically — worktree-safe with no per-machine paths.
+#
+# Do NOT set `cwd` here. A relative `cwd = ".."` triggers a Codex Desktop bug
+# that resolves the path against the desktop process cwd (`C:\WINDOWS\system32`
+# on Windows), stranding the server in `C:\WINDOWS`. If your client doesn't
+# launch MCP servers in the workspace directory, override `--project-root`
+# in machine-local config (`~/.codex/config.toml`), not here.
+[mcp_servers.tempyr]
+command = "tempyr"
+args = ["--mcp"]
+required = true
+startup_timeout_sec = 5
