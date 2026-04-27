@@ -1,4 +1,3 @@
-use anyhow::Context;
 use std::path::{Path, PathBuf};
 
 use tempyr_core::graph::Graph;
@@ -6,7 +5,7 @@ use tempyr_core::project;
 use tempyr_core::project::{CacheLayout, IndexLayout};
 use tempyr_core::schema::Schema;
 use tempyr_index::embeddings::{
-    EmbeddingConfig, EmbeddingConfigPartial, ResolvedEmbeddingConfig, resolve_embedding_config,
+    self, EmbeddingConfig, ResolvedEmbeddingConfig, resolve_embedding_config,
 };
 use tempyr_index::refresh::refresh_index_for_graph;
 
@@ -46,53 +45,18 @@ impl ProjectContext {
         })
     }
 
-    pub fn shared_embeddings_dir(&self) -> PathBuf {
-        self.cache.embeddings_dir()
-    }
-
     pub fn embedding_store_path(
         &self,
         provider: &str,
         model: Option<&str>,
         dimensions: Option<usize>,
     ) -> PathBuf {
-        let key_src = format!(
-            "provider={provider};model={};dimensions={}",
-            model.unwrap_or("default"),
-            dimensions.unwrap_or(0)
-        );
-        let digest = blake3::hash(key_src.as_bytes()).to_hex().to_string();
-        self.shared_embeddings_dir()
-            .join(format!("{}.db", &digest[..16]))
+        embeddings::embedding_store_path(&self.cache, provider, model, dimensions)
     }
 
     pub fn embedding_config(&self) -> anyhow::Result<EmbeddingConfig> {
         let config_path = self.tempyr_dir.join("config.toml");
-        if !config_path.exists() {
-            return Ok(EmbeddingConfig::default());
-        }
-
-        let content = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read {}", config_path.display()))?;
-        let table = content
-            .parse::<toml::Table>()
-            .with_context(|| format!("Failed to parse {}", config_path.display()))?;
-
-        let mut config = EmbeddingConfig::default();
-        if let Some(emb) = table.get("embedding") {
-            let partial = emb
-                .clone()
-                .try_into::<EmbeddingConfigPartial>()
-                .with_context(|| {
-                    format!(
-                        "Failed to parse [embedding] section in {}",
-                        config_path.display()
-                    )
-                })?;
-            config.apply_partial(partial);
-        }
-
-        Ok(config)
+        Ok(embeddings::load_embedding_config_from_file(&config_path)?)
     }
 
     pub fn resolved_embedding_config(&self) -> anyhow::Result<ResolvedEmbeddingConfig> {

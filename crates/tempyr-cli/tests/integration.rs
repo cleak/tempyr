@@ -1550,3 +1550,142 @@ fn test_interview_full_flow() {
         .assert()
         .success();
 }
+
+#[test]
+fn test_doctor_text_output_lists_paths_and_provider() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    // Inject a real-looking secret so the no-leak assertion is meaningful:
+    // without this, the test would pass even if render_text was buggy and
+    // included the env value (because the var would simply be unset).
+    let secret = "s3cr3t-doctor-text-must-not-leak";
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .env("VOYAGE_API_KEY", secret)
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Project"))
+        .stdout(predicate::str::contains("Embedding"))
+        .stdout(predicate::str::contains("Config files"))
+        .stdout(predicate::str::contains("schema.toml"))
+        .stdout(predicate::str::contains("provider:"))
+        .stdout(predicate::str::contains("value never displayed"))
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(
+        !stdout.contains(secret),
+        "doctor text output leaked the API key value"
+    );
+}
+
+#[test]
+fn test_doctor_json_output_is_structured() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "doctor"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert!(report["tempyr_version"].is_string());
+    assert!(report["embedding"]["provider"].is_string());
+    assert!(report["config_files"].is_array());
+    assert!(report["env_files"].is_array());
+    assert!(report["project"]["root"].is_string());
+
+    // The report MUST surface only the env var name, never the value.
+    assert!(report["embedding"]["api_key_env_var"].is_string());
+    assert!(report["embedding"]["api_key_set"].is_boolean());
+    assert!(report.get("api_key").is_none());
+    assert!(
+        report["embedding"].get("api_key").is_none(),
+        "report.embedding.api_key must not exist (would risk leaking the secret value)"
+    );
+}
+
+#[test]
+fn test_doctor_does_not_leak_api_key_value() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    let secret = "sk-doctor-test-secret-must-not-leak";
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .env("VOYAGE_API_KEY", secret)
+        .args(["--json", "doctor"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let raw = String::from_utf8(output).unwrap();
+    assert!(
+        !raw.contains(secret),
+        "doctor JSON output leaked the API key value"
+    );
+    let report: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        report["embedding"]["api_key_set"],
+        serde_json::Value::Bool(true)
+    );
+    assert!(
+        report["embedding"].get("api_key").is_none(),
+        "report.embedding.api_key must not exist (would risk leaking the secret value)"
+    );
+}
+
+#[test]
+fn test_mcp_system_doctor_returns_report_without_api_key() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    let secret = "sk-mcp-doctor-secret-must-not-leak";
+    let mut child = ProcessCommand::new(tempyr_bin())
+        .arg("--mcp")
+        .current_dir(tmp.path())
+        .env("VOYAGE_API_KEY", secret)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    initialize_mcp_session(&mut child);
+
+    let response = call_mcp_tool(&mut child, 2, "system_doctor", serde_json::json!({}));
+    assert_eq!(response["id"], 2);
+    let text = tool_result_text(&response);
+    assert!(
+        !text.contains(secret),
+        "system_doctor leaked the API key value: {text}"
+    );
+
+    let report: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(report["embedding"]["api_key_env_var"], "VOYAGE_API_KEY");
+    assert_eq!(
+        report["embedding"]["api_key_set"],
+        serde_json::Value::Bool(true)
+    );
+    assert!(
+        report["embedding"].get("api_key").is_none(),
+        "report.embedding.api_key must not exist (would risk leaking the secret value)"
+    );
+    assert!(report["config_files"].is_array());
+    assert!(report["project"]["root"].is_string());
+
+    drop(child.stdin.take());
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(0));
+}

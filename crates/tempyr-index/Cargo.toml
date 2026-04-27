@@ -13,6 +13,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 async-trait = { workspace = true }
+blake3 = { workspace = true }
+toml = { workspace = true }
 
 [features]
 default = []

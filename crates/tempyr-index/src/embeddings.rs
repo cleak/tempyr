@@ -2,10 +2,12 @@ use async_trait::async_trait;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "local-embeddings")]
 use std::sync::Mutex;
 use std::time::Duration;
+
+use tempyr_core::project::CacheLayout;
 
 use crate::IndexError;
 use crate::Result;
@@ -415,6 +417,54 @@ impl EmbeddingConfig {
             self.dimensions = Some(dimensions);
         }
     }
+}
+
+/// Read and parse the `[embedding]` section of a tempyr config.toml.
+///
+/// Returns `EmbeddingConfig::default()` if the file does not exist. Returns an
+/// error if the file is unreadable or contains an invalid `[embedding]` table.
+pub fn load_embedding_config_from_file(config_path: &Path) -> Result<EmbeddingConfig> {
+    if !config_path.exists() {
+        return Ok(EmbeddingConfig::default());
+    }
+
+    let content = std::fs::read_to_string(config_path).map_err(|err| {
+        IndexError::General(format!("Failed to read {}: {err}", config_path.display()))
+    })?;
+    let table = content.parse::<toml::Table>().map_err(|err| {
+        IndexError::General(format!("Failed to parse {}: {err}", config_path.display()))
+    })?;
+
+    let mut config = EmbeddingConfig::default();
+    if let Some(emb) = table.get("embedding") {
+        let partial: EmbeddingConfigPartial = emb.clone().try_into().map_err(|err| {
+            IndexError::General(format!(
+                "Failed to parse [embedding] section in {}: {err}",
+                config_path.display()
+            ))
+        })?;
+        config.apply_partial(partial);
+    }
+    Ok(config)
+}
+
+/// Compute the path to the embedding store database for a given provider/model/dimensions.
+///
+/// The filename is keyed by a blake3 hash of the provider configuration so that
+/// switching providers does not silently mix vector spaces.
+pub fn embedding_store_path(
+    cache: &CacheLayout,
+    provider: &str,
+    model: Option<&str>,
+    dimensions: Option<usize>,
+) -> PathBuf {
+    let key_src = format!(
+        "provider={provider};model={};dimensions={}",
+        model.unwrap_or("default"),
+        dimensions.unwrap_or(0)
+    );
+    let digest = blake3::hash(key_src.as_bytes()).to_hex().to_string();
+    cache.embeddings_dir().join(format!("{}.db", &digest[..16]))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
