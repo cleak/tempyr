@@ -1556,8 +1556,13 @@ fn test_doctor_text_output_lists_paths_and_provider() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
 
-    tempyr()
+    // Inject a real-looking secret so the no-leak assertion is meaningful:
+    // without this, the test would pass even if render_text was buggy and
+    // included the env value (because the var would simply be unset).
+    let secret = "s3cr3t-doctor-text-must-not-leak";
+    let output = tempyr()
         .current_dir(tmp.path())
+        .env("VOYAGE_API_KEY", secret)
         .arg("doctor")
         .assert()
         .success()
@@ -1566,7 +1571,16 @@ fn test_doctor_text_output_lists_paths_and_provider() {
         .stdout(predicate::str::contains("Config files"))
         .stdout(predicate::str::contains("schema.toml"))
         .stdout(predicate::str::contains("provider:"))
-        .stdout(predicate::str::contains("value never displayed"));
+        .stdout(predicate::str::contains("value never displayed"))
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(
+        !stdout.contains(secret),
+        "doctor text output leaked the API key value"
+    );
 }
 
 #[test]
