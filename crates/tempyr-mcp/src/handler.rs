@@ -682,10 +682,12 @@ pub struct TempyrServer {
     tool_router: ToolRouter<Self>,
     relative_project_root_fallback: Option<PathBuf>,
     project_anchor_state: ProjectAnchorState,
-    /// Cached journal session, keyed by `(common_dir, worktree_top)`. Opened
-    /// lazily on the first `journal_log` call. Keyed so a server that ends up
-    /// serving more than one repo/worktree doesn't keep appending to the wrong
-    /// session metadata.
+    /// Cached journal session, keyed by `(common_dir, worktree_top, agent_id)`.
+    /// Opened lazily on the first `journal_log` call. The agent_id component
+    /// matters because [`Clone`] + [`with_agent_id`] can produce two server
+    /// instances that share this `Arc<Mutex<...>>` cache but log under
+    /// different agent identities — without the agent_id key one would
+    /// silently inherit the other's session.
     journal_session: Arc<Mutex<Option<JournalSessionCache>>>,
     /// Agent identity recorded on every journal entry (`SessionMeta.agent` and
     /// `Entry.agent`). Defaults to [`DEFAULT_AGENT_ID`]. Different MCP clients
@@ -697,6 +699,7 @@ pub struct TempyrServer {
 struct JournalSessionCache {
     common_dir: PathBuf,
     worktree_top: PathBuf,
+    agent_id: String,
     session: Session,
 }
 
@@ -762,6 +765,7 @@ impl TempyrServer {
         if let Some(cache) = guard.as_ref()
             && cache.common_dir == common_dir
             && cache.worktree_top == worktree_top
+            && cache.agent_id == self.agent_id
             && !cache.session.is_ready()
         {
             return Ok(cache.session.clone());
@@ -775,6 +779,7 @@ impl TempyrServer {
         *guard = Some(JournalSessionCache {
             common_dir: common_dir.to_path_buf(),
             worktree_top: worktree_top.to_path_buf(),
+            agent_id: self.agent_id.clone(),
             session: session.clone(),
         });
         Ok(session)

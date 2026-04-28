@@ -120,16 +120,14 @@ pub fn write_entry(
     let mut entry = Entry::for_session(draft.kind, draft.summary, session);
     entry.detail = draft.detail;
     entry.tags = draft.tags;
+    let cwd = draft.cwd.as_deref();
     entry.files = draft
         .files
         .into_iter()
-        .map(|p| jpath::repo_relative_path(&p, worktree_top))
+        .map(|p| jpath::resolve_file_path(&p, worktree_top, cwd))
         .collect();
     entry.references = draft.references;
-    entry.cwd = draft
-        .cwd
-        .as_deref()
-        .and_then(|c| relative_cwd(c, worktree_top));
+    entry.cwd = cwd.and_then(|c| relative_cwd(c, worktree_top));
     entry.provisional = draft.provisional;
     entry.confidence = draft.confidence;
     entry.severity = draft.severity;
@@ -147,14 +145,12 @@ pub fn write_entry(
     entry.is_final = draft.is_final;
 
     default_redactor().enforce(&mut entry)?;
+    // `append` is atomic: under the JSONL lock it checks the session isn't
+    // already finalized, writes the line, and on `entry.is_final` writes
+    // the `.ready` marker before releasing the lock — so the finalize step
+    // can't be raced by a concurrent writer.
+    let finalized = entry.is_final;
     append(session, &entry)?;
-
-    let finalized = if entry.is_final {
-        session.finalize()?;
-        true
-    } else {
-        false
-    };
     Ok(WriteOutcome { entry, finalized })
 }
 
@@ -170,21 +166,53 @@ fn relative_cwd(cwd: &Path, worktree_top: &Path) -> Option<String> {
         .map(|p| p.to_string_lossy().replace('\\', "/"))
 }
 
-/// Append one entry to its session's JSONL. Validates first; on failure
-/// nothing is written.
+/// Append one entry atomically with respect to session finalization.
+/// Validates the entry, locks the JSONL, refuses if the session was already
+/// finalized between caller's open and now, writes one full line, fsyncs,
+/// and — if `entry.is_final` — drops the `.ready` marker before releasing
+/// the lock. Holding the lock across all three steps prevents a concurrent
+/// writer from slipping an append in between this entry and the marker, or
+/// from writing to a session the publisher has already taken ownership of.
 pub fn append(session: &Session, entry: &Entry) -> Result<()> {
     validate_entry(entry)?;
-    append_validated(&session.jsonl_path(), entry)
+
+    let jsonl_path = session.jsonl_path();
+    // `read(true)` is required for `File::lock` on Windows even though we
+    // never read — see rust-lang/rust#54118.
+    let mut file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(&jsonl_path)?;
+    file.lock().map_err(|e| JournalError::Lock(e.to_string()))?;
+
+    // Atomicity boundary opens here. From this point until `file` is dropped
+    // (releasing the lock) no other process can append, finalize, or commit.
+    if session.is_ready() {
+        return Err(JournalError::InvalidEntry(format!(
+            "session {} is finalized; refuse to append",
+            session.id()
+        )));
+    }
+
+    let mut line = serde_json::to_vec(entry)?;
+    line.push(b'\n');
+    file.write_all(&line)?;
+    file.sync_data()?;
+
+    if entry.is_final {
+        session.finalize()?;
+    }
+    Ok(())
 }
 
-/// Append a pre-validated entry. Lower-level entry point for the publisher
-/// and indexer; most callers want `append`.
+/// Append a pre-validated entry to a JSONL path. Lower-level escape hatch
+/// for the publisher/indexer that bypasses session-state checks and the
+/// finalize coupling. Most callers want [`append`].
 pub fn append_validated(jsonl_path: &Path, entry: &Entry) -> Result<()> {
     let mut line = serde_json::to_vec(entry)?;
     line.push(b'\n');
 
-    // `read(true)` is required for `File::lock` on Windows even though we
-    // never read — see rust-lang/rust#54118.
     let mut file = OpenOptions::new()
         .read(true)
         .append(true)
@@ -406,34 +434,89 @@ mod tests {
         let session =
             Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
 
-        let abs_file = worktree.path().join("crates").join("foo").join("bar.rs");
-        std::fs::create_dir_all(abs_file.parent().unwrap()).unwrap();
-        std::fs::write(&abs_file, "").unwrap();
+        let cwd_subdir = worktree.path().join("crates").join("foo");
+        std::fs::create_dir_all(&cwd_subdir).unwrap();
+        std::fs::write(cwd_subdir.join("bar.rs"), "").unwrap();
+        std::fs::write(cwd_subdir.join("baz.rs"), "").unwrap();
+
+        let abs_file = cwd_subdir.join("bar.rs");
 
         let mut draft = EntryDraft::new(
             Kind::Outcome,
             "shared write_entry pipeline normalizes & finalizes",
         );
+        // CLI scenario: user is in <worktree>/crates/foo and passes:
+        //   --file <abs to bar.rs>     (absolute)
+        //   --file baz.rs              (cwd-relative: should resolve)
+        //   --file ..\foo\baz.rs       (Windows-style cwd-relative)
         draft.files = vec![
             abs_file.to_string_lossy().into_owned(),
-            r"crates\foo\baz.rs".into(),
+            "baz.rs".into(),
+            r"..\foo\baz.rs".into(),
         ];
-        draft.cwd = Some(worktree.path().join("crates"));
+        draft.cwd = Some(cwd_subdir);
         draft.passed = Some(true);
         draft.is_final = true;
 
         let outcome = write_entry(&session, worktree.path(), draft).unwrap();
 
-        // Forward-slash, repo-relative paths in entry.files (both abs and
-        // backslash-relative inputs).
-        assert_eq!(outcome.entry.files.len(), 2);
+        // All three inputs land as forward-slash, repo-relative paths.
+        assert_eq!(outcome.entry.files.len(), 3);
         assert_eq!(outcome.entry.files[0], "crates/foo/bar.rs");
         assert_eq!(outcome.entry.files[1], "crates/foo/baz.rs");
-        // cwd is repo-relative subdir, forward-slash.
-        assert_eq!(outcome.entry.cwd.as_deref(), Some("crates"));
+        assert_eq!(outcome.entry.files[2], "crates/foo/baz.rs");
+        // cwd is the repo-relative subdir.
+        assert_eq!(outcome.entry.cwd.as_deref(), Some("crates/foo"));
         // Finalize ran: .ready marker present and outcome.finalized true.
         assert!(outcome.finalized);
         assert!(session.is_ready());
+    }
+
+    #[test]
+    fn append_refuses_after_session_finalized() {
+        let common = tempfile::tempdir().unwrap();
+        let session = open_test_session(common.path());
+
+        // First entry, then a final one — both should succeed and the
+        // second should atomically write the .ready marker.
+        let plan = entry_for(Kind::Plan, "first entry that is sufficiently long");
+        let mut last = entry_for(Kind::Outcome, "final entry that is sufficiently long");
+        last.is_final = true;
+
+        append(&session, &plan).unwrap();
+        append(&session, &last).unwrap();
+        assert!(
+            session.is_ready(),
+            ".ready marker should be set after final"
+        );
+
+        // Any subsequent append (e.g., a stale CLI from another shell that
+        // resumed before the .ready was written) must be refused.
+        let stale = entry_for(Kind::Finding, "post-final straggler should be refused");
+        let err = append(&session, &stale).unwrap_err();
+        match err {
+            JournalError::InvalidEntry(msg) => {
+                assert!(msg.contains("finalized"), "got: {msg}");
+            }
+            other => panic!("expected InvalidEntry, got {other:?}"),
+        }
+
+        // The straggler must NOT be in the JSONL.
+        let parsed = entries_in(&session.jsonl_path());
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn append_validated_writes_past_finalized_session() {
+        // The lower-level escape hatch (used by the publisher) should keep
+        // working even when .ready exists — it skips session-state checks.
+        let common = tempfile::tempdir().unwrap();
+        let session = open_test_session(common.path());
+        session.finalize().unwrap();
+
+        let entry = entry_for(Kind::Plan, "publisher-style write past .ready");
+        append_validated(&session.jsonl_path(), &entry).unwrap();
+        assert_eq!(entries_in(&session.jsonl_path()).len(), 1);
     }
 
     #[test]

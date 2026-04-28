@@ -103,6 +103,10 @@ pub fn worktree_hash(worktree_top: &Path) -> String {
 /// Used by `tempyr journal log --file <path>` and the journal_log MCP tool to
 /// keep absolute repo paths from tripping the redactor's `user_home_path` rule
 /// when the repo lives under `/Users/<name>/` or `C:\Users\<name>\`.
+///
+/// For relative inputs that should be resolved against a working directory
+/// before normalization (e.g. `--file src/lib.rs` from a subdirectory), use
+/// [`resolve_file_path`] instead.
 pub fn repo_relative_path(path: &str, worktree_top: &Path) -> String {
     let p = Path::new(path);
     let body = if p.is_absolute() {
@@ -116,6 +120,24 @@ pub fn repo_relative_path(path: &str, worktree_top: &Path) -> String {
         path.to_string()
     };
     body.replace('\\', "/")
+}
+
+/// Like [`repo_relative_path`] but joins relative inputs onto `cwd` first.
+/// `--file src/lib.rs` invoked from `<repo>/crates/foo/` should record as
+/// `crates/foo/src/lib.rs`, not `src/lib.rs` (which a reader would interpret
+/// relative to the repo root).
+///
+/// When `cwd` is `None`, falls back to [`repo_relative_path`]'s pass-through
+/// behavior for relative inputs.
+pub fn resolve_file_path(path: &str, worktree_top: &Path, cwd: Option<&Path>) -> String {
+    let p = Path::new(path);
+    if !p.is_absolute()
+        && let Some(base) = cwd
+    {
+        let abs = base.join(p);
+        return repo_relative_path(&abs.to_string_lossy(), worktree_top);
+    }
+    repo_relative_path(path, worktree_top)
 }
 
 /// Tempyr's directory under the git common dir: `<common>/tempyr/`.
@@ -382,6 +404,40 @@ mod tests {
         // synthesize a relative path); only separators get normalized.
         let normalized = repo_relative_path(&raw, inside.path());
         assert_eq!(normalized, raw.replace('\\', "/"));
+    }
+
+    #[test]
+    fn resolve_file_path_joins_relative_against_cwd_then_normalizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("crates").join("foo");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("bar.rs"), "").unwrap();
+
+        // CLI scenario: user is in <repo>/crates/foo and types --file bar.rs
+        // The recorded path must be crates/foo/bar.rs, not bar.rs.
+        let resolved = resolve_file_path("bar.rs", dir.path(), Some(&sub));
+        assert_eq!(resolved, "crates/foo/bar.rs");
+    }
+
+    #[test]
+    fn resolve_file_path_passes_absolute_through_repo_relative() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b.rs");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "").unwrap();
+        // Absolute input: cwd is irrelevant.
+        let resolved = resolve_file_path(&nested.to_string_lossy(), dir.path(), Some(dir.path()));
+        assert_eq!(resolved, "a/b.rs");
+    }
+
+    #[test]
+    fn resolve_file_path_with_no_cwd_falls_back_to_pass_through() {
+        let dir = tempfile::tempdir().unwrap();
+        // No cwd hint: relative input survives as-is (only separator normalized).
+        assert_eq!(
+            resolve_file_path(r"src\lib.rs", dir.path(), None),
+            "src/lib.rs"
+        );
     }
 
     #[test]
