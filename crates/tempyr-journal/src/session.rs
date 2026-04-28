@@ -16,6 +16,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use regex::Regex;
@@ -179,35 +181,100 @@ impl Session {
             head,
         };
 
-        // Write metadata sidecar atomically. Use create_new so we don't
-        // overwrite a same-id session (collision is virtually impossible
-        // given second-precision ts + worktree_hash, but be safe).
         let meta_path = jpath::session_meta_path(common_dir, session_id.as_str());
         let json = serde_json::to_string_pretty(&meta)?;
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&meta_path)
-        {
-            Ok(mut f) => {
-                use std::io::Write;
-                f.write_all(json.as_bytes())?;
-                f.write_all(b"\n")?;
+
+        // Atomic-write pattern: write fully to a unique temp, fsync, then
+        // hard-link into place. hard_link fails atomically with AlreadyExists
+        // if the meta is already there (rename would silently replace it,
+        // which we never want). Either we win and our content is the on-disk
+        // truth, or we lose and read the persisted meta — never a torn read.
+        let tmp_path = unique_meta_tmp_path(&meta_path);
+        write_meta_tmp(&tmp_path, json.as_bytes())?;
+        let won_race = match std::fs::hard_link(&tmp_path, &meta_path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e.into());
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Same-id collision: replace our in-memory meta with the
-                // persisted one so the returned Session matches disk. The
-                // existing session's agent/branch/head win.
-                let bytes = std::fs::read(&meta_path)?;
-                meta = serde_json::from_slice(&bytes)?;
-            }
-            Err(e) => return Err(e.into()),
+        };
+        let _ = std::fs::remove_file(&tmp_path);
+
+        if !won_race {
+            // Lost the race: replace our in-memory meta with the persisted
+            // one so the returned Session matches disk. The winner's
+            // agent/branch/head are now authoritative. Retry briefly in
+            // case the winner is mid-link (microsecond window).
+            meta = read_meta_with_retry(&meta_path)?;
         }
 
         Ok(Session {
             common_dir: common_dir.to_path_buf(),
             meta,
         })
+    }
+
+    /// Open a fresh session, or reuse an active (non-finalized) one for this
+    /// `(worktree, agent)` pair if one is already on disk. Prevents per-CLI
+    /// invocation session sprawl: multiple `tempyr journal log` calls during
+    /// the same chunk of agent activity now group into one session.
+    pub fn open_or_resume(common_dir: &Path, worktree_top: &Path, agent: &str) -> Result<Self> {
+        if let Some(session) = Self::find_active(common_dir, worktree_top, agent)? {
+            return Ok(session);
+        }
+        Self::open(common_dir, worktree_top, agent)
+    }
+
+    /// Find the newest non-finalized session in `common_dir` whose worktree
+    /// hash matches `worktree_top` and whose meta.agent matches `agent`.
+    /// "Non-finalized" means no `<id>.ready` marker exists. Returns `None` if
+    /// no candidate is found.
+    pub fn find_active(
+        common_dir: &Path,
+        worktree_top: &Path,
+        agent: &str,
+    ) -> Result<Option<Self>> {
+        let wt_hash = jpath::worktree_hash(worktree_top);
+        let open_dir = jpath::open_dir(common_dir);
+        let read_dir = match std::fs::read_dir(&open_dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+
+        let mut candidates: Vec<SessionId> = Vec::new();
+        for entry in read_dir {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            let Some(id_str) = name.strip_suffix(".meta.json") else {
+                continue;
+            };
+            let Ok(id) = SessionId::parse(id_str) else {
+                continue;
+            };
+            if id.worktree_hash() != wt_hash {
+                continue;
+            }
+            // Skip finalized sessions; the publisher owns those.
+            if jpath::session_ready_marker(common_dir, id.as_str()).exists() {
+                continue;
+            }
+            candidates.push(id);
+        }
+        // Newest-first by lexicographic order (== chronological for our format).
+        candidates.sort_by(|a, b| b.as_str().cmp(a.as_str()));
+
+        for id in candidates {
+            let Some(session) = Self::resume(common_dir, &id)? else {
+                continue;
+            };
+            if session.meta().agent == agent {
+                return Ok(Some(session));
+            }
+        }
+        Ok(None)
     }
 
     /// Resume an existing session by ID. Returns `Ok(None)` if there's no
@@ -276,6 +343,62 @@ impl Session {
             .open(&path)?;
         Ok(())
     }
+}
+
+// ---- Meta-sidecar atomic write helpers ----
+
+fn write_meta_tmp(tmp_path: &Path, content: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp_path)?;
+    f.write_all(content)?;
+    f.write_all(b"\n")?;
+    f.sync_data()?;
+    Ok(())
+}
+
+fn unique_meta_tmp_path(meta_path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let stem = meta_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    meta_path.with_file_name(format!("{stem}.tmp.{pid}.{n}"))
+}
+
+/// Read+parse the meta sidecar, retrying briefly to absorb the microsecond
+/// window between a winning writer hard-linking and the link being visible.
+fn read_meta_with_retry(path: &Path) -> Result<SessionMeta> {
+    let mut last_err: Option<JournalError> = None;
+    for attempt in 0..10 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        match std::fs::read(path) {
+            Ok(bytes) if bytes.is_empty() => {
+                last_err = Some(JournalError::InvalidEntry(
+                    "empty session meta sidecar".into(),
+                ));
+            }
+            Ok(bytes) => match serde_json::from_slice::<SessionMeta>(&bytes) {
+                Ok(meta) => return Ok(meta),
+                Err(e) => last_err = Some(e.into()),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // hard_link succeeded then the file vanished — extraordinary,
+                // but retry rather than treat as fatal.
+                last_err = Some(e.into());
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        JournalError::InvalidEntry("session meta unreadable after retries".into())
+    }))
 }
 
 // ---- Validation helpers ----
@@ -447,6 +570,80 @@ mod tests {
         // own caller-supplied "different-agent".
         assert_eq!(s2.meta().agent, "claude");
         assert_eq!(s2.id(), s1.id());
+    }
+
+    #[test]
+    fn find_active_returns_none_for_empty_journals() {
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let found = Session::find_active(common.path(), worktree.path(), "claude").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_active_returns_existing_session_for_same_worktree_and_agent() {
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let s = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+
+        let found = Session::find_active(common.path(), worktree.path(), "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id(), s.id());
+    }
+
+    #[test]
+    fn find_active_filters_by_agent() {
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let _claude =
+            Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+        // Different agent => no match for this worktree.
+        let found = Session::find_active(common.path(), worktree.path(), "codex").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_active_skips_finalized_sessions() {
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let s = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+        s.finalize().unwrap();
+        // .ready marker present => not active anymore.
+        let found = Session::find_active(common.path(), worktree.path(), "claude").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_active_returns_newest_when_multiple_open() {
+        use chrono::TimeZone;
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let earlier = Utc.with_ymd_and_hms(2026, 4, 27, 10, 0, 0).unwrap();
+        let later = Utc.with_ymd_and_hms(2026, 4, 27, 12, 0, 0).unwrap();
+        let _old = Session::open_at(common.path(), worktree.path(), "claude", earlier).unwrap();
+        let new = Session::open_at(common.path(), worktree.path(), "claude", later).unwrap();
+        let found = Session::find_active(common.path(), worktree.path(), "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id(), new.id());
+    }
+
+    #[test]
+    fn open_or_resume_reuses_active_session() {
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let s1 = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+        let s2 = Session::open_or_resume(common.path(), worktree.path(), "claude").unwrap();
+        assert_eq!(s1.id(), s2.id());
+    }
+
+    #[test]
+    fn open_or_resume_opens_fresh_when_none_active() {
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let s = Session::open_or_resume(common.path(), worktree.path(), "claude").unwrap();
+        assert!(s.meta_path().exists());
     }
 
     #[test]

@@ -94,25 +94,28 @@ pub fn worktree_hash(worktree_top: &Path) -> String {
     hex[..8].to_string()
 }
 
-/// If `path` resolves under `worktree_top`, return its repo-relative form with
-/// forward slashes. Otherwise return `path` unchanged. Already-relative paths
-/// are passed through untouched on the assumption they're already repo-local.
+/// Repo-relative form of `path` with forward slashes. Absolute paths under
+/// `worktree_top` are stripped to the relative remainder; relative paths are
+/// passed through (assumed already repo-local). Path separators are
+/// normalized to `/` in either case so Windows backslashes don't survive into
+/// the journal.
 ///
 /// Used by `tempyr journal log --file <path>` and the journal_log MCP tool to
 /// keep absolute repo paths from tripping the redactor's `user_home_path` rule
 /// when the repo lives under `/Users/<name>/` or `C:\Users\<name>\`.
 pub fn repo_relative_path(path: &str, worktree_top: &Path) -> String {
     let p = Path::new(path);
-    if !p.is_absolute() {
-        return path.to_string();
-    }
-    let canon_p = canonicalize_or_keep(p);
-    let canon_top = canonicalize_or_keep(worktree_top);
-    canon_p
-        .strip_prefix(&canon_top)
-        .ok()
-        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| path.to_string())
+    let body = if p.is_absolute() {
+        let canon_p = canonicalize_or_keep(p);
+        let canon_top = canonicalize_or_keep(worktree_top);
+        canon_p
+            .strip_prefix(&canon_top)
+            .map(|rel| rel.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string())
+    } else {
+        path.to_string()
+    };
+    body.replace('\\', "/")
 }
 
 /// Tempyr's directory under the git common dir: `<common>/tempyr/`.
@@ -359,14 +362,26 @@ mod tests {
     }
 
     #[test]
-    fn repo_relative_path_keeps_outside_paths() {
+    fn repo_relative_path_normalizes_backslashes_in_relative_input() {
+        let dir = tempfile::tempdir().unwrap();
+        // Windows-style relative input gets forward slashes too.
+        assert_eq!(
+            repo_relative_path(r"crates\foo\bar.rs", dir.path()),
+            "crates/foo/bar.rs"
+        );
+    }
+
+    #[test]
+    fn repo_relative_path_keeps_outside_paths_but_normalizes_separators() {
         let inside = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let other = outside.path().join("elsewhere.rs");
         std::fs::write(&other, "").unwrap();
         let raw = other.to_string_lossy().to_string();
-        // Out-of-worktree absolute path is returned unchanged.
-        assert_eq!(repo_relative_path(&raw, inside.path()), raw);
+        // Out-of-worktree absolute path is preserved (we don't try to
+        // synthesize a relative path); only separators get normalized.
+        let normalized = repo_relative_path(&raw, inside.path());
+        assert_eq!(normalized, raw.replace('\\', "/"));
     }
 
     #[test]

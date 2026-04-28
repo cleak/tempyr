@@ -672,9 +672,9 @@ fn parse_opt<T: FromStr<Err = tempyr_journal::JournalError>>(
     s.map(T::from_str).transpose().map_err(|e| e.to_string())
 }
 
-/// Best-effort relative path of `cwd` under `worktree_top`. Falls back to the
-/// absolute path string when the working directory is outside the repo. None
-/// when the two paths are identical (avoid a noisy `cwd: "."`).
+/// Relative path of `cwd` under `worktree_top`, or `None` when `cwd` is
+/// either the worktree root (avoid a noisy `cwd: "."`) or outside the repo
+/// entirely. Mirrors the CLI behavior — we never log absolute home-dir paths.
 fn relative_cwd(cwd: &Path, worktree_top: &Path) -> Option<String> {
     if cwd == worktree_top {
         return None;
@@ -682,7 +682,6 @@ fn relative_cwd(cwd: &Path, worktree_top: &Path) -> Option<String> {
     cwd.strip_prefix(worktree_top)
         .ok()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .or_else(|| Some(cwd.to_string_lossy().to_string()))
 }
 
 // Server
@@ -755,7 +754,10 @@ impl TempyrServer {
         {
             return Ok(cache.session.clone());
         }
-        let session = Session::open(common_dir, worktree_top, "claude")
+        // Reuse an active on-disk session if one exists for this
+        // (worktree, agent) pair, so a freshly-launched MCP server picks up
+        // a session that previous CLI calls or a prior server already started.
+        let session = Session::open_or_resume(common_dir, worktree_top, "claude")
             .map_err(|e| format!("open journal session: {e}"))?;
         *guard = Some(JournalSessionCache {
             common_dir: common_dir.to_path_buf(),
@@ -1836,6 +1838,28 @@ mod tests {
     #[test]
     fn percent_decode_decodes_hex_bytes() {
         assert_eq!(percent_decode("space%20path"), Some("space path".into()));
+    }
+
+    #[test]
+    fn relative_cwd_returns_none_for_worktree_root() {
+        let root = PathBuf::from("/repo/top");
+        assert_eq!(relative_cwd(&root, &root), None);
+    }
+
+    #[test]
+    fn relative_cwd_returns_relative_for_subdir() {
+        let root = PathBuf::from("/repo/top");
+        let sub = root.join("crates").join("foo");
+        assert_eq!(relative_cwd(&sub, &root), Some("crates/foo".into()));
+    }
+
+    #[test]
+    fn relative_cwd_returns_none_for_out_of_repo_path() {
+        // Out-of-worktree must NOT leak as an absolute path string —
+        // the redactor would block any /Users/<n>/ or C:\Users\<n>\ value.
+        let root = PathBuf::from("/repo/top");
+        let elsewhere = PathBuf::from("/somewhere/else");
+        assert_eq!(relative_cwd(&elsewhere, &root), None);
     }
 
     #[test]

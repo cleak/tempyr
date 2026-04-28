@@ -89,7 +89,10 @@ pub fn run_log(args: LogArgs, json_output: bool) -> Result<()> {
     let worktree_top =
         jpath::repo_toplevel(&cwd).map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
 
-    let session = Session::open(&common_dir, &worktree_top, &args.agent)
+    // Reuse the active session for this (worktree, agent) if one exists,
+    // so back-to-back `tempyr journal log` calls land in the same session
+    // instead of spawning a new one per invocation.
+    let session = Session::open_or_resume(&common_dir, &worktree_top, &args.agent)
         .map_err(|e| anyhow!("open session: {e}"))?;
 
     let cwd_rel = if cwd == worktree_top {
