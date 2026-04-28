@@ -134,12 +134,21 @@ pub fn run_log(args: LogArgs, json_output: bool) -> Result<()> {
         .map_err(|e| anyhow!(format!("{e}")))?;
     append(&session, &entry).map_err(|e| anyhow!("append: {e}"))?;
 
+    // Drop the session-final entry's `.ready` marker so the publisher
+    // picks it up and Session::find_active stops resuming this id.
+    if args.is_final {
+        session
+            .finalize()
+            .map_err(|e| anyhow!("finalize session: {e}"))?;
+    }
+
     if json_output {
         let payload = serde_json::json!({
             "id": entry.id,
             "session_id": session.id().as_str(),
             "kind": entry.kind.as_str(),
             "jsonl_path": session.jsonl_path().to_string_lossy(),
+            "finalized": args.is_final,
         });
         println!(
             "{}",
@@ -152,6 +161,9 @@ pub fn run_log(args: LogArgs, json_output: bool) -> Result<()> {
             entry.id,
             session.jsonl_path().display()
         );
+        if args.is_final {
+            println!("Session finalized: {}", session.id());
+        }
     }
 
     Ok(())

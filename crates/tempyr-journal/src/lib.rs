@@ -50,6 +50,9 @@ pub enum JournalError {
 
     #[error("Not a git repository: {0}")]
     NotAGitRepo(String),
+
+    #[error("session id collision: existing agent {existing}, requested {requested}")]
+    AgentMismatch { existing: String, requested: String },
 }
 
 pub type Result<T> = std::result::Result<T, JournalError>;

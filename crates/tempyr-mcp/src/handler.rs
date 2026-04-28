@@ -1726,7 +1726,7 @@ impl TempyrServer {
 
     #[tool(
         name = "journal_log",
-        description = "Append one moment of agent reasoning to the session journal: a plan, finding, decision, dead end, assumption, question, risk, or outcome. Cheap and append-only — log freely, including failures and surprises. This is NOT how knowledge graduates into the project; promote durable facts via graph_add_node.\n\nKinds:\n  plan       — what you're about to attempt and why\n  finding    — something you learned by reading code or running a tool\n  assumption — something you're assuming without verifying (polarity required)\n  question   — something you don't know yet — to ask or look up\n  decision   — a choice with reasoning (chosen, rationale, reversible required; detail ≥ 50 chars)\n  dead_end   — an approach that didn't work (approach, failure_mode required; detail ≥ 50 chars). HIGH-VALUE — future agents read these to avoid repeating you.\n  risk       — a potential problem identified but not yet hit (severity recommended)\n  outcome    — the result of work; set final=true on the session-closing entry to trigger publish\n\nLog freely on dead ends and decisions — the system is empty if you don't. Successes are less valuable than failures here. For curated knowledge, use graph_add_node; for past reasoning, use journal_search."
+        description = "Append one moment of agent reasoning to the session journal: a plan, finding, decision, dead end, assumption, question, risk, or outcome. Cheap and append-only — log freely, including failures and surprises. This is NOT how knowledge graduates into the project; promote durable facts via graph_add_node.\n\nKinds:\n  plan       — what you're about to attempt and why\n  finding    — something you learned by reading code or running a tool\n  assumption — something you're assuming without verifying (polarity required)\n  question   — something you don't know yet — to ask or look up\n  decision   — a choice with reasoning (chosen, rationale, reversible required; detail ≥ 50 chars)\n  dead_end   — an approach that didn't work (approach, failure_mode required; detail ≥ 50 chars). HIGH-VALUE — future agents read these to avoid repeating you.\n  risk       — a potential problem identified but not yet hit (severity recommended)\n  outcome    — the result of work; set final=true on the session-closing entry to trigger publish\n\nLog freely on dead ends and decisions — the system is empty if you don't. Successes are less valuable than failures here. For curated knowledge that should outlive this session, use graph_add_node."
     )]
     fn journal_log(&self, Parameters(p): Parameters<JournalLogParams>) -> Result<String, String> {
         let kind = Kind::parse_helpful(&p.kind).map_err(|e| e.to_string())?;
@@ -1777,10 +1777,19 @@ impl TempyrServer {
             .map_err(|e| e.to_string())?;
         append(&session, &entry).map_err(|e| e.to_string())?;
 
+        // Drop the session-final entry's `.ready` marker so the publisher
+        // picks it up and `Session::find_active` stops resuming this id.
+        if entry.is_final {
+            session
+                .finalize()
+                .map_err(|e| format!("finalize session: {e}"))?;
+        }
+
         Ok(serde_json::to_string_pretty(&json!({
             "id": entry.id,
             "session_id": session.id().as_str(),
             "kind": entry.kind.as_str(),
+            "finalized": entry.is_final,
         }))
         .unwrap_or_default())
     }

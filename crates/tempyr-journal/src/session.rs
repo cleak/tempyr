@@ -151,11 +151,34 @@ impl Session {
     /// Open a fresh session for the given worktree. Creates the journal
     /// directory layout if missing and writes the metadata sidecar. Does
     /// not write any journal entries; that's the writer's job.
+    ///
+    /// Retries briefly if a different agent already opened a session at
+    /// `(worktree, current_second)` — same wall-clock second means same
+    /// session id, but two agents must not share a session. Spinning until
+    /// the clock advances yields a fresh id.
     pub fn open(common_dir: &Path, worktree_top: &Path, agent: &str) -> Result<Self> {
-        Self::open_at(common_dir, worktree_top, agent, Utc::now())
+        let mut last_err: Option<JournalError> = None;
+        for _ in 0..30 {
+            match Self::open_at(common_dir, worktree_top, agent, Utc::now()) {
+                Ok(s) => return Ok(s),
+                Err(JournalError::AgentMismatch { .. }) => {
+                    std::thread::sleep(Duration::from_millis(60));
+                    last_err = None;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| JournalError::AgentMismatch {
+            existing: "<unknown>".into(),
+            requested: agent.to_string(),
+        }))
     }
 
-    /// Internal constructor that takes an explicit timestamp (for tests).
+    /// Open a session at an explicit timestamp. Returns
+    /// `JournalError::AgentMismatch` if the session id derived from
+    /// `(worktree, ts)` already exists on disk for a different agent —
+    /// callers using `open()` retry with a fresh timestamp; tests use this
+    /// strict form directly.
     pub fn open_at(
         common_dir: &Path,
         worktree_top: &Path,
@@ -202,11 +225,19 @@ impl Session {
         let _ = std::fs::remove_file(&tmp_path);
 
         if !won_race {
-            // Lost the race: replace our in-memory meta with the persisted
-            // one so the returned Session matches disk. The winner's
-            // agent/branch/head are now authoritative. Retry briefly in
-            // case the winner is mid-link (microsecond window).
-            meta = read_meta_with_retry(&meta_path)?;
+            // Lost the race: read the persisted meta. If the winning agent
+            // matches us, reuse the session (same agent, same second is
+            // fine — and same-id reuse is the common case). If it differs,
+            // surface AgentMismatch so `open()` can retry with a fresh ts;
+            // we never want to write entries under another agent's name.
+            let existing = read_meta_with_retry(&meta_path)?;
+            if existing.agent != agent {
+                return Err(JournalError::AgentMismatch {
+                    existing: existing.agent,
+                    requested: agent.to_string(),
+                });
+            }
+            meta = existing;
         }
 
         Ok(Session {
@@ -549,27 +580,61 @@ mod tests {
     }
 
     #[test]
-    fn open_twice_with_same_ts_does_not_clobber_meta() {
-        // Same worktree + same ts -> same session id. Second open must not
-        // overwrite disk, and the returned in-memory meta must reflect the
-        // persisted state (not the second caller's args).
+    fn open_at_same_agent_reuses_persisted_meta() {
+        // Same worktree + same ts + same agent → reuse the existing session
+        // and don't clobber disk.
         let common = tempfile::tempdir().unwrap();
         let worktree = tempfile::tempdir().unwrap();
         let s1 = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
         let original_bytes = std::fs::read(s1.meta_path()).unwrap();
-        let s2 = Session::open_at(
-            common.path(),
-            worktree.path(),
-            "different-agent",
-            fixed_ts(),
-        )
-        .unwrap();
+        let s2 = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
         let after_bytes = std::fs::read(s1.meta_path()).unwrap();
         assert_eq!(original_bytes, after_bytes);
-        // In-memory meta of s2 must come from disk (s1's "claude"), not its
-        // own caller-supplied "different-agent".
-        assert_eq!(s2.meta().agent, "claude");
         assert_eq!(s2.id(), s1.id());
+        assert_eq!(s2.meta().agent, "claude");
+    }
+
+    #[test]
+    fn open_at_different_agent_errors_with_agent_mismatch() {
+        // Two agents in the same wall-clock second on the same worktree
+        // produce the same session id. The second caller must not silently
+        // get the first agent's session — it gets AgentMismatch instead, so
+        // `open()` (which retries on Now()) can advance the clock and try
+        // again. open_at is the strict form.
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let _claude =
+            Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+        let err =
+            Session::open_at(common.path(), worktree.path(), "codex", fixed_ts()).unwrap_err();
+        match err {
+            JournalError::AgentMismatch {
+                existing,
+                requested,
+            } => {
+                assert_eq!(existing, "claude");
+                assert_eq!(requested, "codex");
+            }
+            other => panic!("expected AgentMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_advances_past_same_second_collision_with_other_agent() {
+        // Live `open()` (uses Now()) should retry past an existing same-id
+        // session belonging to a different agent. The two ids must differ.
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        // Seed: claude takes the current-second slot.
+        let claude_now = Utc::now();
+        let claude =
+            Session::open_at(common.path(), worktree.path(), "claude", claude_now).unwrap();
+        // codex calls live open() — this may retry-and-spin briefly until
+        // the clock advances to a new second.
+        let codex = Session::open(common.path(), worktree.path(), "codex").unwrap();
+        assert_ne!(codex.id(), claude.id());
+        assert_eq!(codex.meta().agent, "codex");
+        assert_eq!(claude.meta().agent, "claude");
     }
 
     #[test]
