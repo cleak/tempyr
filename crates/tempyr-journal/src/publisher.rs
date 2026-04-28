@@ -135,7 +135,7 @@ pub fn publish_ready_sessions(
 
     for id in ready_ids {
         let id_str = id.as_str().to_string();
-        let result = publish_one(common_dir, repo_root, &id, opts, &mut state);
+        let result = publish_one(common_dir, repo_root, &id, opts);
         match &result {
             Ok(SessionStatus::Published { .. }) => {
                 state.record_commit();
@@ -229,7 +229,6 @@ fn publish_one(
     repo_root: &Path,
     id: &SessionId,
     opts: &PublishOptions,
-    _state: &mut PublisherState,
 ) -> Result<SessionStatus> {
     let jsonl_path = jpath::session_jsonl_path(common_dir, id.as_str());
     let meta_path = jpath::session_meta_path(common_dir, id.as_str());
