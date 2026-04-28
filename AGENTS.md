@@ -6,7 +6,7 @@ This file provides guidance to AI coding agents working with code in this reposi
 
 Tempyr is a file-based knowledge graph system for AI-assisted product and technical design. It sits between a PRD helper, a project management system, and an AI-centric task system. The primary interaction model is an AI-assisted interview flow that decomposes brain dumps into typed graph nodes and edges.
 
-The full specification lives in `docs/graphspec.md`. Read the relevant sections before implementing any component.
+The full specification lives in `docs/graphspec.md`. The journal subsystem (append-only agent reasoning log) has its own spec at `docs/journal-spec.md`. Read the relevant sections before implementing any component.
 
 **Core principles:**
 - Files (markdown + YAML frontmatter) are the source of truth; git provides versioning
