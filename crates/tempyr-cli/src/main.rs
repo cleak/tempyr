@@ -345,6 +345,15 @@ pub enum JournalAction {
     /// Required for `dead_end`: --approach, --failure-mode (and detail >= 50 chars).
     /// Required for `assumption`: --polarity.
     Log(Box<commands::journal_cmd::LogArgs>),
+
+    /// Commit finalized journal sessions as Git refs and push to the remote.
+    ///
+    /// Scans `<git-common-dir>/tempyr/journals/open/` for sessions with a
+    /// `.ready` marker, archives each as a parent-less commit under
+    /// `refs/tempyr/journals/archive/<YYYY>/<MM>/<DD>/<session_id>`, pushes
+    /// the ref, and deletes the local files. Idempotent: a re-run after a
+    /// crash picks up where it left off.
+    Flush(commands::journal_cmd::FlushArgs),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -681,6 +690,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Commands::Journal { action } => match action {
             JournalAction::Log(args) => commands::journal_cmd::run_log(*args, cli.json),
+            JournalAction::Flush(args) => commands::journal_cmd::run_flush(args, cli.json),
         },
         Commands::Update { check, force } => commands::update::run(check, force),
         Commands::Doctor => {
