@@ -316,16 +316,23 @@ fn cleanup_session_files(jsonl: &Path, meta: &Path, ready: &Path) -> Result<()> 
     // fails we leave `.ready` in place so the next publisher run can
     // retry; removing `.ready` first would silently strand the session
     // (not retriable + payload still on disk = confusing for a human).
-    if jsonl.exists() {
-        std::fs::remove_file(jsonl)?;
-    }
-    if meta.exists() {
-        std::fs::remove_file(meta)?;
-    }
-    if ready.exists() {
-        std::fs::remove_file(ready)?;
-    }
+    //
+    // We unconditionally call `remove_file` and ignore `NotFound`
+    // instead of pre-checking `exists()`. The exists+remove pair is a
+    // TOCTOU race (the file could vanish between the two syscalls)
+    // and the single-syscall form is both simpler and atomic.
+    remove_if_present(jsonl)?;
+    remove_if_present(meta)?;
+    remove_if_present(ready)?;
     Ok(())
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Bare resolver: where would the publisher push? Currently always
