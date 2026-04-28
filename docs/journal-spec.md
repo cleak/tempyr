@@ -12,7 +12,7 @@
 
 ## 1. Executive Summary
 
-The Tempyr **journal** is an append-only log of agent reasoning, captured during a coding session and committed as Git refs so it survives across worktrees, machines, and agent invocations. Entries fall into eight categorical kinds (decisions, dead ends, findings, plans, etc.) and are stored as JSONL while live, then archived as parent-less commits under `refs/tempyr/journals/archive/<YYYY>/<MM>/<DD>/<session_id>` once finalized.
+The Tempyr **journal** is an append-only log of agent reasoning, captured during a coding session and committed as Git refs so it survives across worktrees, machines, and agent invocations. Entries fall into eight categorical kinds (decisions, dead-ends, findings, plans, etc.) and are stored as JSONL while live, then archived as parent-less commits under `refs/tempyr/journals/archive/<YYYY>/<MM>/<DD>/<session_id>` once finalized.
 
 Two design rules govern the whole subsystem:
 
@@ -21,7 +21,7 @@ Two design rules govern the whole subsystem:
 
 ### Why a separate journal at all?
 
-The graph (PRD/TDD/task nodes) captures the *current* state of a project. The journal captures the *history of reasoning that produced it*: which approaches failed, which alternatives were rejected, which assumptions a future agent should question. Graph nodes are revised; journal entries are immutable. A future agent searching `journal_search "auth middleware"` finds the dead end someone hit two weeks ago and avoids repeating it — something `graph_search` can't surface because the graph stores the resolution, not the path.
+The graph (PRD/TDD/task nodes) captures the *current* state of a project. The journal captures the *history of reasoning that produced it*: which approaches failed, which alternatives were rejected, which assumptions a future agent should question. Graph nodes are revised; journal entries are immutable. A future agent searching `journal_search "auth middleware"` finds the dead-end someone hit two weeks ago and avoids repeating it — something `graph_search` can't surface because the graph stores the resolution, not the path.
 
 ### Phases
 
@@ -130,7 +130,7 @@ The schema version (`v: 1`) ships in every entry; readers ignore unknown fields 
 
 The taxonomy was tuned to match the observed structure of agent reasoning, not to be exhaustive. Three principles drove the cut:
 
-- **`assumption` is distinct from `finding`.** Most dead ends trace back to unstated assumptions. Forcing the agent to label "assuming X" vs. "verified X" is a cheap nudge toward better reasoning.
+- **`assumption` is distinct from `finding`.** Most dead-ends trace back to unstated assumptions. Forcing the agent to label "assuming X" vs. "verified X" is a cheap nudge toward better reasoning.
 - **`dead_end` is the highest-value kind.** A future agent searching the journal benefits most from "tried X, failed because Y" — that's the entry that prevents replays. Required `approach` + `failure_mode` fields keep the entry useful, not just narrative.
 - **`outcome` doubles as session terminator.** Setting `final = true` on an outcome triggers publish, so the writer doesn't need a separate "session-end" event.
 
@@ -138,7 +138,7 @@ Tags carry the long tail (`"tool"` for tool quirks, `"perf"`, `"flaky"`, etc.) w
 
 ### Redaction
 
-Every entry passes through the default `Redactor` before append. Two layered detectors:
+Every entry passes through the default `Redactor` before append. Two-layered detectors:
 
 1. **Named regex rules** (gitleaks-style):
    - `anthropic_or_openai_key` — `\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b`
@@ -182,10 +182,10 @@ let session = Session::open_or_resume(common_dir, worktree_top, "claude")?;
 `append(session, entry)` does the following under one exclusive `File::lock` on the JSONL:
 
 1. Validate per-kind required fields and length constraints.
-2. Check `session.is_ready()`. If the publisher has already taken ownership, refuse with `InvalidEntry("session is finalized; refuse to append")`.
+2. Check `session.is_ready()`. The `.ready` marker is the **finalized-and-handed-off** signal: if it exists, the publisher owns the session and may commit/cleanup at any moment, so refuse with `InvalidEntry("session is finalized; refuse to append")`.
 3. Serialize the entry to a single buffer with a trailing newline.
 4. `write_all` then `sync_data`.
-5. If `entry.is_final`, drop the `.ready` marker.
+5. If `entry.is_final`, **create** the `.ready` marker via `session.finalize()` (same `touch` semantics as `finalize` itself — idempotent, leaves the marker in place if it already exists). The publisher is the only actor that ever **removes** the marker, and only after a successful commit + push (or `--no-push` cleanup); see [§5](#5-publisher-pipeline).
 
 Holding the lock across all five steps prevents concurrent writers from slipping an append between this entry and the marker, or writing to a session the publisher has already taken ownership of. The `read(true)` flag on the OpenOptions is required for `File::lock` on Windows (rust-lang/rust#54118) — a Unix-only flock pattern would silently fail there.
 
@@ -380,7 +380,7 @@ These are tracked but not committed. Listed roughly in expected priority order:
 - **HTML viewer** — `tempyr journal serve` opens a local axum SPA for browsing sessions.
 - **Cross-encoder reranking** — top-k from RRF rerunlp through a small reranker for higher precision on close calls.
 - **Range queries** — `tempyr journal range A..B` filters to entries between two commit SHAs.
-- **Path-scoped queries** — `tempyr journal blame <file>` surfaces decisions/dead ends touching a path.
+- **Path-scoped queries** — `tempyr journal blame <file>` surfaces decisions/dead-ends touching a path.
 - **PR description block** — `tempyr journal pr` generates a markdown summary suitable for paste-into-PR.
 - **Session expansion in search** — when a result is in a session with related entries, surface the session summary inline.
 - **Stats dashboard** — `tempyr journal stats` shows kind distribution, dead-end rate, top tags by week.
