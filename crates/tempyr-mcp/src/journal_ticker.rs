@@ -55,11 +55,20 @@ pub enum SpawnOutcome {
 
 /// Spawn the ticker. `project_root` is the directory the MCP server
 /// anchored to (typically the user's project). Reads
-/// `<project_root>/.tempyr/config.toml`; if missing, uses
-/// [`JournalConfig::default`]. On cancellation the loop breaks and one
-/// final flush runs before the task returns.
+/// `<project_root>/.tempyr/config.toml`; if the file is missing, the
+/// loader returns [`JournalConfig::default`]. If the file *exists but
+/// fails to load* (malformed TOML, permission error, etc.) we return
+/// [`SpawnOutcome::Unavailable`] rather than silently falling back to
+/// the default — the user may have explicitly set `enabled = false`,
+/// and a parse error must not turn auto-publish back on.
+///
+/// On cancellation the loop breaks and one final flush runs before the
+/// task returns.
 pub fn spawn(project_root: &Path, cancellation_token: CancellationToken) -> SpawnOutcome {
-    let config = JournalConfig::load(&project_root.join(".tempyr")).unwrap_or_default();
+    let config = match JournalConfig::load(&project_root.join(".tempyr")) {
+        Ok(cfg) => cfg,
+        Err(e) => return SpawnOutcome::Unavailable(format!("journal config: {e}")),
+    };
     if !config.enabled {
         return SpawnOutcome::Disabled;
     }
@@ -238,6 +247,36 @@ mod tests {
         match outcome {
             SpawnOutcome::Disabled => {}
             other => panic!("expected Disabled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_unavailable_for_malformed_config() {
+        // Regression test: a malformed config must NOT silently fall
+        // back to defaults (which would have re-enabled auto-publish
+        // for a user who set `enabled = false` but corrupted the file
+        // mid-edit). Surface as Unavailable so the MCP entrypoint
+        // logs the error and the agent runs without auto-publish.
+        let (_outer, repo, _bare, _common) = init_repo_with_remote();
+        let tempyr_dir = repo.join(".tempyr");
+        std::fs::create_dir_all(&tempyr_dir).unwrap();
+        // Unbalanced brackets — toml parser rejects this.
+        std::fs::write(
+            tempyr_dir.join("config.toml"),
+            "[journal\nenabled = false\n",
+        )
+        .unwrap();
+
+        let ct = CancellationToken::new();
+        let outcome = spawn(&repo, ct);
+        match outcome {
+            SpawnOutcome::Unavailable(msg) => {
+                assert!(
+                    msg.contains("journal config"),
+                    "error should mention journal config: {msg}"
+                );
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
         }
     }
 

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::{JournalError, Result};
 
 /// Knobs for the journal subsystem. Mirrors the `[journal]` TOML section.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JournalConfig {
     /// Master switch. False = no auto-publish, no ticker. The CLI
@@ -99,16 +99,6 @@ impl JournalConfig {
             self.tick_secs
         };
         std::time::Duration::from_secs(secs)
-    }
-}
-
-impl PartialEq for JournalConfig {
-    fn eq(&self, other: &Self) -> bool {
-        self.enabled == other.enabled
-            && self.remote == other.remote
-            && self.tick_secs == other.tick_secs
-            && self.pack_refs_every_n_pushes == other.pack_refs_every_n_pushes
-            && self.push_timeout_secs == other.push_timeout_secs
     }
 }
 
