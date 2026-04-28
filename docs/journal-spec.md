@@ -378,7 +378,7 @@ The journal becomes useful when agents can find old reasoning. Phase 3 builds a 
 These are tracked but not committed. Listed roughly in expected priority order:
 
 - **HTML viewer** — `tempyr journal serve` opens a local axum SPA for browsing sessions.
-- **Cross-encoder reranking** — top-k from RRF rerunlp through a small reranker for higher precision on close calls.
+- **Cross-encoder reranking** — top-k from RRF rerun through a small reranker for higher precision on close calls.
 - **Range queries** — `tempyr journal range A..B` filters to entries between two commit SHAs.
 - **Path-scoped queries** — `tempyr journal blame <file>` surfaces decisions/dead-ends touching a path.
 - **PR description block** — `tempyr journal pr` generates a markdown summary suitable for paste-into-PR.
