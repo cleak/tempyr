@@ -9,8 +9,11 @@
 //! Survives worktree abandonment because Git refs are shared across worktrees.
 
 pub mod entry;
+pub mod git;
 pub mod kind;
+pub mod lockfile;
 pub mod path;
+pub mod publisher;
 pub mod redact;
 pub mod session;
 pub mod state;
@@ -18,6 +21,10 @@ pub mod writer;
 
 pub use entry::{Confidence, Entry, Polarity, SCHEMA_VERSION, Severity};
 pub use kind::{Kind, validate_entry};
+pub use lockfile::PublisherLock;
+pub use publisher::{
+    AlreadyRunning, PublishOptions, PublishReport, SessionStatus, publish_ready_sessions,
+};
 pub use redact::{Match as RedactionMatch, Mode as RedactionMode, Redactor, default_redactor};
 pub use session::{Session, SessionId, SessionMeta};
 pub use state::{LogLevel, LogLine, PublisherState};
