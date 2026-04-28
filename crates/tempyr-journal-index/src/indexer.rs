@@ -21,6 +21,8 @@
 //! a counter on `IndexerReport` and the indexer continues. Bigger
 //! failures (db error, git command failure) propagate.
 
+use std::fs::File;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 use std::process::Command;
 
@@ -94,41 +96,57 @@ fn refresh_open(
 fn ingest_open_file(conn: &mut Connection, path: &Path, report: &mut IndexerReport) -> Result<()> {
     let key = path.to_string_lossy().into_owned();
     let last_offset = read_last_offset(conn, "open", &key)?;
-    let bytes = std::fs::read(path)?;
+
+    let mut file = File::open(path)?;
+    let file_len = file.metadata()?.len();
 
     // If the file shrank below last_offset (e.g. someone manually
     // truncated, or a stray same-name file), reset to 0 and re-ingest
-    // from the top — we'd rather re-run idempotent inserts than miss data.
-    let start: usize = if last_offset as usize > bytes.len() {
+    // from the top — we'd rather re-run idempotent inserts than miss
+    // data. Cast last_offset (i64) to u64 only after the bounds check.
+    let start: u64 = if last_offset < 0 || (last_offset as u64) > file_len {
         0
     } else {
-        last_offset as usize
+        last_offset as u64
     };
+    file.seek(SeekFrom::Start(start))?;
 
-    // Find newline-terminated complete lines from `start` onward. A
-    // partial trailing line (no newline) means a writer is mid-append;
-    // we leave it for the next refresh.
-    let chunk = &bytes[start..];
-    let last_newline_in_chunk = chunk.iter().rposition(|&b| b == b'\n');
-    let Some(end_in_chunk) = last_newline_in_chunk else {
-        // No complete line yet; nothing to do.
-        return Ok(());
-    };
-    let consumable = &chunk[..=end_in_chunk];
-    let new_offset = (start + end_in_chunk + 1) as i64;
+    let mut reader = BufReader::new(file);
 
+    // Stream-ingest line by line. A trailing partial line (no `\n`)
+    // means a writer is mid-append; we stop *before* it, leaving its
+    // bytes for the next refresh to pick up. `BufRead::read_until`
+    // returns Ok(0) on EOF; if the buffer doesn't end with `\n` after
+    // a non-zero read, the file ends with a partial line.
     let tx = conn.transaction()?;
-    for line in consumable.split(|&b| b == b'\n') {
-        if line.is_empty() {
-            continue;
+    let mut consumed: u64 = 0;
+    loop {
+        let mut line_buf: Vec<u8> = Vec::new();
+        let n = reader.read_until(b'\n', &mut line_buf)?;
+        if n == 0 {
+            break; // clean EOF
         }
-        report.scanned += 1;
-        match parse_and_insert(&tx, line, "open") {
-            Ok(true) => report.inserted += 1,
-            Ok(false) => report.already_indexed += 1,
-            Err(_) => report.corrupt_lines += 1,
+        if !line_buf.ends_with(b"\n") {
+            // Partial trailing line: don't count, don't advance offset.
+            break;
         }
+        // Strip the trailing newline; insertion sees only the JSON.
+        let line = &line_buf[..line_buf.len() - 1];
+        if !line.is_empty() {
+            report.scanned += 1;
+            match parse_and_insert(&tx, line, "open") {
+                Ok(true) => report.inserted += 1,
+                Ok(false) => report.already_indexed += 1,
+                Err(_) => report.corrupt_lines += 1,
+            }
+        }
+        consumed += n as u64;
     }
+    if consumed == 0 {
+        // No complete lines available; nothing to record.
+        return Ok(());
+    }
+    let new_offset = (start + consumed) as i64;
     write_last_offset(&tx, "open", &key, new_offset)?;
     tx.commit()?;
     Ok(())
@@ -339,15 +357,22 @@ fn insert_entry(tx: &rusqlite::Transaction<'_>, entry: &Entry, source: &str) -> 
 // --- indexer_state helpers --------------------------------------------------
 
 fn read_last_offset(conn: &Connection, kind: &str, key: &str) -> Result<i64> {
-    let row: Option<i64> = conn
-        .query_row(
-            "SELECT last_offset FROM indexer_state WHERE source_kind = ?1 AND source_key = ?2",
-            params![kind, key],
-            |r| r.get::<_, Option<i64>>(0),
-        )
-        .ok()
-        .flatten();
-    Ok(row.unwrap_or(0))
+    // Distinguish "no row yet" (first-time scan; offset is 0) from
+    // real DB errors. The previous `.ok().flatten()` swallowed both,
+    // which would have hidden a corrupt indexer_state table behind a
+    // silent re-ingest from byte 0.
+    match conn.query_row(
+        "SELECT last_offset FROM indexer_state WHERE source_kind = ?1 AND source_key = ?2",
+        params![kind, key],
+        |r| r.get::<_, Option<i64>>(0),
+    ) {
+        Ok(Some(off)) => Ok(off),
+        // Row exists but `last_offset` is NULL — happens for archive
+        // rows mistakenly consulted via the open path; treat as 0.
+        Ok(None) => Ok(0),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn write_last_offset(
@@ -370,14 +395,18 @@ fn write_last_offset(
 }
 
 fn read_last_sha(conn: &Connection, kind: &str, key: &str) -> Result<Option<String>> {
-    let row: Option<Option<String>> = conn
-        .query_row(
-            "SELECT last_sha FROM indexer_state WHERE source_kind = ?1 AND source_key = ?2",
-            params![kind, key],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .ok();
-    Ok(row.flatten())
+    // Mirrors `read_last_offset` — separate "no row" (first-time scan
+    // of this archive ref → return None so we'll ingest it) from real
+    // DB errors that should propagate.
+    match conn.query_row(
+        "SELECT last_sha FROM indexer_state WHERE source_kind = ?1 AND source_key = ?2",
+        params![kind, key],
+        |r| r.get::<_, Option<String>>(0),
+    ) {
+        Ok(sha) => Ok(sha),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn write_last_sha(tx: &rusqlite::Transaction<'_>, kind: &str, key: &str, sha: &str) -> Result<()> {
@@ -683,5 +712,73 @@ mod tests {
         let _ = repo;
         let conn = schema::open(&crate::index_db_path(&common)).unwrap();
         assert!(crate::get_entry(&conn, "j-nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn partial_trailing_line_is_left_for_next_refresh() {
+        // Regression: with the streaming `BufReader` ingest, a writer
+        // mid-append (line missing its trailing `\n`) must be skipped
+        // *and* not advance the offset, so the next refresh picks it
+        // up once the writer adds the newline.
+        let (_outer, repo, common, _bare) = fresh_repo();
+        write_one_entry(
+            &common,
+            &repo,
+            fixed_ts(),
+            "first plan entry that is sufficiently long",
+        );
+        // Append a JSON line WITHOUT the trailing newline (simulates a
+        // writer mid-append between `write_all` and `sync_data`).
+        let session = Session::open_or_resume(&common, &repo, "claude").unwrap();
+        let jsonl = session.jsonl_path();
+        let partial = br#"{"v":1,"id":"j-partial","ts":"2026-04-28T12:00:00Z","agent":"claude","kind":"plan","summary":"partial line missing newline that should not be ingested","session_id":"x","worktree_hash":"00000000"}"#;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl)
+            .unwrap()
+            .write_all(partial)
+            .unwrap();
+
+        // First refresh: only the first complete line is ingested; the
+        // partial line is left for next time.
+        let r1 = refresh_index(&common, &repo).unwrap();
+        assert_eq!(r1.scanned, 1);
+        assert_eq!(r1.inserted, 1);
+        let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+        assert_eq!(crate::count_entries(&conn).unwrap(), 1);
+        assert!(
+            crate::get_entry(&conn, "j-partial").unwrap().is_none(),
+            "partial line must not be inserted yet"
+        );
+        drop(conn);
+
+        // Now finish the partial line by appending a newline. The next
+        // refresh should pick it up (offset wasn't advanced past it).
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl)
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        let r2 = refresh_index(&common, &repo).unwrap();
+        assert_eq!(r2.scanned, 1);
+        assert_eq!(r2.inserted, 1);
+        let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+        assert!(crate::get_entry(&conn, "j-partial").unwrap().is_some());
+    }
+
+    #[test]
+    fn read_last_offset_returns_zero_for_first_time_scan() {
+        // After fixing the silent-error swallow, "no row yet" must
+        // still cleanly return Ok(0) (first-time scan of a fresh JSONL
+        // path). Real DB errors propagate; this test pins the
+        // happy-path behavior so a future regression can't merge
+        // silently.
+        let dir = tempfile::tempdir().unwrap();
+        let conn = schema::open(&dir.path().join("index.db")).unwrap();
+        let off = read_last_offset(&conn, "open", "/never/seen/before.jsonl").unwrap();
+        assert_eq!(off, 0);
+        let sha = read_last_sha(&conn, "archive", "refs/never/seen/before").unwrap();
+        assert!(sha.is_none());
     }
 }
