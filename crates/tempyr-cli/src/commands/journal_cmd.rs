@@ -293,6 +293,18 @@ pub fn run_flush(args: FlushArgs, json_output: bool) -> Result<()> {
         );
     }
 
+    // Best-effort index refresh after a successful publish. The index
+    // is a derived cache — failure here must NOT fail the flush (the
+    // commit + push already succeeded; the user has their data on the
+    // remote). The user can always rebuild via `tempyr journal index
+    // --rebuild`. Errors get a single warning line to stderr.
+    if !args.dry_run
+        && report.published_count() > 0
+        && let Err(e) = tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+    {
+        eprintln!("warning: post-flush index refresh failed: {e}");
+    }
+
     if any_failed {
         // Exit non-zero so CI / hooks can detect partial failures.
         std::process::exit(1);
@@ -541,4 +553,92 @@ pub fn run_fetch(args: FetchArgs, json_output: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Args, Debug)]
+pub struct IndexArgs {
+    /// Truncate the index and re-ingest from scratch. Multi-session
+    /// safe: uses `DELETE FROM` inside a transaction. For a corrupt
+    /// db that won't open at all, add `--force`.
+    #[arg(long)]
+    pub rebuild: bool,
+    /// Only valid with `--rebuild`. Removes the index file outright
+    /// rather than truncating tables. Use only for corrupt-db
+    /// recovery; quiesce other readers first.
+    #[arg(long, requires = "rebuild")]
+    pub force: bool,
+}
+
+pub fn run_index(args: IndexArgs, json_output: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("read current directory")?;
+    let common_dir =
+        jpath::git_common_dir(&cwd).map_err(|e| anyhow!("not in a git repository: {e}"))?;
+    let repo_root =
+        jpath::repo_toplevel(&cwd).map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
+
+    if args.rebuild {
+        let db_path = tempyr_journal_index::index_db_path(&common_dir);
+        if args.force {
+            // Corrupt-db escape hatch. NotFound is fine — first-run
+            // case shouldn't error.
+            match std::fs::remove_file(&db_path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(anyhow!("remove index.db: {e}")),
+            }
+        } else {
+            let mut conn = tempyr_journal_index::schema::open(&db_path)
+                .map_err(|e| anyhow!("open index.db: {e}"))?;
+            tempyr_journal_index::schema::truncate(&mut conn)
+                .map_err(|e| anyhow!("truncate: {e}"))?;
+        }
+    }
+
+    let report = tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+        .map_err(|e| anyhow!("refresh index: {e}"))?;
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "scanned": report.scanned,
+                "inserted": report.inserted,
+                "already_indexed": report.already_indexed,
+                "corrupt_lines": report.corrupt_lines,
+                "open_files": report.open_files,
+                "archive_refs": report.archive_refs,
+                "rebuilt": args.rebuild,
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        if args.rebuild {
+            println!(
+                "rebuilt index (mode: {})",
+                if args.force {
+                    "force-delete"
+                } else {
+                    "truncate"
+                }
+            );
+        }
+        println!(
+            "scanned {} line{} across {} open file{} + {} archive ref{} \u{2192} \
+             {} new, {} already indexed, {} corrupt",
+            report.scanned,
+            plural(report.scanned),
+            report.open_files,
+            plural(report.open_files),
+            report.archive_refs,
+            plural(report.archive_refs),
+            report.inserted,
+            report.already_indexed,
+            report.corrupt_lines,
+        );
+    }
+    Ok(())
+}
+
+fn plural(n: u64) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }

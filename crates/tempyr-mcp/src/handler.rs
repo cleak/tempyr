@@ -670,6 +670,15 @@ fn parse_opt<T: FromStr<Err = tempyr_journal::JournalError>>(
     s.map(T::from_str).transpose().map_err(|e| e.to_string())
 }
 
+/// Parameters for the `journal_get` MCP tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalGetParams {
+    /// Entry id, e.g. `j-4b511f6f9cf9425b906ae90c31bd3367`. The id is
+    /// returned by `journal_log` and stays stable for the entry's
+    /// lifetime.
+    pub id: String,
+}
+
 // Server
 
 /// Default agent identity when the embedder doesn't configure one. Most
@@ -1797,6 +1806,26 @@ impl TempyrServer {
             "finalized": outcome.finalized,
         }))
         .unwrap_or_default())
+    }
+
+    #[tool(
+        name = "journal_get",
+        description = "Fetch one journal entry by id. Returns the full Entry JSON (kind, summary, detail, per-kind structured fields like chosen/rationale/approach/failure_mode, plus session and git context). Returns null if the id isn't in the local index — that can happen if the entry was published from another machine and you haven't fetched journal refs yet (`tempyr journal fetch`)."
+    )]
+    fn journal_get(&self, Parameters(p): Parameters<JournalGetParams>) -> Result<String, String> {
+        let (graph_dir, _gf_dir, _schema) = self.find_project()?;
+        let project_root = graph_dir
+            .parent()
+            .ok_or_else(|| "Failed to resolve project root from graph dir".to_string())?
+            .to_path_buf();
+        let common_dir = jpath::git_common_dir(&project_root).map_err(|e| e.to_string())?;
+        let db_path = tempyr_journal_index::index_db_path(&common_dir);
+        let conn = tempyr_journal_index::schema::open(&db_path).map_err(|e| e.to_string())?;
+        let entry = tempyr_journal_index::get_entry(&conn, &p.id).map_err(|e| e.to_string())?;
+        match entry {
+            Some(e) => serde_json::to_string_pretty(&e).map_err(|e| e.to_string()),
+            None => Ok("null".to_string()),
+        }
     }
 
     #[tool(

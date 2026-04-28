@@ -366,6 +366,13 @@ pub enum JournalAction {
     /// Required for multi-machine sync — without it, an agent's pushed
     /// journals don't appear in another agent's local repo.
     Fetch(commands::journal_cmd::FetchArgs),
+
+    /// Refresh the derived SQLite index from open JSONL files and
+    /// archived `refs/tempyr/journals/*` refs. Idempotent. Use
+    /// `--rebuild` to truncate and re-ingest from scratch (multi-
+    /// session safe); add `--force` to delete the db file outright
+    /// for corrupt-db recovery.
+    Index(commands::journal_cmd::IndexArgs),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -706,6 +713,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             JournalAction::Status(args) => commands::journal_cmd::run_status(args, cli.json),
             JournalAction::Logs(args) => commands::journal_cmd::run_logs(args, cli.json),
             JournalAction::Fetch(args) => commands::journal_cmd::run_fetch(args, cli.json),
+            JournalAction::Index(args) => commands::journal_cmd::run_index(args, cli.json),
         },
         Commands::Update { check, force } => commands::update::run(check, force),
         Commands::Doctor => {

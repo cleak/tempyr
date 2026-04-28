@@ -11,6 +11,7 @@ tempyr-interview = { path = "../tempyr-interview" }
 tempyr-render = { path = "../tempyr-render" }
 tempyr-linear = { path = "../tempyr-linear" }
 tempyr-journal = { path = "../tempyr-journal" }
+tempyr-journal-index = { path = "../tempyr-journal-index" }
 chrono = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
