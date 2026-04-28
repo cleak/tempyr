@@ -3222,6 +3222,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "tempyr-core",
  "tempyr-index",
  "tempyr-interview",
