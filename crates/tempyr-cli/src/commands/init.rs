@@ -358,7 +358,7 @@ fn render_config(provider: EmbeddingProviderChoice) -> String {
             "local",
             "all-MiniLM-L6-v2",
             384,
-            "# No API key required. Runs fully offline.",
+            "# No API key required. Runs locally after a one-time model download on first use.",
         ),
     };
 

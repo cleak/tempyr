@@ -57,7 +57,9 @@ impl EmbeddingProviderChoice {
             Self::Gemini => {
                 "Good hosted fallback. Requires GEMINI_API_KEY and uses gemini-embedding-001 / 768 dims."
             }
-            Self::Local => "No API key. Runs offline via fastembed.",
+            Self::Local => {
+                "No API key. Uses local fastembed; downloads the model on first run if not already cached."
+            }
         }
     }
 
@@ -612,7 +614,7 @@ fn current_header(state: &WizardState) -> Vec<Line<'static>> {
         Page::Provider => vec![
             Line::from("Choose the embedding provider for retrieval and search."),
             Line::from(
-                "Hosted providers can collect an API key in-flow; local runs offline with no key.",
+                "Hosted providers collect an API key in-flow; local needs a one-time model download, then runs offline.",
             ),
         ],
         Page::CoreSetup => vec![
