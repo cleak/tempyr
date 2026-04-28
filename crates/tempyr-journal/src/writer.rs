@@ -14,12 +14,161 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::Session;
-use crate::entry::Entry;
-use crate::kind::validate_entry;
-use crate::{JournalError, Result};
+use crate::entry::{Confidence, Entry, Polarity, Severity};
+use crate::kind::{Kind, validate_entry};
+use crate::redact::default_redactor;
+use crate::{JournalError, Result, Session, path as jpath};
+
+/// Transport-independent draft of a journal entry. CLI args (`LogArgs`) and
+/// MCP params (`JournalLogParams`) both translate to this so the
+/// path-normalization, redaction, append, and finalize pipeline lives in one
+/// place.
+///
+/// Most fields map 1:1 to [`Entry`]; the writer copies them verbatim. The two
+/// exceptions are:
+///
+/// - [`files`](Self::files): each absolute path under `worktree_top` is
+///   stripped to a repo-relative form (forward-slash); relative inputs only
+///   get separator normalization. Out-of-worktree absolute paths are kept
+///   as-is and may be blocked by the redactor.
+/// - [`cwd`](Self::cwd): a raw [`PathBuf`] (typically `env::current_dir()`)
+///   is converted to a repo-relative string. Returns `None` for the
+///   worktree root or out-of-worktree paths.
+#[derive(Debug, Clone)]
+pub struct EntryDraft {
+    pub kind: Kind,
+    pub summary: String,
+    pub detail: Option<String>,
+    pub tags: Vec<String>,
+    /// Raw file paths; normalized to repo-relative inside `write_entry`.
+    pub files: Vec<String>,
+    pub references: Vec<String>,
+    /// Raw current directory; normalized to repo-relative inside `write_entry`.
+    pub cwd: Option<PathBuf>,
+    pub provisional: bool,
+    pub confidence: Option<Confidence>,
+    pub severity: Option<Severity>,
+    pub alternatives: Vec<String>,
+    pub chosen: Option<String>,
+    pub rationale: Option<String>,
+    pub reversible: Option<bool>,
+    pub approach: Option<String>,
+    pub failure_mode: Option<String>,
+    pub next_to_try: Option<String>,
+    pub polarity: Option<Polarity>,
+    pub passed: Option<bool>,
+    pub build_ok: Option<bool>,
+    pub commit_sha: Option<String>,
+    pub is_final: bool,
+}
+
+impl EntryDraft {
+    /// Empty draft with only the required fields populated. Optional fields
+    /// default to their zero values; per-kind structured fields stay `None`
+    /// and are only required when the kind demands them.
+    pub fn new(kind: Kind, summary: impl Into<String>) -> Self {
+        Self {
+            kind,
+            summary: summary.into(),
+            detail: None,
+            tags: Vec::new(),
+            files: Vec::new(),
+            references: Vec::new(),
+            cwd: None,
+            provisional: false,
+            confidence: None,
+            severity: None,
+            alternatives: Vec::new(),
+            chosen: None,
+            rationale: None,
+            reversible: None,
+            approach: None,
+            failure_mode: None,
+            next_to_try: None,
+            polarity: None,
+            passed: None,
+            build_ok: None,
+            commit_sha: None,
+            is_final: false,
+        }
+    }
+}
+
+/// Result of [`write_entry`]: the persisted entry and whether the session was
+/// finalized as part of this call. Callers use the entry's id/kind to format
+/// transport-specific output (CLI text, MCP JSON response).
+#[derive(Debug, Clone)]
+pub struct WriteOutcome {
+    pub entry: Entry,
+    pub finalized: bool,
+}
+
+/// Build an [`Entry`] from `draft`, normalize paths against `worktree_top`,
+/// run the default redactor, append to `session`'s JSONL, and finalize the
+/// session if `draft.is_final`. Returns the persisted entry plus a flag.
+///
+/// This is the shared write pipeline used by both the CLI (`tempyr journal
+/// log`) and the MCP `journal_log` tool — the only thing each transport owns
+/// is parsing input into the draft and formatting the response.
+pub fn write_entry(
+    session: &Session,
+    worktree_top: &Path,
+    draft: EntryDraft,
+) -> Result<WriteOutcome> {
+    let mut entry = Entry::for_session(draft.kind, draft.summary, session);
+    entry.detail = draft.detail;
+    entry.tags = draft.tags;
+    entry.files = draft
+        .files
+        .into_iter()
+        .map(|p| jpath::repo_relative_path(&p, worktree_top))
+        .collect();
+    entry.references = draft.references;
+    entry.cwd = draft
+        .cwd
+        .as_deref()
+        .and_then(|c| relative_cwd(c, worktree_top));
+    entry.provisional = draft.provisional;
+    entry.confidence = draft.confidence;
+    entry.severity = draft.severity;
+    entry.alternatives = draft.alternatives;
+    entry.chosen = draft.chosen;
+    entry.rationale = draft.rationale;
+    entry.reversible = draft.reversible;
+    entry.approach = draft.approach;
+    entry.failure_mode = draft.failure_mode;
+    entry.next_to_try = draft.next_to_try;
+    entry.polarity = draft.polarity;
+    entry.passed = draft.passed;
+    entry.build_ok = draft.build_ok;
+    entry.commit_sha = draft.commit_sha;
+    entry.is_final = draft.is_final;
+
+    default_redactor().enforce(&mut entry)?;
+    append(session, &entry)?;
+
+    let finalized = if entry.is_final {
+        session.finalize()?;
+        true
+    } else {
+        false
+    };
+    Ok(WriteOutcome { entry, finalized })
+}
+
+/// Repo-relative form of `cwd` under `worktree_top`. Returns `None` for the
+/// worktree root (avoid noisy `cwd: "."`) and for out-of-worktree paths
+/// (avoid leaking absolute home-dir paths into journals).
+fn relative_cwd(cwd: &Path, worktree_top: &Path) -> Option<String> {
+    if cwd == worktree_top {
+        return None;
+    }
+    cwd.strip_prefix(worktree_top)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+}
 
 /// Append one entry to its session's JSONL. Validates first; on failure
 /// nothing is written.
@@ -248,6 +397,73 @@ mod tests {
 
         let parsed = entries_in(&session_arc.jsonl_path());
         assert_eq!(parsed.len(), THREADS * PER_THREAD);
+    }
+
+    #[test]
+    fn write_entry_normalizes_files_and_finalizes() {
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let session =
+            Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+
+        let abs_file = worktree.path().join("crates").join("foo").join("bar.rs");
+        std::fs::create_dir_all(abs_file.parent().unwrap()).unwrap();
+        std::fs::write(&abs_file, "").unwrap();
+
+        let mut draft = EntryDraft::new(
+            Kind::Outcome,
+            "shared write_entry pipeline normalizes & finalizes",
+        );
+        draft.files = vec![
+            abs_file.to_string_lossy().into_owned(),
+            r"crates\foo\baz.rs".into(),
+        ];
+        draft.cwd = Some(worktree.path().join("crates"));
+        draft.passed = Some(true);
+        draft.is_final = true;
+
+        let outcome = write_entry(&session, worktree.path(), draft).unwrap();
+
+        // Forward-slash, repo-relative paths in entry.files (both abs and
+        // backslash-relative inputs).
+        assert_eq!(outcome.entry.files.len(), 2);
+        assert_eq!(outcome.entry.files[0], "crates/foo/bar.rs");
+        assert_eq!(outcome.entry.files[1], "crates/foo/baz.rs");
+        // cwd is repo-relative subdir, forward-slash.
+        assert_eq!(outcome.entry.cwd.as_deref(), Some("crates"));
+        // Finalize ran: .ready marker present and outcome.finalized true.
+        assert!(outcome.finalized);
+        assert!(session.is_ready());
+    }
+
+    #[test]
+    fn write_entry_skips_finalize_when_not_final() {
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let session =
+            Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+        let draft = EntryDraft::new(Kind::Finding, "non-final entry should not write .ready");
+        let outcome = write_entry(&session, worktree.path(), draft).unwrap();
+        assert!(!outcome.finalized);
+        assert!(!session.is_ready());
+    }
+
+    #[test]
+    fn write_entry_blocks_redacted_input() {
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let session =
+            Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+        let mut draft = EntryDraft::new(
+            Kind::Finding,
+            "found ghp_abcdefghijklmnopqrstuvwxyz0123456789AB by accident",
+        );
+        // Force a redactor block via a real-looking GitHub PAT in summary.
+        draft.is_final = false;
+        let err = write_entry(&session, worktree.path(), draft).unwrap_err();
+        assert!(matches!(err, JournalError::Redacted { .. }));
+        // Block before append: nothing was written.
+        assert!(!session.jsonl_path().exists());
     }
 
     #[test]

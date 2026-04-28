@@ -32,9 +32,7 @@ use tempyr_interview::session::{
 };
 
 use tempyr_journal::path as jpath;
-use tempyr_journal::{
-    Confidence, Entry, Kind, Polarity, Session, Severity, append, default_redactor,
-};
+use tempyr_journal::{Confidence, EntryDraft, Kind, Polarity, Session, Severity, write_entry};
 use tempyr_linear::client::LinearClient;
 use tempyr_linear::config::LinearConfig;
 use tempyr_linear::mapping::StatusMapper;
@@ -672,19 +670,12 @@ fn parse_opt<T: FromStr<Err = tempyr_journal::JournalError>>(
     s.map(T::from_str).transpose().map_err(|e| e.to_string())
 }
 
-/// Relative path of `cwd` under `worktree_top`, or `None` when `cwd` is
-/// either the worktree root (avoid a noisy `cwd: "."`) or outside the repo
-/// entirely. Mirrors the CLI behavior — we never log absolute home-dir paths.
-fn relative_cwd(cwd: &Path, worktree_top: &Path) -> Option<String> {
-    if cwd == worktree_top {
-        return None;
-    }
-    cwd.strip_prefix(worktree_top)
-        .ok()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-}
-
 // Server
+
+/// Default agent identity when the embedder doesn't configure one. Most
+/// callers go through Claude Code; embedders that drive the server from a
+/// different agent override this via [`TempyrServer::with_agent_id`].
+pub const DEFAULT_AGENT_ID: &str = "claude";
 
 #[derive(Clone)]
 pub struct TempyrServer {
@@ -696,6 +687,10 @@ pub struct TempyrServer {
     /// serving more than one repo/worktree doesn't keep appending to the wrong
     /// session metadata.
     journal_session: Arc<Mutex<Option<JournalSessionCache>>>,
+    /// Agent identity recorded on every journal entry (`SessionMeta.agent` and
+    /// `Entry.agent`). Defaults to [`DEFAULT_AGENT_ID`]. Different MCP clients
+    /// (Codex, etc.) should override this so journals are correctly attributed.
+    agent_id: String,
 }
 
 #[derive(Clone)]
@@ -713,11 +708,24 @@ impl TempyrServer {
             relative_project_root_fallback: None,
             project_anchor_state: ProjectAnchorState::ready(),
             journal_session: Arc::new(Mutex::new(None)),
+            agent_id: DEFAULT_AGENT_ID.to_string(),
         }
     }
 
     pub(crate) fn with_relative_project_root_fallback(mut self, fallback: Option<PathBuf>) -> Self {
         self.relative_project_root_fallback = fallback;
+        self
+    }
+
+    /// Override the agent identity recorded on every journal entry. Use this
+    /// when embedding the server in a non-Claude agent so journals attribute
+    /// entries correctly. Empty strings are rejected (we don't want
+    /// session_id collisions silently merging into one agent's session).
+    pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {
+        let id: String = agent_id.into();
+        if !id.trim().is_empty() {
+            self.agent_id = id;
+        }
         self
     }
 
@@ -736,9 +744,12 @@ impl TempyrServer {
     }
 
     /// Get the current journal session for `(common_dir, worktree_top)`,
-    /// opening one lazily on first use and caching it. If the cached entry is
-    /// for a different repo/worktree, replace it — a single MCP server should
-    /// not silently keep writing to a stale session.
+    /// opening one lazily on first use and caching it. The cache is replaced
+    /// when:
+    /// - it's for a different repo/worktree, or
+    /// - the cached session is finalized (`.ready` marker present), so the
+    ///   next entry must not append to a closed session that the publisher
+    ///   may already be processing.
     fn journal_session_or_open(
         &self,
         common_dir: &Path,
@@ -751,13 +762,15 @@ impl TempyrServer {
         if let Some(cache) = guard.as_ref()
             && cache.common_dir == common_dir
             && cache.worktree_top == worktree_top
+            && !cache.session.is_ready()
         {
             return Ok(cache.session.clone());
         }
         // Reuse an active on-disk session if one exists for this
         // (worktree, agent) pair, so a freshly-launched MCP server picks up
         // a session that previous CLI calls or a prior server already started.
-        let session = Session::open_or_resume(common_dir, worktree_top, "claude")
+        // open_or_resume itself skips finalized sessions.
+        let session = Session::open_or_resume(common_dir, worktree_top, &self.agent_id)
             .map_err(|e| format!("open journal session: {e}"))?;
         *guard = Some(JournalSessionCache {
             common_dir: common_dir.to_path_buf(),
@@ -1744,52 +1757,39 @@ impl TempyrServer {
 
         let session = self.journal_session_or_open(&common_dir, &worktree_top)?;
 
-        let mut entry = Entry::for_session(kind, p.summary, &session);
-        entry.detail = p.detail;
-        entry.tags = p.tags.unwrap_or_default();
-        entry.files = p
-            .files
-            .unwrap_or_default()
-            .into_iter()
-            .map(|f| jpath::repo_relative_path(&f, &worktree_top))
-            .collect();
-        entry.references = p.references.unwrap_or_default();
-        let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
-        entry.cwd = relative_cwd(&cwd, &worktree_top);
-        entry.provisional = p.provisional.unwrap_or(false);
-        entry.confidence = parse_opt::<Confidence>(p.confidence.as_deref())?;
-        entry.severity = parse_opt::<Severity>(p.severity.as_deref())?;
-        entry.alternatives = p.alternatives.unwrap_or_default();
-        entry.chosen = p.chosen;
-        entry.rationale = p.rationale;
-        entry.reversible = p.reversible;
-        entry.approach = p.approach;
-        entry.failure_mode = p.failure_mode;
-        entry.next_to_try = p.next_to_try;
-        entry.polarity = parse_opt::<Polarity>(p.polarity.as_deref())?;
-        entry.passed = p.passed;
-        entry.build_ok = p.build_ok;
-        entry.commit_sha = p.commit_sha;
-        entry.is_final = p.is_final.unwrap_or(false);
+        let cwd = std::env::current_dir().ok();
+        let draft = EntryDraft {
+            kind,
+            summary: p.summary,
+            detail: p.detail,
+            tags: p.tags.unwrap_or_default(),
+            files: p.files.unwrap_or_default(),
+            references: p.references.unwrap_or_default(),
+            cwd,
+            provisional: p.provisional.unwrap_or(false),
+            confidence: parse_opt::<Confidence>(p.confidence.as_deref())?,
+            severity: parse_opt::<Severity>(p.severity.as_deref())?,
+            alternatives: p.alternatives.unwrap_or_default(),
+            chosen: p.chosen,
+            rationale: p.rationale,
+            reversible: p.reversible,
+            approach: p.approach,
+            failure_mode: p.failure_mode,
+            next_to_try: p.next_to_try,
+            polarity: parse_opt::<Polarity>(p.polarity.as_deref())?,
+            passed: p.passed,
+            build_ok: p.build_ok,
+            commit_sha: p.commit_sha,
+            is_final: p.is_final.unwrap_or(false),
+        };
 
-        default_redactor()
-            .enforce(&mut entry)
-            .map_err(|e| e.to_string())?;
-        append(&session, &entry).map_err(|e| e.to_string())?;
-
-        // Drop the session-final entry's `.ready` marker so the publisher
-        // picks it up and `Session::find_active` stops resuming this id.
-        if entry.is_final {
-            session
-                .finalize()
-                .map_err(|e| format!("finalize session: {e}"))?;
-        }
+        let outcome = write_entry(&session, &worktree_top, draft).map_err(|e| e.to_string())?;
 
         Ok(serde_json::to_string_pretty(&json!({
-            "id": entry.id,
+            "id": outcome.entry.id,
             "session_id": session.id().as_str(),
-            "kind": entry.kind.as_str(),
-            "finalized": entry.is_final,
+            "kind": outcome.entry.kind.as_str(),
+            "finalized": outcome.finalized,
         }))
         .unwrap_or_default())
     }
@@ -1847,28 +1847,6 @@ mod tests {
     #[test]
     fn percent_decode_decodes_hex_bytes() {
         assert_eq!(percent_decode("space%20path"), Some("space path".into()));
-    }
-
-    #[test]
-    fn relative_cwd_returns_none_for_worktree_root() {
-        let root = PathBuf::from("/repo/top");
-        assert_eq!(relative_cwd(&root, &root), None);
-    }
-
-    #[test]
-    fn relative_cwd_returns_relative_for_subdir() {
-        let root = PathBuf::from("/repo/top");
-        let sub = root.join("crates").join("foo");
-        assert_eq!(relative_cwd(&sub, &root), Some("crates/foo".into()));
-    }
-
-    #[test]
-    fn relative_cwd_returns_none_for_out_of_repo_path() {
-        // Out-of-worktree must NOT leak as an absolute path string —
-        // the redactor would block any /Users/<n>/ or C:\Users\<n>\ value.
-        let root = PathBuf::from("/repo/top");
-        let elsewhere = PathBuf::from("/somewhere/else");
-        assert_eq!(relative_cwd(&elsewhere, &root), None);
     }
 
     #[test]

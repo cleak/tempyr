@@ -21,7 +21,7 @@ pub use kind::{Kind, validate_entry};
 pub use redact::{Match as RedactionMatch, Mode as RedactionMode, Redactor, default_redactor};
 pub use session::{Session, SessionId, SessionMeta};
 pub use state::{LogLevel, LogLine, PublisherState};
-pub use writer::append;
+pub use writer::{EntryDraft, WriteOutcome, append, write_entry};
 
 use thiserror::Error;
 

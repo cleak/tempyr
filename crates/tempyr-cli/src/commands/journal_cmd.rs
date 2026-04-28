@@ -5,7 +5,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result, anyhow};
 use clap::Args;
 use tempyr_journal::{
-    Confidence, Entry, Kind, Polarity, Session, Severity, append, default_redactor, path as jpath,
+    Confidence, EntryDraft, Kind, Polarity, Session, Severity, path as jpath, write_entry,
 };
 
 #[derive(Args, Debug)]
@@ -95,52 +95,34 @@ pub fn run_log(args: LogArgs, json_output: bool) -> Result<()> {
     let session = Session::open_or_resume(&common_dir, &worktree_top, &args.agent)
         .map_err(|e| anyhow!("open session: {e}"))?;
 
-    let cwd_rel = if cwd == worktree_top {
-        None
-    } else {
-        cwd.strip_prefix(&worktree_top)
-            .ok()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
+    let draft = EntryDraft {
+        kind,
+        summary: args.summary,
+        detail: args.detail,
+        tags: args.tags,
+        files: args.files,
+        references: args.references,
+        cwd: Some(cwd),
+        provisional: args.provisional,
+        confidence: parse_opt::<Confidence>(args.confidence.as_deref())?,
+        severity: parse_opt::<Severity>(args.severity.as_deref())?,
+        alternatives: args.alternatives,
+        chosen: args.chosen,
+        rationale: args.rationale,
+        reversible: args.reversible,
+        approach: args.approach,
+        failure_mode: args.failure_mode,
+        next_to_try: args.next_to_try,
+        polarity: parse_opt::<Polarity>(args.polarity.as_deref())?,
+        passed: args.passed,
+        build_ok: args.build_ok,
+        commit_sha: args.commit_sha,
+        is_final: args.is_final,
     };
 
-    let mut entry = Entry::for_session(kind, args.summary, &session);
-    entry.detail = args.detail;
-    entry.tags = args.tags;
-    entry.files = args
-        .files
-        .into_iter()
-        .map(|p| jpath::repo_relative_path(&p, &worktree_top))
-        .collect();
-    entry.references = args.references;
-    entry.cwd = cwd_rel;
-    entry.provisional = args.provisional;
-    entry.confidence = parse_opt::<Confidence>(args.confidence.as_deref())?;
-    entry.severity = parse_opt::<Severity>(args.severity.as_deref())?;
-    entry.alternatives = args.alternatives;
-    entry.chosen = args.chosen;
-    entry.rationale = args.rationale;
-    entry.reversible = args.reversible;
-    entry.approach = args.approach;
-    entry.failure_mode = args.failure_mode;
-    entry.next_to_try = args.next_to_try;
-    entry.polarity = parse_opt::<Polarity>(args.polarity.as_deref())?;
-    entry.passed = args.passed;
-    entry.build_ok = args.build_ok;
-    entry.commit_sha = args.commit_sha;
-    entry.is_final = args.is_final;
-
-    default_redactor()
-        .enforce(&mut entry)
-        .map_err(|e| anyhow!(format!("{e}")))?;
-    append(&session, &entry).map_err(|e| anyhow!("append: {e}"))?;
-
-    // Drop the session-final entry's `.ready` marker so the publisher
-    // picks it up and Session::find_active stops resuming this id.
-    if args.is_final {
-        session
-            .finalize()
-            .map_err(|e| anyhow!("finalize session: {e}"))?;
-    }
+    let outcome = write_entry(&session, &worktree_top, draft)
+        .map_err(|e| anyhow!(format!("write entry: {e}")))?;
+    let entry = &outcome.entry;
 
     if json_output {
         let payload = serde_json::json!({
@@ -148,7 +130,7 @@ pub fn run_log(args: LogArgs, json_output: bool) -> Result<()> {
             "session_id": session.id().as_str(),
             "kind": entry.kind.as_str(),
             "jsonl_path": session.jsonl_path().to_string_lossy(),
-            "finalized": args.is_final,
+            "finalized": outcome.finalized,
         });
         println!(
             "{}",
@@ -161,7 +143,7 @@ pub fn run_log(args: LogArgs, json_output: bool) -> Result<()> {
             entry.id,
             session.jsonl_path().display()
         );
-        if args.is_final {
+        if outcome.finalized {
             println!("Session finalized: {}", session.id());
         }
     }
