@@ -30,7 +30,7 @@ use crate::git::{self, TreeEntry};
 use crate::lockfile::PublisherLock;
 use crate::path as jpath;
 use crate::session::SessionId;
-use crate::state::{LogLevel, PublisherState, append_log};
+use crate::state::{LastError, LogLevel, PublisherState, append_log};
 use crate::{JournalError, Result};
 
 /// Knobs for one [`publish_ready_sessions`] call.
@@ -38,9 +38,12 @@ use crate::{JournalError, Result};
 pub struct PublishOptions {
     /// Plan only; don't write refs, don't push, don't clean up.
     pub dry_run: bool,
-    /// Push to the remote after commit. When false, the ref is created
-    /// locally and the open files are *not* deleted (since they haven't
-    /// safely landed on a remote).
+    /// Push to the remote after commit. When false, the ref is still
+    /// created locally and the open-session files are still removed —
+    /// we accept that the user is intentionally going offline and will
+    /// push the ref themselves later (`git push origin
+    /// refs/tempyr/journals/*`). Use [`dry_run`](Self::dry_run) instead
+    /// if you want a non-destructive plan.
     pub push: bool,
     /// Remote name for push. Slice 1 hardcodes "origin" via the CLI default.
     pub remote: String,
@@ -135,32 +138,51 @@ pub fn publish_ready_sessions(
 
     for id in ready_ids {
         let id_str = id.as_str().to_string();
-        let result = publish_one(common_dir, repo_root, &id, opts);
-        match &result {
-            Ok(SessionStatus::Published { .. }) => {
-                state.record_commit();
-                if opts.push {
-                    state.record_push_ok(Utc::now());
-                }
-                let _ = state.save(common_dir);
-            }
-            Ok(SessionStatus::AlreadyArchived { pushed: true, .. }) => {
-                state.record_push_ok(Utc::now());
-                let _ = state.save(common_dir);
-            }
-            _ => {}
+        let OneOutcome { progress, result } = publish_one(common_dir, repo_root, &id, opts);
+
+        // Record milestones at the moment they happened, regardless of
+        // whether a later phase failed. This is what lets state.json
+        // reflect "commit landed but push didn't" instead of attributing
+        // every failure to push.
+        if progress.fresh_commit {
+            state.record_commit();
         }
+        if progress.pushed {
+            state.record_push_ok(Utc::now());
+        }
+
         let status = match result {
             Ok(s) => s,
             Err(e) => {
-                state.record_push_failure(Utc::now(), "publish", &e.to_string());
-                let _ = state.save(common_dir);
+                // Was this actually a push failure? Bump push counters
+                // only if so; otherwise just stamp last_error so the
+                // commit / read / cleanup phases don't pollute the push
+                // failure rate.
+                let phase_op = if progress.committed_now && opts.push && !progress.pushed {
+                    "push"
+                } else if progress.committed_now {
+                    // Commit landed (and maybe push too) but a later
+                    // step like cleanup failed.
+                    "cleanup"
+                } else {
+                    "commit"
+                };
+                if phase_op == "push" {
+                    state.record_push_failure(Utc::now(), phase_op, &e.to_string());
+                } else {
+                    state.last_error = Some(LastError {
+                        ts_utc: Utc::now(),
+                        op: phase_op.to_string(),
+                        message: e.to_string(),
+                    });
+                }
                 let _ = append_log(
                     common_dir,
                     LogLevel::Error,
                     "publish_failed",
                     json_map([
                         ("session_id", json!(id_str.clone())),
+                        ("phase", json!(phase_op)),
                         ("error", json!(e.to_string())),
                     ]),
                     crate::state::DEFAULT_MAX_LOG_BYTES,
@@ -170,6 +192,7 @@ pub fn publish_ready_sessions(
                 }
             }
         };
+        let _ = state.save(common_dir);
         report.results.push((id_str, status));
     }
 
@@ -224,25 +247,55 @@ fn scan_ready_sessions(common_dir: &Path) -> Result<Vec<SessionId>> {
     Ok(ids)
 }
 
+/// Per-session phase tracking so the caller can record state milestones
+/// the moment they happen (commit succeeded, push succeeded), even when
+/// a later phase fails. Without this we'd lose the fact that commit
+/// landed when push fails, and `state.json` would falsely look like
+/// nothing was committed.
+#[derive(Debug, Default, Clone, Copy)]
+struct Progress {
+    /// True once the archive ref points at a committed tree for this
+    /// session. Either we just committed it, or it pre-existed from a
+    /// prior crashed run (idempotency path).
+    committed_now: bool,
+    /// True once `git push` for this ref returned success.
+    pushed: bool,
+    /// True if [`committed_now`] reflects a brand-new commit (vs an
+    /// already-archived ref). Drives whether `commits_total` should
+    /// increment.
+    fresh_commit: bool,
+}
+
+/// Result of one [`publish_one`] call: whichever phases completed, plus
+/// the success status or the error that stopped us. The caller persists
+/// state milestones based on `progress` and chooses the right
+/// `record_*` variant for the failure phase.
+struct OneOutcome {
+    progress: Progress,
+    result: Result<SessionStatus>,
+}
+
 fn publish_one(
     common_dir: &Path,
     repo_root: &Path,
     id: &SessionId,
     opts: &PublishOptions,
+) -> OneOutcome {
+    let mut progress = Progress::default();
+    let result = publish_one_inner(common_dir, repo_root, id, opts, &mut progress);
+    OneOutcome { progress, result }
+}
+
+fn publish_one_inner(
+    common_dir: &Path,
+    repo_root: &Path,
+    id: &SessionId,
+    opts: &PublishOptions,
+    progress: &mut Progress,
 ) -> Result<SessionStatus> {
     let jsonl_path = jpath::session_jsonl_path(common_dir, id.as_str());
     let meta_path = jpath::session_meta_path(common_dir, id.as_str());
     let ready_path = jpath::session_ready_marker(common_dir, id.as_str());
-
-    // Sanity check: `.ready` exists but `.jsonl` is missing → orphan
-    // marker. Treat as a failure so the human notices.
-    if !jsonl_path.exists() {
-        return Err(JournalError::InvalidEntry(format!(
-            "session {} marked ready but {} is missing",
-            id,
-            jsonl_path.display()
-        )));
-    }
 
     let refname = id.archive_ref_path();
 
@@ -251,10 +304,25 @@ fn publish_one(
     }
 
     // Idempotency: ref already there from a prior crashed run? Skip the
-    // commit step; we only need to (re)push and clean up.
+    // commit step; we only need to (re)push and clean up. Crucially,
+    // the orphan check below must run *after* this — if a session is
+    // already archived but its jsonl was somehow removed (e.g. partial
+    // cleanup that left .ready), we still want to retry push/cleanup
+    // instead of erroring out.
     let already_existed = git::ref_exists(repo_root, &refname)?;
 
     if !already_existed {
+        // Sanity check: `.ready` exists but `.jsonl` is missing and we
+        // haven't archived it yet → orphan marker. Treat as failure so
+        // the human notices.
+        if !jsonl_path.exists() {
+            return Err(JournalError::InvalidEntry(format!(
+                "session {} marked ready but {} is missing",
+                id,
+                jsonl_path.display()
+            )));
+        }
+
         let jsonl_bytes = std::fs::read(&jsonl_path)?;
         // meta.json is part of the archived tree; an unreadable or
         // missing sidecar is a real problem (corrupted session, half-
@@ -287,18 +355,23 @@ fn publish_one(
         let commit_message = format!("tempyr journal: {id}");
         let commit_sha = git::commit_tree(repo_root, &tree_sha, &commit_message)?;
         git::update_ref(repo_root, &refname, &commit_sha)?;
+        // Mark commit done *before* attempting push: if push fails next,
+        // the caller still knows the ref landed locally.
+        progress.fresh_commit = true;
     }
+    progress.committed_now = true;
 
     let mut pushed = false;
     if opts.push {
         let refspec = format!("{refname}:{refname}");
         git::push_ref(repo_root, &opts.remote, &refspec, git::DEFAULT_TIMEOUT)?;
         pushed = true;
+        progress.pushed = true;
     }
 
-    // Cleanup: only remove local files when we're sure the ref reached
-    // the remote (or push was explicitly disabled and we accept the user
-    // pushing later via `git push origin refs/tempyr/journals/*`).
+    // Cleanup: see the `push` field doc — when push is disabled we still
+    // remove the open-session files because the user has accepted that
+    // they'll push the local ref themselves later.
     if pushed || !opts.push {
         cleanup_session_files(&jsonl_path, &meta_path, &ready_path)?;
     }
@@ -498,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn no_push_creates_ref_but_keeps_local_files() {
+    fn no_push_creates_ref_locally_and_skips_remote() {
         let fx = Fixture::new();
         let opts = PublishOptions {
             push: false,
@@ -564,10 +637,19 @@ mod tests {
         assert!(jpath::session_ready_marker(&fx.common_dir, fx.session_id.as_str()).exists());
         assert!(jpath::session_jsonl_path(&fx.common_dir, fx.session_id.as_str()).exists());
 
-        // state.json records the failure.
+        // state.json records the failure correctly attributed to push,
+        // *and* records that the commit landed (which the pre-phase-
+        // tracking version of this code lost — every error mapped to
+        // record_push_failure regardless of the actual phase).
         let state = PublisherState::load(&fx.common_dir).unwrap();
         assert!(state.last_error.is_some());
+        let last_err = state.last_error.as_ref().unwrap();
+        assert_eq!(last_err.op, "push", "failure should be attributed to push");
         assert_eq!(state.push_failures_total, 1);
+        assert_eq!(
+            state.commits_total, 1,
+            "commit phase landed before push failed; commits_total must reflect that"
+        );
     }
 
     #[test]
@@ -642,6 +724,21 @@ mod tests {
         // The orphan fails; the real one publishes.
         assert_eq!(report.published_count(), 1);
         assert_eq!(report.failed_count(), 1);
+
+        // The orphan failed *before* commit, so push counters must not
+        // be polluted. (The successful sibling session — which runs
+        // chronologically after the orphan — bumps commits and pushes
+        // and incidentally clears last_error via record_push_ok, so we
+        // can't assert on last_error here. The non-pollution check is
+        // the load-bearing one: pre-fix, every error mapped to
+        // record_push_failure regardless of phase.)
+        let state = PublisherState::load(&fx.common_dir).unwrap();
+        assert_eq!(state.commits_total, 1);
+        assert_eq!(state.pushes_total, 1);
+        assert_eq!(
+            state.push_failures_total, 0,
+            "non-push failures must not bump push_failures_total"
+        );
     }
 
     #[test]
