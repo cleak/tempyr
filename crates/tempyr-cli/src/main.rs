@@ -244,6 +244,12 @@ pub enum Commands {
         action: LinearAction,
     },
 
+    /// Session journal: capture and inspect agent reasoning
+    Journal {
+        #[command(subcommand)]
+        action: JournalAction,
+    },
+
     /// Update managed .claude/ artifacts to match current tempyr version
     Update {
         /// Only check staleness, don't write (exit code 1 if stale)
@@ -328,6 +334,17 @@ pub enum LinearAction {
     Link { node_id: String, linear_id: String },
     /// Unlink a node from Linear (does not delete the Linear issue)
     Unlink { node_id: String },
+}
+
+#[derive(Subcommand)]
+pub enum JournalAction {
+    /// Append one moment of agent reasoning to the session journal.
+    ///
+    /// Kinds: plan | finding | decision | dead_end | assumption | question | risk | outcome.
+    /// Required for `decision`: --chosen, --rationale, --reversible <true|false> (and detail >= 50 chars).
+    /// Required for `dead_end`: --approach, --failure-mode (and detail >= 50 chars).
+    /// Required for `assumption`: --polarity.
+    Log(Box<commands::journal_cmd::LogArgs>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -662,6 +679,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::Journal { action } => match action {
+            JournalAction::Log(args) => commands::journal_cmd::run_log(*args, cli.json),
+        },
         Commands::Update { check, force } => commands::update::run(check, force),
         Commands::Doctor => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;

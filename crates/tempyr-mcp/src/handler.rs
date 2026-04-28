@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use std::str::FromStr;
 use tempyr_core::graph::Graph;
 use tempyr_core::id;
 use tempyr_core::ops;
@@ -29,6 +30,9 @@ use tempyr_interview::proposer;
 use tempyr_interview::session::{
     EdgeSource, ExistingNodeSummary, InterviewSession, NodePatch, TentativeEdge, TentativeNode,
 };
+
+use tempyr_journal::path as jpath;
+use tempyr_journal::{Confidence, EntryDraft, Kind, Polarity, Session, Severity, write_entry};
 use tempyr_linear::client::LinearClient;
 use tempyr_linear::config::LinearConfig;
 use tempyr_linear::mapping::StatusMapper;
@@ -601,13 +605,102 @@ fn build_status_mapper_from_config(config: &LinearConfig) -> StatusMapper {
     StatusMapper::new(states)
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalLogParams {
+    /// One of: plan | finding | decision | dead_end | assumption | question | risk | outcome.
+    /// Snake_case. Capitalization is normalized.
+    pub kind: String,
+    /// Short title (20-200 chars). One sentence describing the moment.
+    pub summary: String,
+    /// Optional longer body. REQUIRED for `decision` and `dead_end` (50+ chars).
+    pub detail: Option<String>,
+    /// User-defined labels. Use the `tool` tag for tool quirks/findings.
+    pub tags: Option<Vec<String>>,
+    /// File paths relevant to this entry, normalized relative to the repo root.
+    pub files: Option<Vec<String>>,
+    /// Graph node IDs this entry references (e.g. ["task-foo-abc123"]).
+    pub references: Option<Vec<String>>,
+    /// True if this entry is from in-flight state that may roll back. Default false.
+    pub provisional: Option<bool>,
+    /// "low" | "medium" | "high".
+    pub confidence: Option<String>,
+    /// "info" | "warn" | "high" | "blocker". Recommended for `risk`/`dead_end`.
+    pub severity: Option<String>,
+
+    // ---- decision-specific ----
+    /// `decision`: alternatives considered.
+    pub alternatives: Option<Vec<String>>,
+    /// `decision`: which alternative was chosen.
+    pub chosen: Option<String>,
+    /// `decision`: rationale for the choice.
+    pub rationale: Option<String>,
+    /// `decision`: is the decision reversible?
+    pub reversible: Option<bool>,
+
+    // ---- dead_end-specific ----
+    /// `dead_end`: the approach that was tried.
+    pub approach: Option<String>,
+    /// `dead_end`: how/why it failed.
+    pub failure_mode: Option<String>,
+    /// `dead_end`: a suggested next direction, if any.
+    pub next_to_try: Option<String>,
+
+    // ---- assumption-specific ----
+    /// `assumption`: "positive" | "negative" | "unknown".
+    pub polarity: Option<String>,
+
+    // ---- outcome-specific ----
+    /// `outcome`: did the work succeed?
+    pub passed: Option<bool>,
+    /// `outcome`: did the build pass?
+    pub build_ok: Option<bool>,
+    /// `outcome`: commit SHA, if any.
+    pub commit_sha: Option<String>,
+    /// `outcome`: marks the final outcome of a session. Triggers publish.
+    /// Renamed to `final` in JSON; `final` is a Rust reserved keyword.
+    #[serde(rename = "final")]
+    pub is_final: Option<bool>,
+}
+
+// Journal helper functions
+
+fn parse_opt<T: FromStr<Err = tempyr_journal::JournalError>>(
+    s: Option<&str>,
+) -> Result<Option<T>, String> {
+    s.map(T::from_str).transpose().map_err(|e| e.to_string())
+}
+
 // Server
+
+/// Default agent identity when the embedder doesn't configure one. Most
+/// callers go through Claude Code; embedders that drive the server from a
+/// different agent override this via [`TempyrServer::with_agent_id`].
+pub const DEFAULT_AGENT_ID: &str = "claude";
 
 #[derive(Clone)]
 pub struct TempyrServer {
     tool_router: ToolRouter<Self>,
     relative_project_root_fallback: Option<PathBuf>,
     project_anchor_state: ProjectAnchorState,
+    /// Cached journal session, keyed by `(common_dir, worktree_top, agent_id)`.
+    /// Opened lazily on the first `journal_log` call. The agent_id component
+    /// matters because [`Clone`] + [`with_agent_id`] can produce two server
+    /// instances that share this `Arc<Mutex<...>>` cache but log under
+    /// different agent identities — without the agent_id key one would
+    /// silently inherit the other's session.
+    journal_session: Arc<Mutex<Option<JournalSessionCache>>>,
+    /// Agent identity recorded on every journal entry (`SessionMeta.agent` and
+    /// `Entry.agent`). Defaults to [`DEFAULT_AGENT_ID`]. Different MCP clients
+    /// (Codex, etc.) should override this so journals are correctly attributed.
+    agent_id: String,
+}
+
+#[derive(Clone)]
+struct JournalSessionCache {
+    common_dir: PathBuf,
+    worktree_top: PathBuf,
+    agent_id: String,
+    session: Session,
 }
 
 #[tool_router]
@@ -617,11 +710,25 @@ impl TempyrServer {
             tool_router: Self::tool_router(),
             relative_project_root_fallback: None,
             project_anchor_state: ProjectAnchorState::ready(),
+            journal_session: Arc::new(Mutex::new(None)),
+            agent_id: DEFAULT_AGENT_ID.to_string(),
         }
     }
 
     pub(crate) fn with_relative_project_root_fallback(mut self, fallback: Option<PathBuf>) -> Self {
         self.relative_project_root_fallback = fallback;
+        self
+    }
+
+    /// Override the agent identity recorded on every journal entry. Use this
+    /// when embedding the server in a non-Claude agent so journals attribute
+    /// entries correctly. Empty strings are rejected (we don't want
+    /// session_id collisions silently merging into one agent's session).
+    pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {
+        let id: String = agent_id.into();
+        if !id.trim().is_empty() {
+            self.agent_id = id;
+        }
         self
     }
 
@@ -637,6 +744,45 @@ impl TempyrServer {
     fn find_project(&self) -> Result<(PathBuf, PathBuf, Schema), String> {
         self.project_anchor_state.wait_ready();
         find_project_now()
+    }
+
+    /// Get the current journal session for `(common_dir, worktree_top)`,
+    /// opening one lazily on first use and caching it. The cache is replaced
+    /// when:
+    /// - it's for a different repo/worktree, or
+    /// - the cached session is finalized (`.ready` marker present), so the
+    ///   next entry must not append to a closed session that the publisher
+    ///   may already be processing.
+    fn journal_session_or_open(
+        &self,
+        common_dir: &Path,
+        worktree_top: &Path,
+    ) -> Result<Session, String> {
+        let mut guard = self
+            .journal_session
+            .lock()
+            .map_err(|e| format!("journal session mutex poisoned: {e}"))?;
+        if let Some(cache) = guard.as_ref()
+            && cache.common_dir == common_dir
+            && cache.worktree_top == worktree_top
+            && cache.agent_id == self.agent_id
+            && !cache.session.is_ready()
+        {
+            return Ok(cache.session.clone());
+        }
+        // Reuse an active on-disk session if one exists for this
+        // (worktree, agent) pair, so a freshly-launched MCP server picks up
+        // a session that previous CLI calls or a prior server already started.
+        // open_or_resume itself skips finalized sessions.
+        let session = Session::open_or_resume(common_dir, worktree_top, &self.agent_id)
+            .map_err(|e| format!("open journal session: {e}"))?;
+        *guard = Some(JournalSessionCache {
+            common_dir: common_dir.to_path_buf(),
+            worktree_top: worktree_top.to_path_buf(),
+            agent_id: self.agent_id.clone(),
+            session: session.clone(),
+        });
+        Ok(session)
     }
 
     pub(crate) async fn try_anchor_from_client_roots(&self, peer: Peer<RoleServer>) {
@@ -1594,6 +1740,63 @@ impl TempyrServer {
         };
         let report = health::build_report(&inputs);
         serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "journal_log",
+        description = "Append one moment of agent reasoning to the session journal: a plan, finding, decision, dead end, assumption, question, risk, or outcome. Cheap and append-only — log freely, including failures and surprises. This is NOT how knowledge graduates into the project; promote durable facts via graph_add_node.\n\nKinds:\n  plan       — what you're about to attempt and why\n  finding    — something you learned by reading code or running a tool\n  assumption — something you're assuming without verifying (polarity required)\n  question   — something you don't know yet — to ask or look up\n  decision   — a choice with reasoning (chosen, rationale, reversible required; detail ≥ 50 chars)\n  dead_end   — an approach that didn't work (approach, failure_mode required; detail ≥ 50 chars). HIGH-VALUE — future agents read these to avoid repeating you.\n  risk       — a potential problem identified but not yet hit (severity recommended)\n  outcome    — the result of work; set final=true on the session-closing entry to trigger publish\n\nLog freely on dead ends and decisions — the system is empty if you don't. Successes are less valuable than failures here. For curated knowledge that should outlive this session, use graph_add_node."
+    )]
+    fn journal_log(&self, Parameters(p): Parameters<JournalLogParams>) -> Result<String, String> {
+        let kind = Kind::parse_helpful(&p.kind).map_err(|e| e.to_string())?;
+
+        // Resolve the repo through the anchored project, so journal_log uses
+        // the same root/env path as every other tool (find_project() also
+        // blocks until the deferred client-roots anchor is ready).
+        let (graph_dir, _gf_dir, _schema) = self.find_project()?;
+        let project_root = graph_dir
+            .parent()
+            .ok_or_else(|| "Failed to resolve project root from graph dir".to_string())?
+            .to_path_buf();
+        let common_dir = jpath::git_common_dir(&project_root).map_err(|e| e.to_string())?;
+        let worktree_top = jpath::repo_toplevel(&project_root).map_err(|e| e.to_string())?;
+
+        let session = self.journal_session_or_open(&common_dir, &worktree_top)?;
+
+        let cwd = std::env::current_dir().ok();
+        let draft = EntryDraft {
+            kind,
+            summary: p.summary,
+            detail: p.detail,
+            tags: p.tags.unwrap_or_default(),
+            files: p.files.unwrap_or_default(),
+            references: p.references.unwrap_or_default(),
+            cwd,
+            provisional: p.provisional.unwrap_or(false),
+            confidence: parse_opt::<Confidence>(p.confidence.as_deref())?,
+            severity: parse_opt::<Severity>(p.severity.as_deref())?,
+            alternatives: p.alternatives.unwrap_or_default(),
+            chosen: p.chosen,
+            rationale: p.rationale,
+            reversible: p.reversible,
+            approach: p.approach,
+            failure_mode: p.failure_mode,
+            next_to_try: p.next_to_try,
+            polarity: parse_opt::<Polarity>(p.polarity.as_deref())?,
+            passed: p.passed,
+            build_ok: p.build_ok,
+            commit_sha: p.commit_sha,
+            is_final: p.is_final.unwrap_or(false),
+        };
+
+        let outcome = write_entry(&session, &worktree_top, draft).map_err(|e| e.to_string())?;
+
+        Ok(serde_json::to_string_pretty(&json!({
+            "id": outcome.entry.id,
+            "session_id": session.id().as_str(),
+            "kind": outcome.entry.kind.as_str(),
+            "finalized": outcome.finalized,
+        }))
+        .unwrap_or_default())
     }
 
     #[tool(
