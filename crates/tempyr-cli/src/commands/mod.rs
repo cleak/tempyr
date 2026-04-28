@@ -12,6 +12,7 @@ pub mod import;
 pub mod index_cmd;
 pub mod init;
 pub mod interview_cmd;
+pub mod journal_cmd;
 pub mod linear_cmd;
 pub mod list;
 pub mod managed;

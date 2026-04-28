@@ -29,6 +29,8 @@ use tempyr_interview::proposer;
 use tempyr_interview::session::{
     EdgeSource, ExistingNodeSummary, InterviewSession, NodePatch, TentativeEdge, TentativeNode,
 };
+use tempyr_journal::path as jpath;
+use tempyr_journal::{Confidence, Entry, Kind, Polarity, Redactor, Session, Severity, append};
 use tempyr_linear::client::LinearClient;
 use tempyr_linear::config::LinearConfig;
 use tempyr_linear::mapping::StatusMapper;
@@ -601,6 +603,122 @@ fn build_status_mapper_from_config(config: &LinearConfig) -> StatusMapper {
     StatusMapper::new(states)
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalLogParams {
+    /// One of: plan | finding | decision | dead_end | assumption | question | risk | outcome.
+    /// Snake_case. Capitalization is normalized.
+    pub kind: String,
+    /// Short title (20-200 chars). One sentence describing the moment.
+    pub summary: String,
+    /// Optional longer body. REQUIRED for `decision` and `dead_end` (50+ chars).
+    pub detail: Option<String>,
+    /// User-defined labels. Use the `tool` tag for tool quirks/findings.
+    pub tags: Option<Vec<String>>,
+    /// File paths relevant to this entry, normalized relative to the repo root.
+    pub files: Option<Vec<String>>,
+    /// Graph node IDs this entry references (e.g. ["task-foo-abc123"]).
+    pub references: Option<Vec<String>>,
+    /// True if this entry is from in-flight state that may roll back. Default false.
+    pub provisional: Option<bool>,
+    /// "low" | "medium" | "high".
+    pub confidence: Option<String>,
+    /// "info" | "warn" | "high" | "blocker". Recommended for `risk`/`dead_end`.
+    pub severity: Option<String>,
+
+    // ---- decision-specific ----
+    /// `decision`: alternatives considered.
+    pub alternatives: Option<Vec<String>>,
+    /// `decision`: which alternative was chosen.
+    pub chosen: Option<String>,
+    /// `decision`: rationale for the choice.
+    pub rationale: Option<String>,
+    /// `decision`: is the decision reversible?
+    pub reversible: Option<bool>,
+
+    // ---- dead_end-specific ----
+    /// `dead_end`: the approach that was tried.
+    pub approach: Option<String>,
+    /// `dead_end`: how/why it failed.
+    pub failure_mode: Option<String>,
+    /// `dead_end`: a suggested next direction, if any.
+    pub next_to_try: Option<String>,
+
+    // ---- assumption-specific ----
+    /// `assumption`: "positive" | "negative" | "unknown".
+    pub polarity: Option<String>,
+
+    // ---- outcome-specific ----
+    /// `outcome`: did the work succeed?
+    pub passed: Option<bool>,
+    /// `outcome`: did the build pass?
+    pub build_ok: Option<bool>,
+    /// `outcome`: commit SHA, if any.
+    pub commit_sha: Option<String>,
+    /// `outcome`: marks the final outcome of a session. Triggers publish.
+    /// Renamed in JSON to `final` so blueberry-format readers see what they expect.
+    #[serde(rename = "final")]
+    pub is_final: Option<bool>,
+}
+
+// Journal helper functions
+
+fn parse_confidence(s: Option<&str>) -> Result<Option<Confidence>, String> {
+    match s {
+        None => Ok(None),
+        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "low" => Ok(Some(Confidence::Low)),
+            "medium" | "med" => Ok(Some(Confidence::Medium)),
+            "high" => Ok(Some(Confidence::High)),
+            other => Err(format!(
+                "invalid confidence {other:?}: expected low | medium | high"
+            )),
+        },
+    }
+}
+
+fn parse_severity(s: Option<&str>) -> Result<Option<Severity>, String> {
+    match s {
+        None => Ok(None),
+        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "info" => Ok(Some(Severity::Info)),
+            "warn" | "warning" => Ok(Some(Severity::Warn)),
+            "high" => Ok(Some(Severity::High)),
+            "blocker" => Ok(Some(Severity::Blocker)),
+            other => Err(format!(
+                "invalid severity {other:?}: expected info | warn | high | blocker"
+            )),
+        },
+    }
+}
+
+fn parse_polarity(s: Option<&str>) -> Result<Option<Polarity>, String> {
+    match s {
+        None => Ok(None),
+        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+            "positive" | "pos" => Ok(Some(Polarity::Positive)),
+            "negative" | "neg" => Ok(Some(Polarity::Negative)),
+            "unknown" => Ok(Some(Polarity::Unknown)),
+            other => Err(format!(
+                "invalid polarity {other:?}: expected positive | negative | unknown"
+            )),
+        },
+    }
+}
+
+/// Best-effort relative path of `cwd` under `worktree_top`. Falls back to the
+/// absolute path string when the working directory is outside the repo (e.g.
+/// the user runs the CLI from a sibling directory). Skipped entirely when the
+/// two paths are identical to avoid a noisy `cwd: "."`.
+fn relative_cwd(cwd: &Path, worktree_top: &Path) -> Option<String> {
+    if cwd == worktree_top {
+        return None;
+    }
+    cwd.strip_prefix(worktree_top)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .or_else(|| Some(cwd.to_string_lossy().to_string()))
+}
+
 // Server
 
 #[derive(Clone)]
@@ -608,6 +726,9 @@ pub struct TempyrServer {
     tool_router: ToolRouter<Self>,
     relative_project_root_fallback: Option<PathBuf>,
     project_anchor_state: ProjectAnchorState,
+    /// Lazily-initialized current journal session for this server process.
+    /// Opened on the first journal_log call and reused thereafter.
+    journal_session: Arc<Mutex<Option<Session>>>,
 }
 
 #[tool_router]
@@ -617,6 +738,7 @@ impl TempyrServer {
             tool_router: Self::tool_router(),
             relative_project_root_fallback: None,
             project_anchor_state: ProjectAnchorState::ready(),
+            journal_session: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -637,6 +759,26 @@ impl TempyrServer {
     fn find_project(&self) -> Result<(PathBuf, PathBuf, Schema), String> {
         self.project_anchor_state.wait_ready();
         find_project_now()
+    }
+
+    /// Get the current journal session, opening one lazily on first use.
+    /// The session is cached for the lifetime of this server process.
+    fn journal_session_or_open(
+        &self,
+        common_dir: &Path,
+        worktree_top: &Path,
+    ) -> Result<Session, String> {
+        let mut guard = self
+            .journal_session
+            .lock()
+            .map_err(|e| format!("journal session mutex poisoned: {e}"))?;
+        if let Some(s) = guard.as_ref() {
+            return Ok(s.clone());
+        }
+        let session = Session::open(common_dir, worktree_top, "claude")
+            .map_err(|e| format!("open journal session: {e}"))?;
+        *guard = Some(session.clone());
+        Ok(session)
     }
 
     pub(crate) async fn try_anchor_from_client_roots(&self, peer: Peer<RoleServer>) {
@@ -1594,6 +1736,73 @@ impl TempyrServer {
         };
         let report = health::build_report(&inputs);
         serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "journal_log",
+        description = "Append one moment of agent reasoning to the session journal: a plan, finding, decision, dead end, assumption, question, risk, or outcome. Cheap and append-only — log freely, including failures and surprises. This is NOT how knowledge graduates into the project; promote durable facts via graph_add_node.\n\nKinds:\n  plan       — what you're about to attempt and why\n  finding    — something you learned by reading code or running a tool\n  assumption — something you're assuming without verifying (polarity required)\n  question   — something you don't know yet — to ask or look up\n  decision   — a choice with reasoning (chosen, rationale, reversible required; detail ≥ 50 chars)\n  dead_end   — an approach that didn't work (approach, failure_mode required; detail ≥ 50 chars). HIGH-VALUE — future agents read these to avoid repeating you.\n  risk       — a potential problem identified but not yet hit (severity recommended)\n  outcome    — the result of work; set final=true on the session-closing entry to trigger publish\n\nLog freely on dead ends and decisions — the system is empty if you don't. Successes are less valuable than failures here. For curated knowledge, use graph_add_node; for past reasoning, use journal_search."
+    )]
+    fn journal_log(
+        &self,
+        Parameters(p): Parameters<JournalLogParams>,
+    ) -> Result<String, String> {
+        use std::env;
+
+        let kind = Kind::parse_helpful(&p.kind).map_err(|e| e.to_string())?;
+
+        let cwd = env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+        let common_dir = jpath::git_common_dir(&cwd).map_err(|e| e.to_string())?;
+        let worktree_top = jpath::repo_toplevel(&cwd).map_err(|e| e.to_string())?;
+
+        let session = self.journal_session_or_open(&common_dir, &worktree_top)?;
+
+        let mut entry = Entry {
+            schema_version: tempyr_journal::SCHEMA_VERSION,
+            id: Entry::new_id(),
+            ts: chrono::Utc::now(),
+            agent: "claude".to_string(),
+            kind,
+            summary: p.summary,
+            detail: p.detail,
+            tags: p.tags.unwrap_or_default(),
+            files: p.files.unwrap_or_default(),
+            references: p.references.unwrap_or_default(),
+            session_id: session.id().as_str().to_string(),
+            worktree_hash: session.meta().worktree_hash.clone(),
+            branch: session.meta().branch.clone(),
+            head: session.meta().head.clone(),
+            cwd: relative_cwd(&cwd, &worktree_top),
+            provisional: p.provisional.unwrap_or(false),
+            confidence: parse_confidence(p.confidence.as_deref())?,
+            severity: parse_severity(p.severity.as_deref())?,
+            alternatives: p.alternatives.unwrap_or_default(),
+            chosen: p.chosen,
+            rationale: p.rationale,
+            reversible: p.reversible,
+            approach: p.approach,
+            failure_mode: p.failure_mode,
+            next_to_try: p.next_to_try,
+            polarity: parse_polarity(p.polarity.as_deref())?,
+            passed: p.passed,
+            tests: None,
+            build_ok: p.build_ok,
+            commit_sha: p.commit_sha,
+            is_final: p.is_final.unwrap_or(false),
+        };
+
+        // Redaction first (default Block mode rejects secrets), then validation
+        // and write (the writer validates per-kind structured fields).
+        Redactor::default()
+            .enforce(&mut entry)
+            .map_err(|e| e.to_string())?;
+        append(&session, &entry).map_err(|e| e.to_string())?;
+
+        Ok(serde_json::to_string_pretty(&json!({
+            "id": entry.id,
+            "session_id": session.id().as_str(),
+            "kind": entry.kind.as_str(),
+        }))
+        .unwrap_or_default())
     }
 
     #[tool(

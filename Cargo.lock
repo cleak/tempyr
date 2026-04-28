@@ -3117,6 +3117,7 @@ dependencies = [
  "tempyr-core",
  "tempyr-index",
  "tempyr-interview",
+ "tempyr-journal",
  "tempyr-linear",
  "tempyr-mcp",
  "tempyr-render",
@@ -3180,6 +3181,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempyr-journal"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "tempyr-linear"
 version = "0.1.0"
 dependencies = [
@@ -3200,6 +3215,7 @@ name = "tempyr-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "libc",
  "rmcp",
  "schemars",
@@ -3208,6 +3224,7 @@ dependencies = [
  "tempyr-core",
  "tempyr-index",
  "tempyr-interview",
+ "tempyr-journal",
  "tempyr-linear",
  "tempyr-render",
  "tokio",
