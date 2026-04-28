@@ -7,10 +7,12 @@
 //!
 //! Field ordering in the struct follows serialization order for readable JSONL.
 
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::Kind;
+use crate::{JournalError, Kind};
 
 /// JSONL schema version. Bump when making breaking changes to the field set.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -24,6 +26,20 @@ pub enum Confidence {
     High,
 }
 
+impl FromStr for Confidence {
+    type Err = JournalError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Ok(Confidence::Low),
+            "medium" | "med" => Ok(Confidence::Medium),
+            "high" => Ok(Confidence::High),
+            other => Err(JournalError::InvalidEntry(format!(
+                "invalid confidence {other:?}: expected low | medium | high"
+            ))),
+        }
+    }
+}
+
 /// Severity classification for risks, dead ends, and outcomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +48,21 @@ pub enum Severity {
     Warn,
     High,
     Blocker,
+}
+
+impl FromStr for Severity {
+    type Err = JournalError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "info" => Ok(Severity::Info),
+            "warn" | "warning" => Ok(Severity::Warn),
+            "high" => Ok(Severity::High),
+            "blocker" => Ok(Severity::Blocker),
+            other => Err(JournalError::InvalidEntry(format!(
+                "invalid severity {other:?}: expected info | warn | high | blocker"
+            ))),
+        }
+    }
 }
 
 /// Direction of an assumption: is the assumed thing helpful, harmful, or
@@ -44,11 +75,18 @@ pub enum Polarity {
     Unknown,
 }
 
-/// Test result counts for outcome entries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TestResults {
-    pub pass: u32,
-    pub fail: u32,
+impl FromStr for Polarity {
+    type Err = JournalError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "positive" | "pos" => Ok(Polarity::Positive),
+            "negative" | "neg" => Ok(Polarity::Negative),
+            "unknown" => Ok(Polarity::Unknown),
+            other => Err(JournalError::InvalidEntry(format!(
+                "invalid polarity {other:?}: expected positive | negative | unknown"
+            ))),
+        }
+    }
 }
 
 /// One journal entry. Serialized as a single line of JSON in a JSONL file.
@@ -84,8 +122,8 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 
-    /// User-defined labels. `tool` is a reserved tag (replaces the deprecated
-    /// `tool` kind from blueberry).
+    /// User-defined labels. The `tool` tag is conventional for tool quirks
+    /// and gotchas (factored out of `kind` to avoid double-classification).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
 
@@ -170,10 +208,6 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub passed: Option<bool>,
 
-    /// `outcome`: test results, if applicable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tests: Option<TestResults>,
-
     /// `outcome`: did the build succeed, if applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_ok: Option<bool>,
@@ -197,6 +231,45 @@ impl Entry {
     /// Generate a fresh entry ID. Format: `j-<uuid_v4_simple>`.
     pub fn new_id() -> String {
         format!("j-{}", uuid::Uuid::new_v4().simple())
+    }
+
+    /// Construct an entry whose required core + session-derived fields are
+    /// populated, with all optional fields empty. Callers fill in `summary`,
+    /// `detail`, kind-specific fields, and any optional metadata before
+    /// validation/append.
+    pub fn for_session(kind: Kind, summary: String, session: &crate::Session) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            id: Self::new_id(),
+            ts: Utc::now(),
+            agent: session.meta().agent.clone(),
+            kind,
+            summary,
+            detail: None,
+            tags: Vec::new(),
+            files: Vec::new(),
+            references: Vec::new(),
+            session_id: session.id().as_str().to_string(),
+            worktree_hash: session.meta().worktree_hash.clone(),
+            branch: session.meta().branch.clone(),
+            head: session.meta().head.clone(),
+            cwd: None,
+            provisional: false,
+            confidence: None,
+            severity: None,
+            alternatives: Vec::new(),
+            chosen: None,
+            rationale: None,
+            reversible: None,
+            approach: None,
+            failure_mode: None,
+            next_to_try: None,
+            polarity: None,
+            passed: None,
+            build_ok: None,
+            commit_sha: None,
+            is_final: false,
+        }
     }
 }
 
@@ -233,7 +306,6 @@ mod tests {
             next_to_try: None,
             polarity: None,
             passed: None,
-            tests: None,
             build_ok: None,
             commit_sha: None,
             is_final: false,

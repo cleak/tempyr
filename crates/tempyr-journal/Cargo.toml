@@ -11,6 +11,7 @@ uuid = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
 regex = { workspace = true }
+strsim = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

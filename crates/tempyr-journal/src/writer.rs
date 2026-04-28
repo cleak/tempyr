@@ -21,38 +21,30 @@ use crate::entry::Entry;
 use crate::kind::validate_entry;
 use crate::{JournalError, Result};
 
-/// Append one entry to its session's JSONL. Validates first; on failure no
-/// bytes are written.
+/// Append one entry to its session's JSONL. Validates first; on failure
+/// nothing is written.
 pub fn append(session: &Session, entry: &Entry) -> Result<()> {
     validate_entry(entry)?;
     append_validated(&session.jsonl_path(), entry)
 }
 
-/// Append a pre-validated entry to a JSONL file. Lower-level entry point used
-/// by the publisher and indexer; most callers want `append`.
+/// Append a pre-validated entry. Lower-level entry point for the publisher
+/// and indexer; most callers want `append`.
 pub fn append_validated(jsonl_path: &Path, entry: &Entry) -> Result<()> {
-    // Serialize the full line in memory before touching the file. A torn
-    // write only happens if `write_all` itself fails partway (rare but
-    // possible on disk-full); callers detect that via the error and the
-    // indexer's tolerant parser skips trailing partial lines.
     let mut line = serde_json::to_vec(entry)?;
     line.push(b'\n');
 
-    // Read+append+create. The `read(true)` is required for File::lock on
-    // Windows even though we never read.
-    let file = OpenOptions::new()
+    // `read(true)` is required for `File::lock` on Windows even though we
+    // never read — see rust-lang/rust#54118.
+    let mut file = OpenOptions::new()
         .read(true)
         .append(true)
         .create(true)
         .open(jsonl_path)?;
 
     file.lock().map_err(|e| JournalError::Lock(e.to_string()))?;
-
-    // Write under lock. Bind to mutable to satisfy `write_all`'s receiver.
-    let mut file = file;
     file.write_all(&line)?;
     file.sync_data()?;
-    // Lock released on drop.
     Ok(())
 }
 
@@ -96,7 +88,6 @@ mod tests {
             next_to_try: None,
             polarity: None,
             passed: None,
-            tests: None,
             build_ok: None,
             commit_sha: None,
             is_final: false,
@@ -140,7 +131,10 @@ mod tests {
         let session = open_test_session(common.path());
 
         for i in 0..5 {
-            let e = entry_for(Kind::Plan, &format!("entry number {i} that is sufficiently long"));
+            let e = entry_for(
+                Kind::Plan,
+                &format!("entry number {i} that is sufficiently long"),
+            );
             append(&session, &e).unwrap();
         }
 
@@ -183,7 +177,10 @@ mod tests {
 
         let parsed = entries_in(&session.jsonl_path());
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].summary, "café — résumé naïve emoji 🦀 long enough");
+        assert_eq!(
+            parsed[0].summary,
+            "café — résumé naïve emoji 🦀 long enough"
+        );
     }
 
     #[test]
@@ -191,7 +188,10 @@ mod tests {
         let common = tempfile::tempdir().unwrap();
         let session = open_test_session(common.path());
 
-        let mut entry = entry_for(Kind::Finding, "summary with \nembedded\n newlines that's long enough");
+        let mut entry = entry_for(
+            Kind::Finding,
+            "summary with \nembedded\n newlines that's long enough",
+        );
         entry.detail = Some("detail\nwith\nnewlines\tand\ttabs\rand\rcontrol\0bytes".into());
         append(&session, &entry).unwrap();
 

@@ -87,7 +87,8 @@ pub fn current_head(start: &Path) -> Result<Option<String>> {
 /// path is lowercased before hashing because the FS is case-insensitive;
 /// elsewhere case is preserved.
 pub fn worktree_hash(worktree_top: &Path) -> String {
-    let canonical = canonicalize_or_keep(worktree_top).unwrap_or_else(|_| worktree_top.to_path_buf());
+    let canonical =
+        canonicalize_or_keep(worktree_top).unwrap_or_else(|_| worktree_top.to_path_buf());
     let s = canonical.to_string_lossy();
     let normalized = normalize_for_hash(&s);
     let hex = blake3::hash(normalized.as_bytes()).to_hex();
@@ -205,25 +206,42 @@ mod tests {
     fn current_dir_is_a_git_repo() {
         let cwd = env::current_dir().unwrap();
         let common = git_common_dir(&cwd).unwrap();
-        assert!(common.exists(), "common dir should exist: {}", common.display());
+        assert!(
+            common.exists(),
+            "common dir should exist: {}",
+            common.display()
+        );
         // Common dir contains HEAD (any git dir does)
         assert!(common.join("HEAD").exists() || common.join("packed-refs").exists());
     }
 
     #[test]
     fn worktree_common_dir_points_to_primary() {
-        // We're running in a worktree. The common dir should be outside our
-        // worktree's top-level directory (since worktrees share refs with the
-        // primary repo).
+        // The common dir should reflect whether we're in a primary checkout
+        // or a linked worktree:
+        //   primary:  <top>/.git is a directory; common_dir is under <top>
+        //   worktree: <top>/.git is a file; common_dir is the primary's .git
+        //             (outside the worktree's top-level)
         let cwd = env::current_dir().unwrap();
         let common = git_common_dir(&cwd).unwrap();
         let top = repo_toplevel(&cwd).unwrap();
-        // The common dir's parent (the primary repo's working tree) should
-        // not be inside our worktree's top-level. (In a non-worktree repo this
-        // would be `<repo>/.git` whose parent is the repo itself; this test
-        // is informative either way.)
-        assert!(common.exists());
-        assert!(top.exists());
+        let dot_git = top.join(".git");
+
+        if dot_git.is_file() {
+            assert!(
+                !common.starts_with(&top),
+                "worktree common_dir {} should not be under worktree top {}",
+                common.display(),
+                top.display()
+            );
+        } else {
+            assert!(
+                common.starts_with(&top),
+                "primary common_dir {} should be under repo top {}",
+                common.display(),
+                top.display()
+            );
+        }
     }
 
     #[test]
@@ -280,10 +298,7 @@ mod tests {
     #[test]
     fn paths_compose_correctly() {
         let common = PathBuf::from("/tmp/repo/.git");
-        assert_eq!(
-            tempyr_dir(&common),
-            PathBuf::from("/tmp/repo/.git/tempyr")
-        );
+        assert_eq!(tempyr_dir(&common), PathBuf::from("/tmp/repo/.git/tempyr"));
         assert_eq!(
             journals_root(&common),
             PathBuf::from("/tmp/repo/.git/tempyr/journals")

@@ -15,8 +15,10 @@
 //! The strict format also defends against path injection via session_id.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::path as jpath;
@@ -36,7 +38,12 @@ impl SessionId {
                 "worktree_hash must be 8 lowercase hex chars, got {worktree_hash:?}"
             )));
         }
-        let s = format!("{}-{}-{}", ts.format("%Y%m%d"), worktree_hash, ts.format("%H%M%S"));
+        let s = format!(
+            "{}-{}-{}",
+            ts.format("%Y%m%d"),
+            worktree_hash,
+            ts.format("%H%M%S")
+        );
         Ok(SessionId(s))
     }
 
@@ -118,11 +125,12 @@ pub struct SessionMeta {
     pub session_id: SessionId,
     pub created_utc: DateTime<Utc>,
     pub agent: String,
+    /// 8-char blake3 prefix over the canonicalized (and Windows-lowercased)
+    /// worktree path. Stable across machines for the same logical worktree.
     pub worktree_hash: String,
-    /// Repo working-tree root (canonicalized, OS-normalized).
+    /// Worktree top-level directory at session-open time. Canonicalized but
+    /// preserves case (the lowercasing is internal to `worktree_hash`).
     pub repo_root: PathBuf,
-    /// Lowercased path string used to compute `worktree_hash`.
-    pub normalized_worktree_path: String,
     pub branch: Option<String>,
     pub head: Option<String>,
 }
@@ -157,8 +165,6 @@ impl Session {
         let wt_hash = jpath::worktree_hash(worktree_top);
         let session_id = SessionId::new(ts, &wt_hash)?;
 
-        let normalized_path = worktree_top.to_string_lossy().to_string();
-
         let branch = jpath::current_branch(worktree_top).ok().flatten();
         let head = jpath::current_head(worktree_top).ok().flatten();
 
@@ -169,7 +175,6 @@ impl Session {
             agent: agent.to_string(),
             worktree_hash: wt_hash,
             repo_root: worktree_top.to_path_buf(),
-            normalized_worktree_path: normalized_path,
             branch,
             head,
         };
@@ -206,10 +211,11 @@ impl Session {
     /// open session with that ID.
     pub fn resume(common_dir: &Path, session_id: &SessionId) -> Result<Option<Self>> {
         let meta_path = jpath::session_meta_path(common_dir, session_id.as_str());
-        if !meta_path.exists() {
-            return Ok(None);
-        }
-        let bytes = std::fs::read(&meta_path)?;
+        let bytes = match std::fs::read(&meta_path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
         let meta: SessionMeta = serde_json::from_slice(&bytes)?;
         Ok(Some(Session {
             common_dir: common_dir.to_path_buf(),
@@ -265,24 +271,17 @@ impl Session {
 // ---- Validation helpers ----
 
 fn is_valid_hash(s: &str) -> bool {
-    s.len() == 8 && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    s.len() == 8
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
-/// `YYYYMMDD-hex8-HHMMSS` exactly. Strict on length, character class, and
-/// separator positions; defends against path injection.
+/// `YYYYMMDD-hex8-HHMMSS` exactly. Strict by regex; defends against path
+/// injection in session IDs that flow into filesystem and git ref paths.
 fn is_valid_session_id(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.len() != 8 + 1 + 8 + 1 + 6 {
-        return false;
-    }
-    if bytes[8] != b'-' || bytes[17] != b'-' {
-        return false;
-    }
-    bytes[..8].iter().all(|b| b.is_ascii_digit())
-        && bytes[9..17]
-            .iter()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
-        && bytes[18..].iter().all(|b| b.is_ascii_digit())
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^\d{8}-[0-9a-f]{8}-\d{6}$").unwrap());
+    re.is_match(s)
 }
 
 #[cfg(test)]
@@ -327,15 +326,15 @@ mod tests {
         for bad in [
             "../../../etc/passwd",
             "20260427/abcd1234/123456",
-            "20260427-abcd1234-12345/", // wrong char
-            "20260427-abcd1234-12345.", // wrong char
-            "20260427-abcd123g-123456", // non-hex char
-            "20260427-ABCD1234-123456", // uppercase rejected
-            "2026042-abcd1234-123456",  // wrong date length
+            "20260427-abcd1234-12345/",  // wrong char
+            "20260427-abcd1234-12345.",  // wrong char
+            "20260427-abcd123g-123456",  // non-hex char
+            "20260427-ABCD1234-123456",  // uppercase rejected
+            "2026042-abcd1234-123456",   // wrong date length
             "20260427-abcd1234-1234567", // wrong time length
             "20260427--abcd1234-123456", // double sep
             "",
-            "20260427-abcd1234",         // missing time
+            "20260427-abcd1234", // missing time
         ] {
             assert!(
                 SessionId::parse(bad).is_err(),
@@ -357,7 +356,8 @@ mod tests {
         let common = tempfile::tempdir().unwrap();
         let worktree = tempfile::tempdir().unwrap();
 
-        let session = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+        let session =
+            Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
 
         // Layout exists.
         assert!(jpath::open_dir(common.path()).exists());
@@ -376,7 +376,8 @@ mod tests {
         // must not pre-create it.
         let common = tempfile::tempdir().unwrap();
         let worktree = tempfile::tempdir().unwrap();
-        let session = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+        let session =
+            Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
         assert!(!session.jsonl_path().exists());
     }
 
@@ -384,7 +385,8 @@ mod tests {
     fn finalize_creates_ready_marker() {
         let common = tempfile::tempdir().unwrap();
         let worktree = tempfile::tempdir().unwrap();
-        let session = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+        let session =
+            Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
         assert!(!session.is_ready());
         session.finalize().unwrap();
         assert!(session.is_ready());
@@ -397,8 +399,11 @@ mod tests {
     fn resume_finds_existing_session() {
         let common = tempfile::tempdir().unwrap();
         let worktree = tempfile::tempdir().unwrap();
-        let session = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
-        let resumed = Session::resume(common.path(), session.id()).unwrap().unwrap();
+        let session =
+            Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+        let resumed = Session::resume(common.path(), session.id())
+            .unwrap()
+            .unwrap();
         assert_eq!(resumed.id(), session.id());
         assert_eq!(resumed.meta().agent, "claude");
     }
@@ -418,7 +423,13 @@ mod tests {
         let worktree = tempfile::tempdir().unwrap();
         let s1 = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
         let original_bytes = std::fs::read(s1.meta_path()).unwrap();
-        let _s2 = Session::open_at(common.path(), worktree.path(), "different-agent", fixed_ts()).unwrap();
+        let _s2 = Session::open_at(
+            common.path(),
+            worktree.path(),
+            "different-agent",
+            fixed_ts(),
+        )
+        .unwrap();
         let after_bytes = std::fs::read(s1.meta_path()).unwrap();
         assert_eq!(original_bytes, after_bytes);
     }

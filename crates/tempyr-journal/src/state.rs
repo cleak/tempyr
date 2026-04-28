@@ -49,10 +49,11 @@ impl PublisherState {
     /// the file doesn't exist (first run case).
     pub fn load(common_dir: &Path) -> Result<Self> {
         let path = jpath::publisher_state_path(common_dir);
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let bytes = std::fs::read(&path)?;
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e.into()),
+        };
         let state: PublisherState = serde_json::from_slice(&bytes)?;
         Ok(state)
     }
@@ -147,7 +148,8 @@ pub fn append_log(
         .append(true)
         .create(true)
         .open(&path)?;
-    f.lock().map_err(|e| crate::JournalError::Lock(e.to_string()))?;
+    f.lock()
+        .map_err(|e| crate::JournalError::Lock(e.to_string()))?;
     f.write_all(&bytes)?;
     f.sync_data()?;
     Ok(())
@@ -155,7 +157,13 @@ pub fn append_log(
 
 /// Convenience: log without extra fields.
 pub fn log(common_dir: &Path, level: LogLevel, event: &str) -> Result<()> {
-    append_log(common_dir, level, event, serde_json::Map::new(), DEFAULT_MAX_LOG_BYTES)
+    append_log(
+        common_dir,
+        level,
+        event,
+        serde_json::Map::new(),
+        DEFAULT_MAX_LOG_BYTES,
+    )
 }
 
 fn rotate_if_needed(path: &Path, max_bytes: u64) -> Result<()> {
@@ -261,9 +269,19 @@ mod tests {
         std::fs::create_dir_all(jpath::journals_root(common)).unwrap();
 
         let mut fields = serde_json::Map::new();
-        fields.insert("ref".into(), json!("refs/tempyr/journals/archive/2026/04/27/x"));
+        fields.insert(
+            "ref".into(),
+            json!("refs/tempyr/journals/archive/2026/04/27/x"),
+        );
         fields.insert("retry_count".into(), json!(2));
-        append_log(common, LogLevel::Error, "push_failed", fields, DEFAULT_MAX_LOG_BYTES).unwrap();
+        append_log(
+            common,
+            LogLevel::Error,
+            "push_failed",
+            fields,
+            DEFAULT_MAX_LOG_BYTES,
+        )
+        .unwrap();
 
         let text = std::fs::read_to_string(jpath::publisher_log_path(common)).unwrap();
         let line: LogLine = serde_json::from_str(text.trim()).unwrap();
@@ -282,14 +300,21 @@ mod tests {
         for i in 0..10 {
             let mut fields = serde_json::Map::new();
             fields.insert("i".into(), json!(i));
-            fields.insert("padding".into(), json!("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
+            fields.insert(
+                "padding".into(),
+                json!("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+            );
             append_log(common, LogLevel::Info, "tick", fields, max).unwrap();
         }
 
         let live = jpath::publisher_log_path(common);
         let rotated = live.with_extension("log.1");
         assert!(live.exists());
-        assert!(rotated.exists(), "expected rotated log at {}", rotated.display());
+        assert!(
+            rotated.exists(),
+            "expected rotated log at {}",
+            rotated.display()
+        );
     }
 
     #[test]
@@ -302,7 +327,10 @@ mod tests {
         for i in 0..30 {
             let mut fields = serde_json::Map::new();
             fields.insert("i".into(), json!(i));
-            fields.insert("padding".into(), json!("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
+            fields.insert(
+                "padding".into(),
+                json!("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+            );
             append_log(common, LogLevel::Info, "tick", fields, max).unwrap();
         }
 
@@ -310,11 +338,7 @@ mod tests {
         let dir_iter = std::fs::read_dir(jpath::journals_root(common)).unwrap();
         let log_files: Vec<_> = dir_iter
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("publisher.log")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with("publisher.log"))
             .collect();
         assert!(log_files.len() <= 2, "got {} log files", log_files.len());
     }

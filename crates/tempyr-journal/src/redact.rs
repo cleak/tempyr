@@ -24,21 +24,16 @@ use crate::entry::Entry;
 use crate::{JournalError, Result};
 
 /// What to do when a sensitive pattern is matched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Mode {
     /// Reject the write with `JournalError::Redacted`. Default.
+    #[default]
     Block,
     /// Rewrite the entry, replacing each match with `<REDACTED:rule_name>`.
     Redact,
     /// Allow the entry through unchanged; matches are still returned for
     /// logging/observability.
     Warn,
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Block
-    }
 }
 
 /// One regex-based rule.
@@ -204,7 +199,10 @@ fn redact_string(s: &mut String, r: &Redactor) {
     let mut working = s.clone();
     for rule in r.rules.iter().chain(r.extra.iter()) {
         let replacement = format!("<REDACTED:{}>", rule.name);
-        working = rule.regex.replace_all(&working, replacement.as_str()).into_owned();
+        working = rule
+            .regex
+            .replace_all(&working, replacement.as_str())
+            .into_owned();
     }
     if r.entropy_threshold.is_finite() {
         // Replace each high-entropy run independently. We rebuild the string
@@ -286,9 +284,7 @@ fn shannon_entropy(s: &str) -> f64 {
 }
 
 fn scannable_fields(entry: &Entry) -> Vec<(&'static str, &str)> {
-    let mut out: Vec<(&'static str, &str)> = vec![
-        ("summary", entry.summary.as_str()),
-    ];
+    let mut out: Vec<(&'static str, &str)> = vec![("summary", entry.summary.as_str())];
     if let Some(d) = &entry.detail {
         out.push(("detail", d));
     }
@@ -406,7 +402,6 @@ mod tests {
             next_to_try: None,
             polarity: None,
             passed: None,
-            tests: None,
             build_ok: None,
             commit_sha: None,
             is_final: false,
@@ -415,7 +410,9 @@ mod tests {
 
     #[test]
     fn detects_anthropic_key() {
-        let e = entry_with_summary("oops I pasted sk-ant-abcdefghijklmnop1234567890qrstuvwx into a comment");
+        let e = entry_with_summary(
+            "oops I pasted sk-ant-abcdefghijklmnop1234567890qrstuvwx into a comment",
+        );
         let r = Redactor::default().without_entropy();
         let matches = r.check(&e);
         assert!(matches.iter().any(|m| m.rule == "anthropic_or_openai_key"));
@@ -486,7 +483,9 @@ mod tests {
     fn entropy_fallback_catches_random_blob() {
         // Random base64-ish blob with high entropy.
         let blob = "Zm9vYmFyYmF6cXV1eHF1dXhmb29iYXJiYXpxdXV4cXV1eGZvb2JhcmJhenF1dXg=";
-        let e = entry_with_summary(&format!("env had value {blob} which I copy-pasted hopefully"));
+        let e = entry_with_summary(&format!(
+            "env had value {blob} which I copy-pasted hopefully"
+        ));
         let r = Redactor::default();
         let matches = r.check(&e);
         assert!(
@@ -503,7 +502,10 @@ mod tests {
         let r = Redactor::default();
         let matches = r.check(&e);
         // Tokens like "continues" are short; English prose entropy is < 4.5.
-        let high_entropy: Vec<_> = matches.iter().filter(|m| m.rule == "high_entropy").collect();
+        let high_entropy: Vec<_> = matches
+            .iter()
+            .filter(|m| m.rule == "high_entropy")
+            .collect();
         assert!(
             high_entropy.is_empty(),
             "english prose should not trigger entropy: {high_entropy:?}"
@@ -528,8 +530,11 @@ mod tests {
 
     #[test]
     fn redact_mode_replaces_match() {
-        let mut e = entry_with_summary("token ghp_abcdefghijklmnopqrstuvwxyz0123456789AB please remove");
-        let r = Redactor::default().with_mode(Mode::Redact).without_entropy();
+        let mut e =
+            entry_with_summary("token ghp_abcdefghijklmnopqrstuvwxyz0123456789AB please remove");
+        let r = Redactor::default()
+            .with_mode(Mode::Redact)
+            .without_entropy();
         let matches = r.enforce(&mut e).unwrap();
         assert!(!matches.is_empty());
         assert!(e.summary.contains("<REDACTED:github_pat>"));
@@ -538,7 +543,8 @@ mod tests {
 
     #[test]
     fn warn_mode_passes_through_unchanged() {
-        let mut e = entry_with_summary("token ghp_abcdefghijklmnopqrstuvwxyz0123456789AB please remove");
+        let mut e =
+            entry_with_summary("token ghp_abcdefghijklmnopqrstuvwxyz0123456789AB please remove");
         let original = e.summary.clone();
         let r = Redactor::default().with_mode(Mode::Warn).without_entropy();
         let matches = r.enforce(&mut e).unwrap();
@@ -571,8 +577,11 @@ mod tests {
 
     #[test]
     fn redact_handles_unicode_after_match() {
-        let mut e = entry_with_summary("ghp_abcdefghijklmnopqrstuvwxyz0123456789AB followed by 🦀 emoji");
-        let r = Redactor::default().with_mode(Mode::Redact).without_entropy();
+        let mut e =
+            entry_with_summary("ghp_abcdefghijklmnopqrstuvwxyz0123456789AB followed by 🦀 emoji");
+        let r = Redactor::default()
+            .with_mode(Mode::Redact)
+            .without_entropy();
         r.enforce(&mut e).unwrap();
         assert!(e.summary.contains("🦀"));
         assert!(e.summary.contains("<REDACTED:github_pat>"));
@@ -603,7 +612,10 @@ mod tests {
     fn checks_files_and_tags_fields() {
         let mut e = entry_with_summary("clean summary that is long enough to satisfy validator");
         e.files = vec!["C:\\Users\\caleb\\secret.rs".into()];
-        e.tags = vec!["normal".into(), "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB".into()];
+        e.tags = vec![
+            "normal".into(),
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB".into(),
+        ];
         let r = Redactor::default().without_entropy();
         let matches = r.check(&e);
         assert!(matches.iter().any(|m| m.field == "files"));

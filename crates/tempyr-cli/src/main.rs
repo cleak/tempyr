@@ -341,79 +341,10 @@ pub enum JournalAction {
     /// Append one moment of agent reasoning to the session journal.
     ///
     /// Kinds: plan | finding | decision | dead_end | assumption | question | risk | outcome.
-    /// Required for `decision`: --chosen, --rationale, --reversible/--no-reversible (and detail >= 50 chars).
+    /// Required for `decision`: --chosen, --rationale, --reversible <true|false> (and detail >= 50 chars).
     /// Required for `dead_end`: --approach, --failure-mode (and detail >= 50 chars).
     /// Required for `assumption`: --polarity.
-    Log {
-        /// One of: plan | finding | decision | dead_end | assumption | question | risk | outcome
-        kind: String,
-        /// Short summary (20-200 chars).
-        summary: String,
-        /// Longer body. Required for decision and dead_end (50+ chars).
-        #[arg(long, short = 'd')]
-        detail: Option<String>,
-        /// Tag (repeatable). The `tool` tag is conventional for tool quirks.
-        #[arg(long = "tag")]
-        tags: Vec<String>,
-        /// File path relevant to this entry (repeatable).
-        #[arg(long = "file")]
-        files: Vec<String>,
-        /// Graph node ID this entry references (repeatable).
-        #[arg(long = "ref")]
-        references: Vec<String>,
-        /// Agent name. Defaults to "claude".
-        #[arg(long, default_value = "claude")]
-        agent: String,
-        /// Mark this entry as provisional (filterable at search time).
-        #[arg(long)]
-        provisional: bool,
-        /// low | medium | high
-        #[arg(long)]
-        confidence: Option<String>,
-        /// info | warn | high | blocker
-        #[arg(long)]
-        severity: Option<String>,
-
-        /// `decision`: alternative considered (repeatable).
-        #[arg(long = "alternative")]
-        alternatives: Vec<String>,
-        /// `decision`: which alternative was chosen.
-        #[arg(long)]
-        chosen: Option<String>,
-        /// `decision`: rationale for the choice.
-        #[arg(long)]
-        rationale: Option<String>,
-        /// `decision`: is this reversible? (--reversible or --no-reversible)
-        #[arg(long)]
-        reversible: Option<bool>,
-
-        /// `dead_end`: the approach that was tried.
-        #[arg(long)]
-        approach: Option<String>,
-        /// `dead_end`: how/why it failed.
-        #[arg(long)]
-        failure_mode: Option<String>,
-        /// `dead_end`: a suggested next direction.
-        #[arg(long)]
-        next_to_try: Option<String>,
-
-        /// `assumption`: positive | negative | unknown
-        #[arg(long)]
-        polarity: Option<String>,
-
-        /// `outcome`: did the work succeed?
-        #[arg(long)]
-        passed: Option<bool>,
-        /// `outcome`: did the build pass?
-        #[arg(long)]
-        build_ok: Option<bool>,
-        /// `outcome`: commit SHA.
-        #[arg(long)]
-        commit_sha: Option<String>,
-        /// `outcome`: marks the session-final entry. Triggers publish.
-        #[arg(long = "final")]
-        is_final: bool,
-    },
+    Log(Box<commands::journal_cmd::LogArgs>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -749,54 +680,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Commands::Journal { action } => match action {
-            JournalAction::Log {
-                kind,
-                summary,
-                detail,
-                tags,
-                files,
-                references,
-                agent,
-                provisional,
-                confidence,
-                severity,
-                alternatives,
-                chosen,
-                rationale,
-                reversible,
-                approach,
-                failure_mode,
-                next_to_try,
-                polarity,
-                passed,
-                build_ok,
-                commit_sha,
-                is_final,
-            } => commands::journal_cmd::run_log(
-                &kind,
-                summary,
-                detail,
-                tags,
-                files,
-                references,
-                agent,
-                provisional,
-                confidence,
-                severity,
-                alternatives,
-                chosen,
-                rationale,
-                reversible,
-                approach,
-                failure_mode,
-                next_to_try,
-                polarity,
-                passed,
-                build_ok,
-                commit_sha,
-                is_final,
-                cli.json,
-            ),
+            JournalAction::Log(args) => commands::journal_cmd::run_log(*args, cli.json),
         },
         Commands::Update { check, force } => commands::update::run(check, force),
         Commands::Doctor => {

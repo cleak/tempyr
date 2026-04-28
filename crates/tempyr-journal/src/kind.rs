@@ -104,21 +104,18 @@ impl Kind {
         Err(JournalError::UnknownKind(s.to_string(), suggestion))
     }
 
-    /// Best-guess suggestion for an unknown kind string. Uses Levenshtein
-    /// distance; falls back to listing all valid kinds when no match is close.
+    /// Best-guess advice for an unknown kind string. Falls back to listing
+    /// all valid kinds when no Levenshtein match is close enough.
     fn suggest(input: &str) -> String {
-        let mut best: Option<(Kind, usize)> = None;
-        for kind in Kind::all() {
-            let d = levenshtein(input, kind.as_str());
-            if best.map(|(_, bd)| d < bd).unwrap_or(true) {
-                best = Some((*kind, d));
-            }
-        }
+        let best = Kind::all()
+            .iter()
+            .map(|k| (*k, strsim::levenshtein(input, k.as_str())))
+            .min_by_key(|(_, d)| *d);
         match best {
-            Some((kind, d)) if d <= 3 => kind.as_str().to_string(),
+            Some((kind, d)) if d <= 3 => format!("Did you mean `{}`?", kind.as_str()),
             _ => {
                 let names: Vec<&str> = Kind::all().iter().map(|k| k.as_str()).collect();
-                format!("one of [{}]", names.join(", "))
+                format!("Valid kinds: {}", names.join(", "))
             }
         }
     }
@@ -150,23 +147,15 @@ pub fn validate_entry(entry: &Entry) -> Result<()> {
         }
     }
 
-    // Per-kind structured field validation.
+    let blank = |o: &Option<String>| o.as_deref().is_none_or(str::is_empty);
+
     match entry.kind {
         Kind::Decision => {
-            if entry.chosen.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
-                return Err(JournalError::InvalidEntry(
-                    "decision requires non-empty `chosen`".into(),
-                ));
+            if blank(&entry.chosen) {
+                return Err(missing("decision", "chosen"));
             }
-            if entry
-                .rationale
-                .as_ref()
-                .map(|s| s.is_empty())
-                .unwrap_or(true)
-            {
-                return Err(JournalError::InvalidEntry(
-                    "decision requires non-empty `rationale`".into(),
-                ));
+            if blank(&entry.rationale) {
+                return Err(missing("decision", "rationale"));
             }
             if entry.reversible.is_none() {
                 return Err(JournalError::InvalidEntry(
@@ -175,20 +164,11 @@ pub fn validate_entry(entry: &Entry) -> Result<()> {
             }
         }
         Kind::DeadEnd => {
-            if entry.approach.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
-                return Err(JournalError::InvalidEntry(
-                    "dead_end requires non-empty `approach`".into(),
-                ));
+            if blank(&entry.approach) {
+                return Err(missing("dead_end", "approach"));
             }
-            if entry
-                .failure_mode
-                .as_ref()
-                .map(|s| s.is_empty())
-                .unwrap_or(true)
-            {
-                return Err(JournalError::InvalidEntry(
-                    "dead_end requires non-empty `failure_mode`".into(),
-                ));
+            if blank(&entry.failure_mode) {
+                return Err(missing("dead_end", "failure_mode"));
             }
         }
         Kind::Assumption => {
@@ -198,35 +178,14 @@ pub fn validate_entry(entry: &Entry) -> Result<()> {
                 ));
             }
         }
-        // No kind-specific required fields for plan/finding/question/risk/outcome.
-        _ => {}
+        Kind::Plan | Kind::Finding | Kind::Question | Kind::Risk | Kind::Outcome => {}
     }
 
     Ok(())
 }
 
-/// Iterative DP Levenshtein distance with O(min(a,b)) memory. Adequate for
-/// short strings (<= 16 chars) we compare here.
-fn levenshtein(a: &str, b: &str) -> usize {
-    let (a, b) = if a.len() < b.len() { (b, a) } else { (a, b) };
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    if b.is_empty() {
-        return a.len();
-    }
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr = vec![0usize; b.len() + 1];
-    for (i, ca) in a.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            curr[j + 1] = (curr[j] + 1)
-                .min(prev[j + 1] + 1)
-                .min(prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[b.len()]
+fn missing(kind: &str, field: &str) -> JournalError {
+    JournalError::InvalidEntry(format!("{kind} requires non-empty `{field}`"))
 }
 
 #[cfg(test)]
@@ -264,7 +223,6 @@ mod tests {
             next_to_try: None,
             polarity: None,
             passed: None,
-            tests: None,
             build_ok: None,
             commit_sha: None,
             is_final: false,
@@ -283,9 +241,9 @@ mod tests {
     fn parse_helpful_suggests_close_match() {
         let err = Kind::parse_helpful("desicion").unwrap_err();
         match err {
-            JournalError::UnknownKind(input, suggestion) => {
+            JournalError::UnknownKind(input, advice) => {
                 assert_eq!(input, "desicion");
-                assert_eq!(suggestion, "decision");
+                assert_eq!(advice, "Did you mean `decision`?");
             }
             other => panic!("expected UnknownKind, got {other:?}"),
         }
@@ -307,8 +265,9 @@ mod tests {
         for (input, expected) in cases {
             let err = Kind::parse_helpful(input).unwrap_err();
             match err {
-                JournalError::UnknownKind(_, suggestion) => {
-                    assert_eq!(suggestion, expected.as_str(), "for input {input:?}");
+                JournalError::UnknownKind(_, advice) => {
+                    let want = format!("Did you mean `{}`?", expected.as_str());
+                    assert_eq!(advice, want, "for input {input:?}");
                 }
                 other => panic!("expected UnknownKind for {input:?}, got {other:?}"),
             }
@@ -318,10 +277,10 @@ mod tests {
     #[test]
     fn parse_helpful_far_match_lists_all() {
         let err = Kind::parse_helpful("asdfqwerty").unwrap_err();
-        if let JournalError::UnknownKind(_, suggestion) = err {
-            assert!(suggestion.starts_with("one of ["));
-            assert!(suggestion.contains("decision"));
-            assert!(suggestion.contains("dead_end"));
+        if let JournalError::UnknownKind(_, advice) = err {
+            assert!(advice.starts_with("Valid kinds: "), "got {advice:?}");
+            assert!(advice.contains("decision"));
+            assert!(advice.contains("dead_end"));
         } else {
             panic!("expected UnknownKind variant");
         }
@@ -399,7 +358,13 @@ mod tests {
 
     #[test]
     fn validate_simple_kinds_pass_with_only_summary() {
-        for kind in [Kind::Plan, Kind::Finding, Kind::Question, Kind::Risk, Kind::Outcome] {
+        for kind in [
+            Kind::Plan,
+            Kind::Finding,
+            Kind::Question,
+            Kind::Risk,
+            Kind::Outcome,
+        ] {
             let entry = entry_for(kind);
             validate_entry(&entry).unwrap_or_else(|e| panic!("{kind:?} failed: {e:?}"));
         }

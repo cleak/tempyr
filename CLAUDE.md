@@ -31,7 +31,7 @@ Rust edition is 2024. Target toolchain is stable.
 
 ## Architecture
 
-The project is a **Rust workspace** with seven crates:
+The project is a **Rust workspace** with eight crates:
 
 | Crate | Purpose |
 |-------|---------|
@@ -40,10 +40,11 @@ The project is a **Rust workspace** with seven crates:
 | `tempyr-interview` | Interview state machine: session management, phase transitions, gap detection, LLM-based extraction |
 | `tempyr-render` | Document rendering: TOML template parsing, graph collection, markdown output |
 | `tempyr-linear` | Linear integration: push/pull sync, status mapping, context generation |
+| `tempyr-journal` | Session journal: append-only JSONL of agent reasoning (decisions, dead ends, etc.) under `<git-common-dir>/tempyr/journals/` with cross-platform locking and secret redaction |
 | `tempyr-cli` | CLI binary (`tempyr`): clap-based, all user-facing commands |
 | `tempyr-mcp` | MCP server library used by `tempyr --mcp`: exposes graph operations as tools for Claude Code |
 
-Crate dependency order: `core` ← `index` ← `interview`/`render`/`linear` ← `cli`/`mcp`.
+Crate dependency order: `core` and `journal` are leaves. `index`/`interview`/`render`/`linear` depend on `core`. `cli`/`mcp` depend on the layer above plus `journal`.
 
 ### Data Model
 

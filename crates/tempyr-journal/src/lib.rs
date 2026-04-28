@@ -16,9 +16,9 @@ pub mod session;
 pub mod state;
 pub mod writer;
 
-pub use entry::{Confidence, Entry, Polarity, SCHEMA_VERSION, Severity, TestResults};
+pub use entry::{Confidence, Entry, Polarity, SCHEMA_VERSION, Severity};
 pub use kind::{Kind, validate_entry};
-pub use redact::{Match as RedactionMatch, Mode as RedactionMode, Redactor};
+pub use redact::{Match as RedactionMatch, Mode as RedactionMode, Redactor, default_redactor};
 pub use session::{Session, SessionId, SessionMeta};
 pub use state::{LogLevel, LogLine, PublisherState};
 pub use writer::append;
@@ -36,7 +36,7 @@ pub enum JournalError {
     #[error("Invalid entry: {0}")]
     InvalidEntry(String),
 
-    #[error("Unknown kind: {0}. Did you mean: {1}?")]
+    #[error("Unknown kind {0:?}. {1}")]
     UnknownKind(String, String),
 
     #[error("Git command failed: {0}")]

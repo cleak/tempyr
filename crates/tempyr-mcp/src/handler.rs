@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use std::str::FromStr;
 use tempyr_core::graph::Graph;
 use tempyr_core::id;
 use tempyr_core::ops;
@@ -29,8 +30,11 @@ use tempyr_interview::proposer;
 use tempyr_interview::session::{
     EdgeSource, ExistingNodeSummary, InterviewSession, NodePatch, TentativeEdge, TentativeNode,
 };
+
 use tempyr_journal::path as jpath;
-use tempyr_journal::{Confidence, Entry, Kind, Polarity, Redactor, Session, Severity, append};
+use tempyr_journal::{
+    Confidence, Entry, Kind, Polarity, Session, Severity, append, default_redactor,
+};
 use tempyr_linear::client::LinearClient;
 use tempyr_linear::config::LinearConfig;
 use tempyr_linear::mapping::StatusMapper;
@@ -655,60 +659,22 @@ pub struct JournalLogParams {
     /// `outcome`: commit SHA, if any.
     pub commit_sha: Option<String>,
     /// `outcome`: marks the final outcome of a session. Triggers publish.
-    /// Renamed in JSON to `final` so blueberry-format readers see what they expect.
+    /// Renamed to `final` in JSON; `final` is a Rust reserved keyword.
     #[serde(rename = "final")]
     pub is_final: Option<bool>,
 }
 
 // Journal helper functions
 
-fn parse_confidence(s: Option<&str>) -> Result<Option<Confidence>, String> {
-    match s {
-        None => Ok(None),
-        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "low" => Ok(Some(Confidence::Low)),
-            "medium" | "med" => Ok(Some(Confidence::Medium)),
-            "high" => Ok(Some(Confidence::High)),
-            other => Err(format!(
-                "invalid confidence {other:?}: expected low | medium | high"
-            )),
-        },
-    }
-}
-
-fn parse_severity(s: Option<&str>) -> Result<Option<Severity>, String> {
-    match s {
-        None => Ok(None),
-        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "info" => Ok(Some(Severity::Info)),
-            "warn" | "warning" => Ok(Some(Severity::Warn)),
-            "high" => Ok(Some(Severity::High)),
-            "blocker" => Ok(Some(Severity::Blocker)),
-            other => Err(format!(
-                "invalid severity {other:?}: expected info | warn | high | blocker"
-            )),
-        },
-    }
-}
-
-fn parse_polarity(s: Option<&str>) -> Result<Option<Polarity>, String> {
-    match s {
-        None => Ok(None),
-        Some(v) => match v.trim().to_ascii_lowercase().as_str() {
-            "positive" | "pos" => Ok(Some(Polarity::Positive)),
-            "negative" | "neg" => Ok(Some(Polarity::Negative)),
-            "unknown" => Ok(Some(Polarity::Unknown)),
-            other => Err(format!(
-                "invalid polarity {other:?}: expected positive | negative | unknown"
-            )),
-        },
-    }
+fn parse_opt<T: FromStr<Err = tempyr_journal::JournalError>>(
+    s: Option<&str>,
+) -> Result<Option<T>, String> {
+    s.map(T::from_str).transpose().map_err(|e| e.to_string())
 }
 
 /// Best-effort relative path of `cwd` under `worktree_top`. Falls back to the
-/// absolute path string when the working directory is outside the repo (e.g.
-/// the user runs the CLI from a sibling directory). Skipped entirely when the
-/// two paths are identical to avoid a noisy `cwd: "."`.
+/// absolute path string when the working directory is outside the repo. None
+/// when the two paths are identical (avoid a noisy `cwd: "."`).
 fn relative_cwd(cwd: &Path, worktree_top: &Path) -> Option<String> {
     if cwd == worktree_top {
         return None;
@@ -1742,10 +1708,7 @@ impl TempyrServer {
         name = "journal_log",
         description = "Append one moment of agent reasoning to the session journal: a plan, finding, decision, dead end, assumption, question, risk, or outcome. Cheap and append-only — log freely, including failures and surprises. This is NOT how knowledge graduates into the project; promote durable facts via graph_add_node.\n\nKinds:\n  plan       — what you're about to attempt and why\n  finding    — something you learned by reading code or running a tool\n  assumption — something you're assuming without verifying (polarity required)\n  question   — something you don't know yet — to ask or look up\n  decision   — a choice with reasoning (chosen, rationale, reversible required; detail ≥ 50 chars)\n  dead_end   — an approach that didn't work (approach, failure_mode required; detail ≥ 50 chars). HIGH-VALUE — future agents read these to avoid repeating you.\n  risk       — a potential problem identified but not yet hit (severity recommended)\n  outcome    — the result of work; set final=true on the session-closing entry to trigger publish\n\nLog freely on dead ends and decisions — the system is empty if you don't. Successes are less valuable than failures here. For curated knowledge, use graph_add_node; for past reasoning, use journal_search."
     )]
-    fn journal_log(
-        &self,
-        Parameters(p): Parameters<JournalLogParams>,
-    ) -> Result<String, String> {
+    fn journal_log(&self, Parameters(p): Parameters<JournalLogParams>) -> Result<String, String> {
         use std::env;
 
         let kind = Kind::parse_helpful(&p.kind).map_err(|e| e.to_string())?;
@@ -1756,43 +1719,29 @@ impl TempyrServer {
 
         let session = self.journal_session_or_open(&common_dir, &worktree_top)?;
 
-        let mut entry = Entry {
-            schema_version: tempyr_journal::SCHEMA_VERSION,
-            id: Entry::new_id(),
-            ts: chrono::Utc::now(),
-            agent: "claude".to_string(),
-            kind,
-            summary: p.summary,
-            detail: p.detail,
-            tags: p.tags.unwrap_or_default(),
-            files: p.files.unwrap_or_default(),
-            references: p.references.unwrap_or_default(),
-            session_id: session.id().as_str().to_string(),
-            worktree_hash: session.meta().worktree_hash.clone(),
-            branch: session.meta().branch.clone(),
-            head: session.meta().head.clone(),
-            cwd: relative_cwd(&cwd, &worktree_top),
-            provisional: p.provisional.unwrap_or(false),
-            confidence: parse_confidence(p.confidence.as_deref())?,
-            severity: parse_severity(p.severity.as_deref())?,
-            alternatives: p.alternatives.unwrap_or_default(),
-            chosen: p.chosen,
-            rationale: p.rationale,
-            reversible: p.reversible,
-            approach: p.approach,
-            failure_mode: p.failure_mode,
-            next_to_try: p.next_to_try,
-            polarity: parse_polarity(p.polarity.as_deref())?,
-            passed: p.passed,
-            tests: None,
-            build_ok: p.build_ok,
-            commit_sha: p.commit_sha,
-            is_final: p.is_final.unwrap_or(false),
-        };
+        let mut entry = Entry::for_session(kind, p.summary, &session);
+        entry.detail = p.detail;
+        entry.tags = p.tags.unwrap_or_default();
+        entry.files = p.files.unwrap_or_default();
+        entry.references = p.references.unwrap_or_default();
+        entry.cwd = relative_cwd(&cwd, &worktree_top);
+        entry.provisional = p.provisional.unwrap_or(false);
+        entry.confidence = parse_opt::<Confidence>(p.confidence.as_deref())?;
+        entry.severity = parse_opt::<Severity>(p.severity.as_deref())?;
+        entry.alternatives = p.alternatives.unwrap_or_default();
+        entry.chosen = p.chosen;
+        entry.rationale = p.rationale;
+        entry.reversible = p.reversible;
+        entry.approach = p.approach;
+        entry.failure_mode = p.failure_mode;
+        entry.next_to_try = p.next_to_try;
+        entry.polarity = parse_opt::<Polarity>(p.polarity.as_deref())?;
+        entry.passed = p.passed;
+        entry.build_ok = p.build_ok;
+        entry.commit_sha = p.commit_sha;
+        entry.is_final = p.is_final.unwrap_or(false);
 
-        // Redaction first (default Block mode rejects secrets), then validation
-        // and write (the writer validates per-kind structured fields).
-        Redactor::default()
+        default_redactor()
             .enforce(&mut entry)
             .map_err(|e| e.to_string())?;
         append(&session, &entry).map_err(|e| e.to_string())?;
