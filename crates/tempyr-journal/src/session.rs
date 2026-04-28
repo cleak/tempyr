@@ -168,7 +168,7 @@ impl Session {
         let branch = jpath::current_branch(worktree_top).ok().flatten();
         let head = jpath::current_head(worktree_top).ok().flatten();
 
-        let meta = SessionMeta {
+        let mut meta = SessionMeta {
             schema_version: SCHEMA_VERSION,
             session_id: session_id.clone(),
             created_utc: ts,
@@ -195,8 +195,11 @@ impl Session {
                 f.write_all(b"\n")?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                // Same-id collision. Fall through; the existing meta on disk
-                // wins. Higher layers can detect this if needed.
+                // Same-id collision: replace our in-memory meta with the
+                // persisted one so the returned Session matches disk. The
+                // existing session's agent/branch/head win.
+                let bytes = std::fs::read(&meta_path)?;
+                meta = serde_json::from_slice(&bytes)?;
             }
             Err(e) => return Err(e.into()),
         }
@@ -208,7 +211,8 @@ impl Session {
     }
 
     /// Resume an existing session by ID. Returns `Ok(None)` if there's no
-    /// open session with that ID.
+    /// open session with that ID. Errors if the on-disk meta is for a
+    /// different session id (corruption or tampering).
     pub fn resume(common_dir: &Path, session_id: &SessionId) -> Result<Option<Self>> {
         let meta_path = jpath::session_meta_path(common_dir, session_id.as_str());
         let bytes = match std::fs::read(&meta_path) {
@@ -217,6 +221,12 @@ impl Session {
             Err(e) => return Err(e.into()),
         };
         let meta: SessionMeta = serde_json::from_slice(&bytes)?;
+        if &meta.session_id != session_id {
+            return Err(JournalError::InvalidEntry(format!(
+                "session meta mismatch: expected {session_id}, found {}",
+                meta.session_id
+            )));
+        }
         Ok(Some(Session {
             common_dir: common_dir.to_path_buf(),
             meta,
@@ -417,13 +427,14 @@ mod tests {
 
     #[test]
     fn open_twice_with_same_ts_does_not_clobber_meta() {
-        // Same worktree + same ts -> same session id. Second open should
-        // not overwrite the existing meta file.
+        // Same worktree + same ts -> same session id. Second open must not
+        // overwrite disk, and the returned in-memory meta must reflect the
+        // persisted state (not the second caller's args).
         let common = tempfile::tempdir().unwrap();
         let worktree = tempfile::tempdir().unwrap();
         let s1 = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
         let original_bytes = std::fs::read(s1.meta_path()).unwrap();
-        let _s2 = Session::open_at(
+        let s2 = Session::open_at(
             common.path(),
             worktree.path(),
             "different-agent",
@@ -432,5 +443,26 @@ mod tests {
         .unwrap();
         let after_bytes = std::fs::read(s1.meta_path()).unwrap();
         assert_eq!(original_bytes, after_bytes);
+        // In-memory meta of s2 must come from disk (s1's "claude"), not its
+        // own caller-supplied "different-agent".
+        assert_eq!(s2.meta().agent, "claude");
+        assert_eq!(s2.id(), s1.id());
+    }
+
+    #[test]
+    fn resume_rejects_mismatched_session_id() {
+        // Build a session, then write its meta under a *different* session
+        // id's path. resume() should refuse to return that mismatched meta.
+        let common = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let s = Session::open_at(common.path(), worktree.path(), "claude", fixed_ts()).unwrap();
+        let bytes = std::fs::read(s.meta_path()).unwrap();
+
+        let other_id = SessionId::parse("20260101-deadbeef-000000").unwrap();
+        let other_path = jpath::session_meta_path(common.path(), other_id.as_str());
+        std::fs::write(&other_path, bytes).unwrap();
+
+        let err = Session::resume(common.path(), &other_id).unwrap_err();
+        assert!(matches!(err, JournalError::InvalidEntry(msg) if msg.contains("mismatch")));
     }
 }

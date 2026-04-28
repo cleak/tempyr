@@ -103,7 +103,11 @@ pub fn run_log(args: LogArgs, json_output: bool) -> Result<()> {
     let mut entry = Entry::for_session(kind, args.summary, &session);
     entry.detail = args.detail;
     entry.tags = args.tags;
-    entry.files = args.files;
+    entry.files = args
+        .files
+        .into_iter()
+        .map(|p| jpath::repo_relative_path(&p, &worktree_top))
+        .collect();
     entry.references = args.references;
     entry.cwd = cwd_rel;
     entry.provisional = args.provisional;

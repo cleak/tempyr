@@ -36,7 +36,7 @@ pub fn git_common_dir(start: &Path) -> Result<PathBuf> {
     } else {
         start.join(path)
     };
-    canonicalize_or_keep(&absolute)
+    Ok(canonicalize_or_keep(&absolute))
 }
 
 /// Run `git rev-parse --show-toplevel` from `start` and return the absolute
@@ -44,7 +44,7 @@ pub fn git_common_dir(start: &Path) -> Result<PathBuf> {
 pub fn repo_toplevel(start: &Path) -> Result<PathBuf> {
     let raw = git_rev_parse(start, &["--show-toplevel"])?;
     let path = PathBuf::from(&raw);
-    canonicalize_or_keep(&path)
+    Ok(canonicalize_or_keep(&path))
 }
 
 /// Current branch name (`git rev-parse --abbrev-ref HEAD`). Returns `None` if
@@ -87,12 +87,32 @@ pub fn current_head(start: &Path) -> Result<Option<String>> {
 /// path is lowercased before hashing because the FS is case-insensitive;
 /// elsewhere case is preserved.
 pub fn worktree_hash(worktree_top: &Path) -> String {
-    let canonical =
-        canonicalize_or_keep(worktree_top).unwrap_or_else(|_| worktree_top.to_path_buf());
+    let canonical = canonicalize_or_keep(worktree_top);
     let s = canonical.to_string_lossy();
     let normalized = normalize_for_hash(&s);
     let hex = blake3::hash(normalized.as_bytes()).to_hex();
     hex[..8].to_string()
+}
+
+/// If `path` resolves under `worktree_top`, return its repo-relative form with
+/// forward slashes. Otherwise return `path` unchanged. Already-relative paths
+/// are passed through untouched on the assumption they're already repo-local.
+///
+/// Used by `tempyr journal log --file <path>` and the journal_log MCP tool to
+/// keep absolute repo paths from tripping the redactor's `user_home_path` rule
+/// when the repo lives under `/Users/<name>/` or `C:\Users\<name>\`.
+pub fn repo_relative_path(path: &str, worktree_top: &Path) -> String {
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return path.to_string();
+    }
+    let canon_p = canonicalize_or_keep(p);
+    let canon_top = canonicalize_or_keep(worktree_top);
+    canon_p
+        .strip_prefix(&canon_top)
+        .ok()
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| path.to_string())
 }
 
 /// Tempyr's directory under the git common dir: `<common>/tempyr/`.
@@ -162,10 +182,10 @@ fn git_rev_parse(start: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn canonicalize_or_keep(p: &Path) -> Result<PathBuf> {
+fn canonicalize_or_keep(p: &Path) -> PathBuf {
     match p.canonicalize() {
-        Ok(c) => Ok(strip_unc(c)),
-        Err(_) => Ok(p.to_path_buf()),
+        Ok(c) => strip_unc(c),
+        Err(_) => p.to_path_buf(),
     }
 }
 
@@ -315,6 +335,38 @@ mod tests {
             publisher_lock_path(&common),
             PathBuf::from("/tmp/repo/.git/tempyr/journals/publisher.lock")
         );
+    }
+
+    #[test]
+    fn repo_relative_path_strips_worktree_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("crates").join("foo");
+        std::fs::create_dir_all(&nested).unwrap();
+        let absolute = nested.join("bar.rs");
+        std::fs::write(&absolute, "").unwrap();
+        let normalized = repo_relative_path(&absolute.to_string_lossy(), dir.path());
+        assert_eq!(normalized, "crates/foo/bar.rs");
+    }
+
+    #[test]
+    fn repo_relative_path_passes_through_relative_input() {
+        let dir = tempfile::tempdir().unwrap();
+        // Forward-slash relative input round-trips unchanged.
+        assert_eq!(
+            repo_relative_path("crates/foo/bar.rs", dir.path()),
+            "crates/foo/bar.rs"
+        );
+    }
+
+    #[test]
+    fn repo_relative_path_keeps_outside_paths() {
+        let inside = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let other = outside.path().join("elsewhere.rs");
+        std::fs::write(&other, "").unwrap();
+        let raw = other.to_string_lossy().to_string();
+        // Out-of-worktree absolute path is returned unchanged.
+        assert_eq!(repo_relative_path(&raw, inside.path()), raw);
     }
 
     #[test]

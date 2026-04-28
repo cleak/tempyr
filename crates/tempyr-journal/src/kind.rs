@@ -125,7 +125,8 @@ impl Kind {
 /// before any line is appended.
 pub fn validate_entry(entry: &Entry) -> Result<()> {
     // Summary length: 20..=200 chars (UTF-8 graphemes approximated by chars).
-    let len = entry.summary.chars().count();
+    // Trim first so a string of pure whitespace can't smuggle past the bound.
+    let len = entry.summary.trim().chars().count();
     if !(20..=200).contains(&len) {
         return Err(JournalError::InvalidEntry(format!(
             "summary length {len} out of bounds (must be 20..=200 chars)"
@@ -136,8 +137,8 @@ pub fn validate_entry(entry: &Entry) -> Result<()> {
     if entry.kind.requires_detail() {
         let detail_len = entry
             .detail
-            .as_ref()
-            .map(|d| d.chars().count())
+            .as_deref()
+            .map(|d| d.trim().chars().count())
             .unwrap_or(0);
         if detail_len < 50 {
             return Err(JournalError::InvalidEntry(format!(
@@ -147,7 +148,7 @@ pub fn validate_entry(entry: &Entry) -> Result<()> {
         }
     }
 
-    let blank = |o: &Option<String>| o.as_deref().is_none_or(str::is_empty);
+    let blank = |o: &Option<String>| o.as_deref().is_none_or(|s| s.trim().is_empty());
 
     match entry.kind {
         Kind::Decision => {
@@ -375,5 +376,42 @@ mod tests {
         for kind in Kind::all() {
             assert!(!kind.description().is_empty());
         }
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_only_summary() {
+        let mut entry = entry_for(Kind::Finding);
+        entry.summary = " ".repeat(60);
+        assert!(matches!(
+            validate_entry(&entry),
+            Err(JournalError::InvalidEntry(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_only_decision_fields() {
+        let mut entry = entry_for(Kind::Decision);
+        entry.detail = Some(" ".repeat(60));
+        entry.chosen = Some("   ".into());
+        entry.rationale = Some("   ".into());
+        entry.reversible = Some(true);
+        // detail is whitespace only: detail_len after trim < 50 fires first.
+        let err = validate_entry(&entry).unwrap_err();
+        assert!(matches!(err, JournalError::InvalidEntry(msg) if msg.contains("detail")));
+
+        // Real detail, but chosen/rationale are whitespace only.
+        entry.detail = Some("a real, sufficiently long rationale for the decision here".into());
+        let err = validate_entry(&entry).unwrap_err();
+        assert!(matches!(err, JournalError::InvalidEntry(msg) if msg.contains("chosen")));
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_only_dead_end_fields() {
+        let mut entry = entry_for(Kind::DeadEnd);
+        entry.detail = Some("a real, sufficiently long explanation of what was tried here.".into());
+        entry.approach = Some("   ".into());
+        entry.failure_mode = Some("   ".into());
+        let err = validate_entry(&entry).unwrap_err();
+        assert!(matches!(err, JournalError::InvalidEntry(msg) if msg.contains("approach")));
     }
 }

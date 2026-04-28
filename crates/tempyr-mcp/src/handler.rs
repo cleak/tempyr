@@ -692,9 +692,18 @@ pub struct TempyrServer {
     tool_router: ToolRouter<Self>,
     relative_project_root_fallback: Option<PathBuf>,
     project_anchor_state: ProjectAnchorState,
-    /// Lazily-initialized current journal session for this server process.
-    /// Opened on the first journal_log call and reused thereafter.
-    journal_session: Arc<Mutex<Option<Session>>>,
+    /// Cached journal session, keyed by `(common_dir, worktree_top)`. Opened
+    /// lazily on the first `journal_log` call. Keyed so a server that ends up
+    /// serving more than one repo/worktree doesn't keep appending to the wrong
+    /// session metadata.
+    journal_session: Arc<Mutex<Option<JournalSessionCache>>>,
+}
+
+#[derive(Clone)]
+struct JournalSessionCache {
+    common_dir: PathBuf,
+    worktree_top: PathBuf,
+    session: Session,
 }
 
 #[tool_router]
@@ -727,8 +736,10 @@ impl TempyrServer {
         find_project_now()
     }
 
-    /// Get the current journal session, opening one lazily on first use.
-    /// The session is cached for the lifetime of this server process.
+    /// Get the current journal session for `(common_dir, worktree_top)`,
+    /// opening one lazily on first use and caching it. If the cached entry is
+    /// for a different repo/worktree, replace it — a single MCP server should
+    /// not silently keep writing to a stale session.
     fn journal_session_or_open(
         &self,
         common_dir: &Path,
@@ -738,12 +749,19 @@ impl TempyrServer {
             .journal_session
             .lock()
             .map_err(|e| format!("journal session mutex poisoned: {e}"))?;
-        if let Some(s) = guard.as_ref() {
-            return Ok(s.clone());
+        if let Some(cache) = guard.as_ref()
+            && cache.common_dir == common_dir
+            && cache.worktree_top == worktree_top
+        {
+            return Ok(cache.session.clone());
         }
         let session = Session::open(common_dir, worktree_top, "claude")
             .map_err(|e| format!("open journal session: {e}"))?;
-        *guard = Some(session.clone());
+        *guard = Some(JournalSessionCache {
+            common_dir: common_dir.to_path_buf(),
+            worktree_top: worktree_top.to_path_buf(),
+            session: session.clone(),
+        });
         Ok(session)
     }
 
@@ -1709,21 +1727,32 @@ impl TempyrServer {
         description = "Append one moment of agent reasoning to the session journal: a plan, finding, decision, dead end, assumption, question, risk, or outcome. Cheap and append-only — log freely, including failures and surprises. This is NOT how knowledge graduates into the project; promote durable facts via graph_add_node.\n\nKinds:\n  plan       — what you're about to attempt and why\n  finding    — something you learned by reading code or running a tool\n  assumption — something you're assuming without verifying (polarity required)\n  question   — something you don't know yet — to ask or look up\n  decision   — a choice with reasoning (chosen, rationale, reversible required; detail ≥ 50 chars)\n  dead_end   — an approach that didn't work (approach, failure_mode required; detail ≥ 50 chars). HIGH-VALUE — future agents read these to avoid repeating you.\n  risk       — a potential problem identified but not yet hit (severity recommended)\n  outcome    — the result of work; set final=true on the session-closing entry to trigger publish\n\nLog freely on dead ends and decisions — the system is empty if you don't. Successes are less valuable than failures here. For curated knowledge, use graph_add_node; for past reasoning, use journal_search."
     )]
     fn journal_log(&self, Parameters(p): Parameters<JournalLogParams>) -> Result<String, String> {
-        use std::env;
-
         let kind = Kind::parse_helpful(&p.kind).map_err(|e| e.to_string())?;
 
-        let cwd = env::current_dir().map_err(|e| format!("cwd: {e}"))?;
-        let common_dir = jpath::git_common_dir(&cwd).map_err(|e| e.to_string())?;
-        let worktree_top = jpath::repo_toplevel(&cwd).map_err(|e| e.to_string())?;
+        // Resolve the repo through the anchored project, so journal_log uses
+        // the same root/env path as every other tool (find_project() also
+        // blocks until the deferred client-roots anchor is ready).
+        let (graph_dir, _gf_dir, _schema) = self.find_project()?;
+        let project_root = graph_dir
+            .parent()
+            .ok_or_else(|| "Failed to resolve project root from graph dir".to_string())?
+            .to_path_buf();
+        let common_dir = jpath::git_common_dir(&project_root).map_err(|e| e.to_string())?;
+        let worktree_top = jpath::repo_toplevel(&project_root).map_err(|e| e.to_string())?;
 
         let session = self.journal_session_or_open(&common_dir, &worktree_top)?;
 
         let mut entry = Entry::for_session(kind, p.summary, &session);
         entry.detail = p.detail;
         entry.tags = p.tags.unwrap_or_default();
-        entry.files = p.files.unwrap_or_default();
+        entry.files = p
+            .files
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| jpath::repo_relative_path(&f, &worktree_top))
+            .collect();
         entry.references = p.references.unwrap_or_default();
+        let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
         entry.cwd = relative_cwd(&cwd, &worktree_top);
         entry.provisional = p.provisional.unwrap_or(false);
         entry.confidence = parse_opt::<Confidence>(p.confidence.as_deref())?;
