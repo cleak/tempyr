@@ -67,6 +67,34 @@ impl PublisherLock {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Probe whether the publisher lock is currently held by *some* process
+    /// (us or another). Implemented as `try_acquire` + immediate drop:
+    /// `Ok(None)` from try_acquire means contended → held; `Ok(Some(_))`
+    /// means we got it → not held by anyone else, so we drop and report
+    /// "not held". An error during the probe (permission, etc.) is reported
+    /// as `Ok(None)` upward so `status` callers don't crash on edge cases.
+    pub fn is_held(common_dir: &Path) -> bool {
+        match Self::try_acquire(common_dir) {
+            Ok(Some(lock)) => {
+                drop(lock);
+                false
+            }
+            Ok(None) => true,
+            Err(_) => false,
+        }
+    }
+
+    /// Best-effort: read the PID stamped into the lockfile. Returns
+    /// `None` if the file doesn't exist, can't be read (e.g. exclusively
+    /// locked on Windows), or doesn't contain a parseable u32. Use only
+    /// for diagnostics — never as proof of liveness.
+    pub fn stamped_pid(common_dir: &Path) -> Option<u32> {
+        let path = jpath::publisher_lock_path(common_dir);
+        let bytes = std::fs::read(&path).ok()?;
+        let text = std::str::from_utf8(&bytes).ok()?;
+        text.trim().parse::<u32>().ok()
+    }
 }
 
 fn stamp_pid(mut file: &File) -> std::io::Result<()> {
@@ -125,5 +153,40 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         let pid: u32 = text.trim().parse().expect("lockfile should contain a pid");
         assert_eq!(pid, std::process::id());
+    }
+
+    #[test]
+    fn is_held_reports_true_while_other_holds_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let _held = PublisherLock::try_acquire(dir.path()).unwrap().unwrap();
+        assert!(PublisherLock::is_held(dir.path()));
+    }
+
+    #[test]
+    fn is_held_reports_false_when_unheld() {
+        let dir = tempfile::tempdir().unwrap();
+        // No prior holder → probe gets the lock and immediately drops.
+        assert!(!PublisherLock::is_held(dir.path()));
+        // After the probe drops the lock, a caller can still acquire.
+        assert!(PublisherLock::try_acquire(dir.path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn stamped_pid_returns_pid_after_acquire_and_release() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let _lock = PublisherLock::try_acquire(dir.path()).unwrap().unwrap();
+        }
+        // After drop, the PID should still be readable from the file.
+        let pid = PublisherLock::stamped_pid(dir.path()).expect("pid should be readable");
+        assert_eq!(pid, std::process::id());
+    }
+
+    #[test]
+    fn stamped_pid_returns_none_when_lockfile_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        // No journal layout exists; stamped_pid should not error and
+        // should return None.
+        assert!(PublisherLock::stamped_pid(dir.path()).is_none());
     }
 }

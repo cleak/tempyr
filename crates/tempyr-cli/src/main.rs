@@ -354,6 +354,18 @@ pub enum JournalAction {
     /// the ref, and deletes the local files. Idempotent: a re-run after a
     /// crash picks up where it left off.
     Flush(commands::journal_cmd::FlushArgs),
+
+    /// Show publisher health: open/ready counts, last push, last error,
+    /// totals, and whether a publisher is currently running.
+    Status(commands::journal_cmd::StatusArgs),
+
+    /// Show recent publisher events from `<journals>/publisher.log`.
+    Logs(commands::journal_cmd::LogsArgs),
+
+    /// Pull journal refs from a remote (`+refs/tempyr/journals/*:...`).
+    /// Required for multi-machine sync — without it, an agent's pushed
+    /// journals don't appear in another agent's local repo.
+    Fetch(commands::journal_cmd::FetchArgs),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -691,6 +703,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Journal { action } => match action {
             JournalAction::Log(args) => commands::journal_cmd::run_log(*args, cli.json),
             JournalAction::Flush(args) => commands::journal_cmd::run_flush(args, cli.json),
+            JournalAction::Status(args) => commands::journal_cmd::run_status(args, cli.json),
+            JournalAction::Logs(args) => commands::journal_cmd::run_logs(args, cli.json),
+            JournalAction::Fetch(args) => commands::journal_cmd::run_fetch(args, cli.json),
         },
         Commands::Update { check, force } => commands::update::run(check, force),
         Commands::Doctor => {

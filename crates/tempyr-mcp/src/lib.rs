@@ -1,4 +1,5 @@
 pub mod handler;
+mod journal_ticker;
 mod shutdown;
 
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ use rmcp::{ServiceExt, transport::stdio};
 use shutdown::{ShutdownCoordinator, ShutdownReason};
 
 pub use handler::TempyrServer;
+pub use journal_ticker::SpawnOutcome as JournalTickerOutcome;
 
 pub async fn serve_stdio() -> Result<()> {
     serve_stdio_with_project_root_fallback(None).await
@@ -43,6 +45,25 @@ pub async fn serve_stdio_with_project_root_fallback(
         .try_anchor_from_client_roots(service.peer().clone())
         .await;
     service.service().mark_project_anchor_ready();
+
+    // Spawn the in-process publisher ticker now that the project anchor
+    // has settled. It runs every TEMPYR_JOURNAL_TICK_SECS (default 60s)
+    // for the lifetime of the MCP service, plus one final flush when
+    // the cancellation token fires. If the project root isn't a git
+    // repo, the ticker silently no-ops — journals are git-only.
+    if let Some(project_root) = tempyr_core::project::find_project_root() {
+        match journal_ticker::spawn(&project_root, shutdown.cancellation_token()) {
+            JournalTickerOutcome::Running { interval, .. } => {
+                eprintln!("tempyr journal ticker: every {}s", interval.as_secs());
+            }
+            JournalTickerOutcome::NotAGitRepo => {
+                eprintln!("tempyr journal ticker: not a git repo, skipping");
+            }
+            JournalTickerOutcome::Unavailable(msg) => {
+                eprintln!("tempyr journal ticker: unavailable ({msg})");
+            }
+        }
+    }
 
     match service.waiting().await? {
         QuitReason::Closed => shutdown.graceful_exit(ShutdownReason::StdinEof)?,
