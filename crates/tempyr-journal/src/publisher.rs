@@ -257,32 +257,32 @@ fn publish_one(
 
     if !already_existed {
         let jsonl_bytes = std::fs::read(&jsonl_path)?;
-        // meta.json is small but not huge — bundle it as an archived blob
-        // alongside the journal entries.
-        let meta_bytes = std::fs::read(&meta_path).unwrap_or_default();
+        // meta.json is part of the archived tree; an unreadable or
+        // missing sidecar is a real problem (corrupted session, half-
+        // written by a prior run, perms issue). Surface it instead of
+        // silently dropping the meta from the commit — the agent name,
+        // worktree hash, and HEAD captured there are load-bearing for
+        // the search index Phase 3 will build.
+        let meta_bytes = std::fs::read(&meta_path)?;
 
         let jsonl_blob = git::hash_object_blob(repo_root, &jsonl_bytes)?;
-        let meta_blob = if meta_bytes.is_empty() {
-            None
-        } else {
-            Some(git::hash_object_blob(repo_root, &meta_bytes)?)
-        };
+        let meta_blob = git::hash_object_blob(repo_root, &meta_bytes)?;
 
         // Tree entries must be sorted by name. "entries.jsonl" < "meta.json".
-        let mut entries = vec![TreeEntry {
-            mode: "100644",
-            kind: "blob",
-            sha: &jsonl_blob,
-            name: "entries.jsonl",
-        }];
-        if let Some(sha) = meta_blob.as_deref() {
-            entries.push(TreeEntry {
+        let entries = [
+            TreeEntry {
                 mode: "100644",
                 kind: "blob",
-                sha,
+                sha: &jsonl_blob,
+                name: "entries.jsonl",
+            },
+            TreeEntry {
+                mode: "100644",
+                kind: "blob",
+                sha: &meta_blob,
                 name: "meta.json",
-            });
-        }
+            },
+        ];
 
         let tree_sha = git::mktree(repo_root, &entries)?;
         let commit_message = format!("tempyr journal: {id}");
@@ -312,16 +312,18 @@ fn publish_one(
 }
 
 fn cleanup_session_files(jsonl: &Path, meta: &Path, ready: &Path) -> Result<()> {
-    // Remove ready first so a partial cleanup doesn't leave the publisher
-    // re-attempting on the next run.
-    if ready.exists() {
-        std::fs::remove_file(ready)?;
-    }
+    // Remove the payload first, then the marker. If any payload removal
+    // fails we leave `.ready` in place so the next publisher run can
+    // retry; removing `.ready` first would silently strand the session
+    // (not retriable + payload still on disk = confusing for a human).
     if jsonl.exists() {
         std::fs::remove_file(jsonl)?;
     }
     if meta.exists() {
         std::fs::remove_file(meta)?;
+    }
+    if ready.exists() {
+        std::fs::remove_file(ready)?;
     }
     Ok(())
 }
@@ -651,5 +653,68 @@ mod tests {
             .unwrap();
         assert_eq!(report.scanned, 1);
         assert_eq!(report.published_count(), 1);
+    }
+
+    #[test]
+    fn missing_meta_sidecar_surfaces_as_failure() {
+        // meta.json was previously silently dropped via `unwrap_or_default`.
+        // It carries the agent / branch / HEAD context the search index
+        // relies on; an unreadable sidecar must surface as a per-session
+        // failure (the .ready marker stays put for retry).
+        let fx = Fixture::new();
+        std::fs::remove_file(jpath::session_meta_path(
+            &fx.common_dir,
+            fx.session_id.as_str(),
+        ))
+        .unwrap();
+
+        let report = publish_ready_sessions(&fx.common_dir, &fx.repo, &PublishOptions::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.failed_count(), 1);
+        // Marker preserved for retry.
+        assert!(jpath::session_ready_marker(&fx.common_dir, fx.session_id.as_str()).exists());
+    }
+
+    #[test]
+    fn cleanup_removes_ready_marker_last() {
+        // Cleanup must remove .jsonl and .meta.json before .ready, so a
+        // failure midway leaves the session retriable rather than
+        // stranded with payload-but-no-marker. We verify by inspecting
+        // file timestamps after a successful run: if .ready is removed
+        // last, it doesn't exist (cleanup completed); if jsonl/meta
+        // remain after a successful flush, that's also a failure.
+        let fx = Fixture::new();
+        let _r = publish_ready_sessions(&fx.common_dir, &fx.repo, &PublishOptions::default())
+            .unwrap()
+            .unwrap();
+        // All three should be gone after a successful flush.
+        assert!(!jpath::session_jsonl_path(&fx.common_dir, fx.session_id.as_str()).exists());
+        assert!(!jpath::session_meta_path(&fx.common_dir, fx.session_id.as_str()).exists());
+        assert!(!jpath::session_ready_marker(&fx.common_dir, fx.session_id.as_str()).exists());
+
+        // Direct unit-test of the helper: if jsonl removal fails, .ready
+        // must still exist so a retry sees the session as ready.
+        let outer = tempfile::tempdir().unwrap();
+        let jsonl = outer.path().join("a.jsonl");
+        let meta = outer.path().join("a.meta.json");
+        let ready = outer.path().join("a.ready");
+        std::fs::write(&meta, b"meta").unwrap();
+        std::fs::write(&ready, b"").unwrap();
+        // Don't create jsonl: the helper currently checks `.exists()`
+        // before removing, so missing jsonl is fine. Build a different
+        // scenario: pre-fail by giving jsonl a path that exists but
+        // can't be removed. On Unix that's a directory; on Windows we
+        // can also try removing a directory as a file. Either way the
+        // helper's first remove_file call errors, and .ready must
+        // survive.
+        std::fs::create_dir_all(&jsonl).unwrap();
+        let result = cleanup_session_files(&jsonl, &meta, &ready);
+        assert!(result.is_err(), "removing a directory-as-file should fail");
+        assert!(
+            ready.exists(),
+            ".ready must survive a partial cleanup so the publisher can retry"
+        );
     }
 }

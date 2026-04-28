@@ -85,6 +85,21 @@ pub fn run(
         // Drop closes the pipe so git sees EOF.
     }
 
+    wait_with_timeout(child, args, timeout)
+}
+
+/// Wait for `child` to exit, draining its stdout/stderr in helper
+/// threads. If `timeout` elapses before exit, kill the child and return
+/// a timeout error tagged with `args` for context. Caller is responsible
+/// for setting up stdout/stderr as `Stdio::piped()` before spawning, and
+/// for handling stdin (writing-then-closing for normal use; or holding
+/// the stdin handle alive externally to make the child block on read,
+/// which is how the deterministic timeout test exercises this path).
+pub(crate) fn wait_with_timeout(
+    mut child: std::process::Child,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<GitOutput> {
     let stdout = child.stdout.take().expect("piped");
     let stderr = child.stderr.take().expect("piped");
     let out_h = thread::spawn(move || drain(stdout));
@@ -435,14 +450,36 @@ mod tests {
 
     #[test]
     fn timeout_kills_long_running_child() {
-        // We can't easily make `git` itself hang, so smoke-test the timeout
-        // path by giving git a very short deadline against a real op. With
-        // a 1ms timeout, the spawn-and-wait loop must hit the deadline
-        // (any op including process startup takes longer than 1ms on
-        // typical CI hardware).
+        // Deterministic: `git cat-file --batch` reads object specs from
+        // stdin and only exits when stdin closes (EOF) or it processes a
+        // shutdown line. Spawning it with a piped stdin we never write
+        // or close means the child *will* block until our deadline fires
+        // — no wall-clock racing. We can't go through `run()` itself
+        // because run() closes stdin after writing, which would let
+        // cat-file exit on EOF before the timeout.
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_repo(tmp.path());
-        let err = run(&repo, &["fsck"], None, Duration::from_millis(1)).unwrap_err();
+
+        let mut child = Command::new("git")
+            .args(["cat-file", "--batch"])
+            .current_dir(&repo)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn git cat-file");
+        // Hold the stdin handle for the lifetime of the wait so the
+        // child stays blocked on read; if we dropped it here the pipe
+        // would close and cat-file would exit before our deadline.
+        let stdin_keep = child.stdin.take();
+
+        let err = wait_with_timeout(child, &["cat-file", "--batch"], Duration::from_millis(200))
+            .unwrap_err();
+        drop(stdin_keep);
+
         let msg = err.to_string();
         assert!(msg.contains("timed out"), "should report timeout: {msg}");
     }
