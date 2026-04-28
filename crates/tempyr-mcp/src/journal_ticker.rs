@@ -26,27 +26,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use tempyr_journal::{PublishOptions, path as jpath, publish_ready_sessions};
+use tempyr_journal::{JournalConfig, PublishOptions, path as jpath, publish_ready_sessions};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-
-/// Default flush cadence when no override is provided. Conservative —
-/// agent sessions are bursty (many entries in a few seconds), so we
-/// don't need to be aggressive. The cost of a tick is one `read_dir`
-/// + a no-op git check when there's nothing ready.
-const DEFAULT_INTERVAL_SECS: u64 = 60;
-
-/// Read the tick interval from the env var, falling back to the
-/// [`DEFAULT_INTERVAL_SECS`]. Slice 3 will move this to `[journal]`
-/// config; slice 2 keeps it as a low-friction override.
-pub fn interval_from_env() -> Duration {
-    std::env::var("TEMPYR_JOURNAL_TICK_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(DEFAULT_INTERVAL_SECS))
-}
 
 /// What the ticker resolved at startup. Returned for diagnostics so
 /// the caller (the MCP entrypoint) can log whether the ticker actually
@@ -62,24 +44,49 @@ pub enum SpawnOutcome {
     },
     /// Project root isn't a git repo — nothing to ticker over.
     NotAGitRepo,
+    /// `[journal] enabled = false` in the project config; the user has
+    /// explicitly opted out of auto-publish. The CLI `tempyr journal
+    /// flush` still works for one-off flushes.
+    Disabled,
     /// Resolution failed for some other reason; we treat it as benign
     /// and skip rather than crashing the agent.
     Unavailable(String),
 }
 
 /// Spawn the ticker. `project_root` is the directory the MCP server
-/// anchored to (typically the user's project). On cancellation the
-/// loop breaks and one final flush runs before the task returns.
+/// anchored to (typically the user's project). Reads
+/// `<project_root>/.tempyr/config.toml`; if the file is missing, the
+/// loader returns [`JournalConfig::default`]. If the file *exists but
+/// fails to load* (malformed TOML, permission error, etc.) we return
+/// [`SpawnOutcome::Unavailable`] rather than silently falling back to
+/// the default — the user may have explicitly set `enabled = false`,
+/// and a parse error must not turn auto-publish back on.
+///
+/// On cancellation the loop breaks and one final flush runs before the
+/// task returns.
 pub fn spawn(project_root: &Path, cancellation_token: CancellationToken) -> SpawnOutcome {
-    spawn_with_interval(project_root, interval_from_env(), cancellation_token)
+    let config = match JournalConfig::load(&project_root.join(".tempyr")) {
+        Ok(cfg) => cfg,
+        Err(e) => return SpawnOutcome::Unavailable(format!("journal config: {e}")),
+    };
+    if !config.enabled {
+        return SpawnOutcome::Disabled;
+    }
+    let opts = PublishOptions::from_config(&config);
+    spawn_with(
+        project_root,
+        config.tick_interval(),
+        opts,
+        cancellation_token,
+    )
 }
 
-/// Same as [`spawn`] but with an explicit interval. Used by tests to
-/// avoid racing on the env-var override (tests in the same process
-/// share env state).
-pub fn spawn_with_interval(
+/// Same as [`spawn`] but with explicit interval and publish options.
+/// Used by tests so they don't have to round-trip through a TOML file.
+pub fn spawn_with(
     project_root: &Path,
     interval: Duration,
+    opts: PublishOptions,
     cancellation_token: CancellationToken,
 ) -> SpawnOutcome {
     let common_dir = match jpath::git_common_dir(project_root) {
@@ -98,6 +105,7 @@ pub fn spawn_with_interval(
             common_dir_for_task,
             repo_root_for_task,
             interval,
+            opts,
             cancellation_token,
         )
         .await;
@@ -114,6 +122,7 @@ async fn run_loop(
     common_dir: PathBuf,
     repo_root: PathBuf,
     interval: Duration,
+    opts: PublishOptions,
     cancellation_token: CancellationToken,
 ) {
     loop {
@@ -121,7 +130,7 @@ async fn run_loop(
             biased;
             _ = cancellation_token.cancelled() => break,
             _ = tokio::time::sleep(interval) => {
-                run_one_flush(&common_dir, &repo_root).await;
+                run_one_flush(&common_dir, &repo_root, &opts).await;
             }
         }
     }
@@ -130,16 +139,16 @@ async fn run_loop(
     // disk until the next agent invocation. This runs even if the
     // last scheduled tick fired moments ago — empty case is cheap
     // (publisher returns Ok with scanned == 0).
-    run_one_flush(&common_dir, &repo_root).await;
+    run_one_flush(&common_dir, &repo_root, &opts).await;
 }
 
-async fn run_one_flush(common_dir: &Path, repo_root: &Path) {
+async fn run_one_flush(common_dir: &Path, repo_root: &Path, opts: &PublishOptions) {
     let common_dir = common_dir.to_path_buf();
     let repo_root = repo_root.to_path_buf();
+    let opts = opts.clone();
     // The publisher pipeline shells out to git, which is blocking.
     // Hand it to spawn_blocking so we don't stall the tokio runtime.
     let _ = tokio::task::spawn_blocking(move || {
-        let opts = PublishOptions::default();
         // We don't surface the result here — failures are persisted in
         // state.json + publisher.log by the publisher itself, so the
         // status/logs CLIs and external readers can see them.
@@ -151,14 +160,8 @@ async fn run_one_flush(common_dir: &Path, repo_root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::time::Duration;
     use tempyr_journal::{PublisherState, SessionId, path as jpath};
-
-    /// Serialize tests that mutate `TEMPYR_JOURNAL_TICK_SECS`. Without
-    /// this, parallel tests would clobber each other's env state and
-    /// the assertions would race.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn init_repo_with_remote() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         let outer = tempfile::tempdir().unwrap();
@@ -216,42 +219,6 @@ mod tests {
         std::fs::write(jpath::session_ready_marker(common_dir, id.as_str()), b"").unwrap();
     }
 
-    #[test]
-    fn interval_env_override_applies() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        // SAFETY: tests in the same process share env. Set + unset cleanly.
-        unsafe {
-            std::env::set_var("TEMPYR_JOURNAL_TICK_SECS", "5");
-        }
-        assert_eq!(interval_from_env(), Duration::from_secs(5));
-        unsafe {
-            std::env::remove_var("TEMPYR_JOURNAL_TICK_SECS");
-        }
-    }
-
-    #[test]
-    fn interval_env_invalid_falls_back_to_default() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        unsafe {
-            std::env::set_var("TEMPYR_JOURNAL_TICK_SECS", "not-a-number");
-        }
-        assert_eq!(
-            interval_from_env(),
-            Duration::from_secs(DEFAULT_INTERVAL_SECS)
-        );
-        unsafe {
-            std::env::set_var("TEMPYR_JOURNAL_TICK_SECS", "0");
-        }
-        // Zero is treated as "unset" so the loop doesn't busy-spin.
-        assert_eq!(
-            interval_from_env(),
-            Duration::from_secs(DEFAULT_INTERVAL_SECS)
-        );
-        unsafe {
-            std::env::remove_var("TEMPYR_JOURNAL_TICK_SECS");
-        }
-    }
-
     #[tokio::test]
     async fn spawn_in_non_git_dir_returns_not_a_git_repo() {
         let dir = tempfile::tempdir().unwrap();
@@ -260,6 +227,56 @@ mod tests {
         match outcome {
             SpawnOutcome::NotAGitRepo => {}
             other => panic!("expected NotAGitRepo, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_respects_disabled_in_config() {
+        let (_outer, repo, _bare, _common) = init_repo_with_remote();
+        // Drop a config.toml with [journal] enabled = false next to .git.
+        let tempyr_dir = repo.join(".tempyr");
+        std::fs::create_dir_all(&tempyr_dir).unwrap();
+        std::fs::write(
+            tempyr_dir.join("config.toml"),
+            "[journal]\nenabled = false\n",
+        )
+        .unwrap();
+
+        let ct = CancellationToken::new();
+        let outcome = spawn(&repo, ct);
+        match outcome {
+            SpawnOutcome::Disabled => {}
+            other => panic!("expected Disabled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_unavailable_for_malformed_config() {
+        // Regression test: a malformed config must NOT silently fall
+        // back to defaults (which would have re-enabled auto-publish
+        // for a user who set `enabled = false` but corrupted the file
+        // mid-edit). Surface as Unavailable so the MCP entrypoint
+        // logs the error and the agent runs without auto-publish.
+        let (_outer, repo, _bare, _common) = init_repo_with_remote();
+        let tempyr_dir = repo.join(".tempyr");
+        std::fs::create_dir_all(&tempyr_dir).unwrap();
+        // Unbalanced brackets — toml parser rejects this.
+        std::fs::write(
+            tempyr_dir.join("config.toml"),
+            "[journal\nenabled = false\n",
+        )
+        .unwrap();
+
+        let ct = CancellationToken::new();
+        let outcome = spawn(&repo, ct);
+        match outcome {
+            SpawnOutcome::Unavailable(msg) => {
+                assert!(
+                    msg.contains("journal config"),
+                    "error should mention journal config: {msg}"
+                );
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
         }
     }
 
@@ -274,10 +291,16 @@ mod tests {
 
         // Long interval so the periodic tick *doesn't* fire — we want
         // to verify the final-flush behavior on cancellation, not a
-        // periodic tick. Using spawn_with_interval (not spawn) avoids
-        // sharing TEMPYR_JOURNAL_TICK_SECS with parallel tests.
+        // periodic tick. Using `spawn_with` (not `spawn`) gives the test
+        // direct control over the publish options without requiring a
+        // .tempyr/config.toml on disk.
         let ct = CancellationToken::new();
-        let outcome = spawn_with_interval(&repo, Duration::from_secs(3600), ct.clone());
+        let outcome = spawn_with(
+            &repo,
+            Duration::from_secs(3600),
+            PublishOptions::default(),
+            ct.clone(),
+        );
         let handle = match outcome {
             SpawnOutcome::Running { handle, .. } => handle,
             other => panic!("expected Running, got {other:?}"),
@@ -319,7 +342,12 @@ mod tests {
         let (_outer, repo, bare, common) = init_repo_with_remote();
 
         let ct = CancellationToken::new();
-        let outcome = spawn_with_interval(&repo, Duration::from_millis(150), ct.clone());
+        let outcome = spawn_with(
+            &repo,
+            Duration::from_millis(150),
+            PublishOptions::default(),
+            ct.clone(),
+        );
         let handle = match outcome {
             SpawnOutcome::Running { handle, .. } => handle,
             other => panic!("expected Running, got {other:?}"),

@@ -6,8 +6,9 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use clap::Args;
 use tempyr_journal::{
-    Confidence, EntryDraft, Kind, Polarity, PublishOptions, PublisherLock, PublisherState, Session,
-    SessionStatus, Severity, git as jgit, path as jpath, publish_ready_sessions, write_entry,
+    Confidence, EntryDraft, JournalConfig, Kind, Polarity, PublishOptions, PublisherLock,
+    PublisherState, Session, SessionStatus, Severity, git as jgit, path as jpath,
+    publish_ready_sessions, write_entry,
 };
 
 #[derive(Args, Debug)]
@@ -168,9 +169,10 @@ pub struct FlushArgs {
     /// removed; the user is responsible for pushing later.
     #[arg(long = "no-push")]
     pub no_push: bool,
-    /// Remote to push to. Defaults to `origin`.
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
+    /// Override the remote name. Defaults to the `[journal] remote` from
+    /// `.tempyr/config.toml`, or `origin` if no config is found.
+    #[arg(long)]
+    pub remote: Option<String>,
 }
 
 pub fn run_flush(args: FlushArgs, json_output: bool) -> Result<()> {
@@ -180,11 +182,22 @@ pub fn run_flush(args: FlushArgs, json_output: bool) -> Result<()> {
     let repo_root =
         jpath::repo_toplevel(&cwd).map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
 
-    let opts = PublishOptions {
-        dry_run: args.dry_run,
-        push: !args.no_push,
-        remote: args.remote,
-    };
+    // Resolve the publish options from config (if a `.tempyr/` is found
+    // by walking up from cwd) and then apply CLI overrides on top. The
+    // CLI flag wins when both are set; otherwise the config value flows
+    // through (remote, push timeout, pack-refs threshold).
+    let config = tempyr_core::project::find_project_root()
+        .map(|root| JournalConfig::load(&root.join(".tempyr")))
+        .transpose()
+        .map_err(|e| anyhow!("load journal config: {e}"))?
+        .unwrap_or_default();
+
+    let mut opts = PublishOptions::from_config(&config);
+    opts.dry_run = args.dry_run;
+    opts.push = !args.no_push;
+    if let Some(remote) = args.remote {
+        opts.remote = remote;
+    }
 
     let outcome = publish_ready_sessions(&common_dir, &repo_root, &opts)
         .map_err(|e| anyhow!(format!("publish: {e}")))?;

@@ -10,6 +10,7 @@ use anyhow::Context;
 
 use super::git_hooks;
 use super::index_cmd;
+use super::journal_init::{self, Visibility};
 use super::managed::{self, ManagedArtifact, WriteOutcome};
 use super::onboarding::{
     self, EmbeddingProviderChoice, ExistingDocMode, ExistingDocs, OnboardingSelections,
@@ -105,10 +106,18 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
     fs::create_dir_all(tempyr_dir.join("sessions"))?;
 
     fs::write(tempyr_dir.join("schema.toml"), DEFAULT_SCHEMA)?;
-    fs::write(
-        tempyr_dir.join("config.toml"),
-        render_config(selections.provider),
-    )?;
+
+    // Decide whether to ship `[journal] enabled = true`. If the project
+    // is a git repo whose `origin` looks public, default to disabled
+    // (with a clear warning) — agent reasoning shouldn't be world-
+    // readable by default. Anything else (private, undetermined, no
+    // git) gets `enabled = true`. The user can always flip the flag.
+    let journal_outcome = decide_journal_init(root);
+    let mut config_text = render_config(selections.provider);
+    config_text.push_str(&journal_init::render_journal_config_block(
+        journal_outcome.enabled,
+    ));
+    fs::write(tempyr_dir.join("config.toml"), config_text)?;
 
     let schema: tempyr_core::schema::Schema = DEFAULT_SCHEMA.parse()?;
     for node_type in schema.node_types.values() {
@@ -254,6 +263,8 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
         }
     }
 
+    summary.extend(journal_outcome.summary_lines);
+
     println!("{}", summary.join("\n"));
 
     if selections.run_index_rebuild {
@@ -266,6 +277,92 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
     }
 
     Ok(())
+}
+
+/// Result of preparing the journal section during init.
+struct JournalInitOutcome {
+    /// Goes directly into `[journal] enabled` in config.toml.
+    enabled: bool,
+    /// Lines to append to the init-summary printout.
+    summary_lines: Vec<String>,
+}
+
+/// Decide whether to ship `[journal] enabled = true` and configure the
+/// auto-fetch refspec on `origin`. Best-effort throughout: any sub-step
+/// that fails just gets surfaced as a warning line in the summary; we
+/// never abort the whole init.
+fn decide_journal_init(root: &Path) -> JournalInitOutcome {
+    // If the project root isn't inside a git repo, journals can still
+    // be configured later. Note this in the summary and ship enabled =
+    // true (no public-repo concern without a remote).
+    let in_git = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !in_git {
+        return JournalInitOutcome {
+            enabled: true,
+            summary_lines: vec![
+                "  .tempyr/config.toml  - [journal] enabled = true (no git repo detected; \
+configure remote later)"
+                    .to_string(),
+            ],
+        };
+    }
+
+    let visibility = journal_init::detect_visibility(root);
+    let mut summary_lines = Vec::new();
+    let enabled = match visibility {
+        Visibility::Public => {
+            summary_lines.push(
+                "  .tempyr/config.toml  - [journal] enabled = false (origin appears to be a \
+public GitHub repo; flip to true if you intentionally want world-readable \
+journal refs)"
+                    .to_string(),
+            );
+            false
+        }
+        Visibility::Private => {
+            summary_lines.push(
+                "  .tempyr/config.toml  - [journal] enabled = true (origin appears private)"
+                    .to_string(),
+            );
+            true
+        }
+        Visibility::Undetermined => {
+            summary_lines.push(
+                "  .tempyr/config.toml  - [journal] enabled = true (origin visibility \
+undetermined; install `gh` and re-run if you want a sharper default)"
+                    .to_string(),
+            );
+            true
+        }
+    };
+
+    // Configure the auto-fetch refspec so a regular `git fetch origin`
+    // also pulls journal refs. Failure is non-fatal — flip into a
+    // warning line.
+    match journal_init::configure_auto_fetch_refspec(root, "origin") {
+        Ok(true) => summary_lines.push(
+            "  git config           - added remote.origin.fetch = +refs/tempyr/journals/*"
+                .to_string(),
+        ),
+        Ok(false) => {
+            // Already present — quiet success, no summary line needed.
+        }
+        Err(e) => summary_lines.push(format!(
+            "  git config           - warning: could not add journal fetch refspec: {e}"
+        )),
+    }
+
+    JournalInitOutcome {
+        enabled,
+        summary_lines,
+    }
 }
 
 fn handle_doc_target(
