@@ -709,13 +709,14 @@ mod tests {
         let ready = outer.path().join("a.ready");
         std::fs::write(&meta, b"meta").unwrap();
         std::fs::write(&ready, b"").unwrap();
-        // Don't create jsonl: the helper currently checks `.exists()`
-        // before removing, so missing jsonl is fine. Build a different
-        // scenario: pre-fail by giving jsonl a path that exists but
-        // can't be removed. On Unix that's a directory; on Windows we
-        // can also try removing a directory as a file. Either way the
-        // helper's first remove_file call errors, and .ready must
-        // survive.
+        // `remove_if_present` calls `remove_file` directly and treats
+        // `NotFound` as success, so a missing jsonl wouldn't trigger
+        // the failure path we want to exercise. Force a real removal
+        // error instead by putting a *directory* at jsonl's path —
+        // `remove_file` on a directory errors with a non-NotFound kind
+        // on both Unix and Windows. The helper's first call propagates
+        // that error and `.ready` must still survive so the publisher
+        // can retry the session.
         std::fs::create_dir_all(&jsonl).unwrap();
         let result = cleanup_session_files(&jsonl, &meta, &ready);
         assert!(result.is_err(), "removing a directory-as-file should fail");
