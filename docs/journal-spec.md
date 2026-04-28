@@ -333,7 +333,7 @@ The journal becomes useful when agents can find old reasoning. Phase 3 builds a 
 
 #### Slice 3a — Index foundation
 
-- `<git-common-dir>/tempyr/journals/index.db` — derived SQLite (gitignored, rebuildable). Schema:
+- `<git-common-dir>/tempyr/journals/index.db` — derived SQLite (rebuildable; lives inside `.git/`, so it's not part of repository content and never tracked). Schema:
   - `entries(id, session_id, ts, agent, kind, summary, detail, body_hash, ...)` — one row per entry
   - `entries_fts` — FTS5 virtual table mirroring `summary` and `detail`
   - `entry_tags(entry_id, tag)`, `entry_files(entry_id, path)`, `entry_refs(entry_id, node_id)` — junction tables
@@ -361,7 +361,9 @@ The journal becomes useful when agents can find old reasoning. Phase 3 builds a 
 - New MCP tools: `journal_search(query, ...)` with `--explain` score breakdown.
 - New CLIs: `tempyr journal search`, `show <id>`, `sessions`, `tail`.
 
-#### Slice 3c — Auto-emit + hooks + polish
+### Phase 4: Auto-Emit, Hooks, and Polish
+
+Once search lands, the journal is useful when agents query it. Phase 4 closes the loop by making sure entries get *written* without an agent having to call `journal_log` explicitly, and tightens the surface around the existing tool set.
 
 - Auto-emit on task status transitions (CLI `tempyr update --status` and MCP `graph_update_node`):
   - `backlog → in_progress` → emit `plan` (provisional)
@@ -373,9 +375,9 @@ The journal becomes useful when agents can find old reasoning. Phase 3 builds a 
 - README "Session journal" section + mirror to `CLAUDE.md` and `AGENTS.md`.
 - `tempyr doctor` extension to surface journal-related health checks (lockfile orphaned, state.json corrupt, etc.).
 
-### Phase 4: v2 Backlog
+### Beyond Phase 4: v2 Backlog
 
-These are tracked but not committed. Listed roughly in expected priority order:
+Tracked but not committed. Listed roughly in expected priority order:
 
 - **HTML viewer** — `tempyr journal serve` opens a local axum SPA for browsing sessions.
 - **Cross-encoder reranking** — top-k from RRF rerun through a small reranker for higher precision on close calls.
