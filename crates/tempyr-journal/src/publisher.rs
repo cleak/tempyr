@@ -45,8 +45,17 @@ pub struct PublishOptions {
     /// refs/tempyr/journals/*`). Use [`dry_run`](Self::dry_run) instead
     /// if you want a non-destructive plan.
     pub push: bool,
-    /// Remote name for push. Slice 1 hardcodes "origin" via the CLI default.
+    /// Remote name for push. Resolved from [`crate::JournalConfig::remote`]
+    /// when invoked via `tempyr journal flush`; tests and direct callers
+    /// can override.
     pub remote: String,
+    /// Run `git pack-refs --all` after the run if `pushes_total` crossed
+    /// a multiple of this value. 0 disables pack-refs. Default 50.
+    pub pack_refs_every_n_pushes: u64,
+    /// Per-git-op timeout. Applies to push specifically; other ops use
+    /// [`crate::git::DEFAULT_TIMEOUT`] since they're local-only and
+    /// always fast.
+    pub push_timeout: std::time::Duration,
 }
 
 impl Default for PublishOptions {
@@ -55,6 +64,21 @@ impl Default for PublishOptions {
             dry_run: false,
             push: true,
             remote: "origin".to_string(),
+            pack_refs_every_n_pushes: 50,
+            push_timeout: std::time::Duration::from_secs(30),
+        }
+    }
+}
+
+impl PublishOptions {
+    /// Build options from a [`JournalConfig`]. CLI flags override afterward.
+    pub fn from_config(config: &crate::JournalConfig) -> Self {
+        Self {
+            dry_run: false,
+            push: true,
+            remote: config.remote.clone(),
+            pack_refs_every_n_pushes: config.pack_refs_every_n_pushes,
+            push_timeout: config.push_timeout(),
         }
     }
 }
@@ -116,6 +140,7 @@ pub fn publish_ready_sessions(
 
     let mut state = PublisherState::load(common_dir)?;
     let mut report = PublishReport::default();
+    let pushes_at_start = state.pushes_total;
 
     let ready_ids = scan_ready_sessions(common_dir)?;
     report.scanned = ready_ids.len();
@@ -194,6 +219,36 @@ pub fn publish_ready_sessions(
         };
         let _ = state.save(common_dir);
         report.results.push((id_str, status));
+    }
+
+    // pack-refs cadence: if pushes_total crossed a multiple of N during
+    // this run, consolidate loose refs. Without this, each archived
+    // session leaves a loose ref under refs/tempyr/journals/archive/...,
+    // which slows down `git for-each-ref` and bloats the .git dir.
+    // Failures are non-fatal; loose refs aren't broken, just not packed.
+    let n = opts.pack_refs_every_n_pushes;
+    if n > 0 && state.pushes_total > pushes_at_start && pushes_at_start / n < state.pushes_total / n
+    {
+        match git::pack_refs(repo_root, opts.push_timeout) {
+            Ok(_) => {
+                let _ = append_log(
+                    common_dir,
+                    LogLevel::Info,
+                    "pack_refs",
+                    json_map([("pushes_total", json!(state.pushes_total))]),
+                    crate::state::DEFAULT_MAX_LOG_BYTES,
+                );
+            }
+            Err(e) => {
+                let _ = append_log(
+                    common_dir,
+                    LogLevel::Warn,
+                    "pack_refs_failed",
+                    json_map([("error", json!(e.to_string()))]),
+                    crate::state::DEFAULT_MAX_LOG_BYTES,
+                );
+            }
+        }
     }
 
     let _ = append_log(
@@ -364,7 +419,7 @@ fn publish_one_inner(
     let mut pushed = false;
     if opts.push {
         let refspec = format!("{refname}:{refname}");
-        git::push_ref(repo_root, &opts.remote, &refspec, git::DEFAULT_TIMEOUT)?;
+        git::push_ref(repo_root, &opts.remote, &refspec, opts.push_timeout)?;
         pushed = true;
         progress.pushed = true;
     }
@@ -819,6 +874,73 @@ mod tests {
         assert!(
             ready.exists(),
             ".ready must survive a partial cleanup so the publisher can retry"
+        );
+    }
+
+    #[test]
+    fn pack_refs_runs_when_pushes_total_crosses_threshold() {
+        // The fixture uses pack_refs_every_n_pushes = 1 so every push
+        // triggers a pack-refs. After publishing one session we should
+        // see a `pack_refs` event in publisher.log.
+        let fx = Fixture::new();
+        let opts = PublishOptions {
+            pack_refs_every_n_pushes: 1,
+            ..Default::default()
+        };
+        let _r = publish_ready_sessions(&fx.common_dir, &fx.repo, &opts)
+            .unwrap()
+            .unwrap();
+
+        let log = std::fs::read_to_string(jpath::publisher_log_path(&fx.common_dir)).unwrap();
+        assert!(
+            log.contains("\"event\":\"pack_refs\""),
+            "expected pack_refs event in log: {log}"
+        );
+
+        // packed-refs file should now exist in the repo's .git dir,
+        // proving git pack-refs actually ran (it only writes the file
+        // when there's something to pack).
+        assert!(
+            fx.common_dir.join("packed-refs").exists(),
+            "git pack-refs should have produced a packed-refs file"
+        );
+    }
+
+    #[test]
+    fn pack_refs_skipped_when_threshold_zero() {
+        let fx = Fixture::new();
+        let opts = PublishOptions {
+            pack_refs_every_n_pushes: 0,
+            ..Default::default()
+        };
+        let _r = publish_ready_sessions(&fx.common_dir, &fx.repo, &opts)
+            .unwrap()
+            .unwrap();
+
+        let log = std::fs::read_to_string(jpath::publisher_log_path(&fx.common_dir)).unwrap();
+        assert!(
+            !log.contains("\"event\":\"pack_refs\""),
+            "pack_refs should not run when threshold is 0: {log}"
+        );
+    }
+
+    #[test]
+    fn pack_refs_only_runs_after_first_full_window() {
+        // With threshold 50 and only 1 push this run, we shouldn't
+        // cross a multiple of 50 yet → no pack_refs event.
+        let fx = Fixture::new();
+        let opts = PublishOptions {
+            pack_refs_every_n_pushes: 50,
+            ..Default::default()
+        };
+        let _r = publish_ready_sessions(&fx.common_dir, &fx.repo, &opts)
+            .unwrap()
+            .unwrap();
+
+        let log = std::fs::read_to_string(jpath::publisher_log_path(&fx.common_dir)).unwrap();
+        assert!(
+            !log.contains("\"event\":\"pack_refs\""),
+            "pack_refs should not run before crossing the first window"
         );
     }
 }

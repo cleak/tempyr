@@ -246,6 +246,15 @@ pub fn push_ref(repo: &Path, remote: &str, refspec: &str, timeout: Duration) -> 
     run(repo, &["push", "--quiet", remote, refspec], None, timeout)?.ok_or_err("push")
 }
 
+/// `git pack-refs --all` — consolidate loose refs into `packed-refs`.
+/// Journal archive refs accumulate as one loose ref per session under
+/// `refs/tempyr/journals/archive/<YYYY>/<MM>/<DD>/<id>`; without
+/// periodic packing the loose-ref directory grows unboundedly and slows
+/// down ref enumeration in tools like `git for-each-ref`. Idempotent.
+pub fn pack_refs(repo: &Path, timeout: Duration) -> Result<GitOutput> {
+    run(repo, &["pack-refs", "--all"], None, timeout)?.ok_or_err("pack-refs")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

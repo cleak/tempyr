@@ -3192,6 +3192,7 @@ dependencies = [
  "strsim",
  "tempfile",
  "thiserror",
+ "toml",
  "uuid",
 ]
 

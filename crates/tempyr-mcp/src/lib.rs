@@ -56,6 +56,9 @@ pub async fn serve_stdio_with_project_root_fallback(
             JournalTickerOutcome::Running { interval, .. } => {
                 eprintln!("tempyr journal ticker: every {}s", interval.as_secs());
             }
+            JournalTickerOutcome::Disabled => {
+                eprintln!("tempyr journal ticker: disabled in config");
+            }
             JournalTickerOutcome::NotAGitRepo => {
                 eprintln!("tempyr journal ticker: not a git repo, skipping");
             }
