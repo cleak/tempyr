@@ -679,6 +679,30 @@ pub struct JournalGetParams {
     pub id: String,
 }
 
+/// Parameters for the `journal_search` MCP tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalSearchParams {
+    /// FTS5 query string. Supports `"phrase"`, `term1 OR term2`, and
+    /// `prefix*`. Snake-case identifiers (e.g. `parse_and_insert`)
+    /// match as regular tokens.
+    pub query: String,
+    /// Restrict to one or more kinds. Snake_case strings (`plan`,
+    /// `finding`, `decision`, `dead_end`, `assumption`, `question`,
+    /// `risk`, `outcome`). Empty/absent = no filter.
+    pub kinds: Option<Vec<String>>,
+    /// Cap on returned hits. Default 10.
+    pub limit: Option<usize>,
+    /// Filter to entries newer than this many days.
+    pub since_days: Option<u32>,
+    /// Token budget for the response payload. Detail bodies are
+    /// truncated to fit; hits whose summary alone wouldn't fit are
+    /// dropped. Default 4000.
+    pub token_budget: Option<usize>,
+    /// Include a per-hit score breakdown (BM25 / recency / kind /
+    /// total). Useful when ranking surprises you. Default false.
+    pub explain: Option<bool>,
+}
+
 // Server
 
 /// Default agent identity when the embedder doesn't configure one. Most
@@ -1810,7 +1834,8 @@ impl TempyrServer {
 
     #[tool(
         name = "journal_get",
-        description = "Fetch one journal entry by id. Returns the full Entry JSON (kind, summary, detail, per-kind structured fields like chosen/rationale/approach/failure_mode, plus session and git context). On a cache miss, refreshes the index once and retries — so an agent can read an entry it just wrote via journal_log without waiting for the next flush. Returns null if the id is still missing after the retry, e.g. when the entry was published from another machine and you haven't fetched journal refs yet (`tempyr journal fetch`)."
+        description = "Fetch one journal entry by id. Returns the full Entry JSON (kind, summary, detail, per-kind structured fields like chosen/rationale/approach/failure_mode, plus session and git context). On a cache miss, refreshes the index once and retries — so an agent can read an entry it just wrote via journal_log without waiting for the next flush. Returns null if the id is still missing after the retry, e.g. when the entry was published from another machine and you haven't fetched journal refs yet (`tempyr journal fetch`).",
+        annotations(read_only_hint = true, idempotent_hint = true)
     )]
     fn journal_get(&self, Parameters(p): Parameters<JournalGetParams>) -> Result<String, String> {
         let (graph_dir, _gf_dir, _schema) = self.find_project()?;
@@ -1856,6 +1881,63 @@ impl TempyrServer {
             Some(e) => serde_json::to_string_pretty(&e).map_err(|e| e.to_string()),
             None => Ok("null".to_string()),
         }
+    }
+
+    #[tool(
+        name = "journal_search",
+        description = "Search journal entries by full-text query, ranked by BM25 + recency boost (14-day half-life) + kind boost (decisions/dead-ends weighted higher than plans/questions). Use this to find what past sessions know about a topic — e.g., to look up dead-ends another agent (or a past version of yourself) hit when tackling something similar. Filter by kind (e.g., `[\"dead_end\", \"decision\"]`) to focus on the high-value entries. The `explain` flag breaks the score into BM25 / recency / kind components — useful when ranking surprises you. Returns hits with full Entry JSON; detail bodies may be truncated to fit `token_budget`.",
+        annotations(read_only_hint = true, idempotent_hint = true)
+    )]
+    fn journal_search(
+        &self,
+        Parameters(p): Parameters<JournalSearchParams>,
+    ) -> Result<String, String> {
+        let (graph_dir, _gf_dir, _schema) = self.find_project()?;
+        let project_root = graph_dir
+            .parent()
+            .ok_or_else(|| "Failed to resolve project root from graph dir".to_string())?
+            .to_path_buf();
+        let common_dir = jpath::git_common_dir(&project_root).map_err(|e| e.to_string())?;
+        let repo_root = jpath::repo_toplevel(&project_root).map_err(|e| e.to_string())?;
+        let db_path = tempyr_journal_index::index_db_path(&common_dir);
+
+        // Refresh once before searching so an agent can find entries
+        // they just wrote via `journal_log`. Same rationale as
+        // `journal_get`: incremental refresh is cheap when the only
+        // new content is what just landed in `<journals>/open/`.
+        // Failure here surfaces — silently returning stale results
+        // would hide real problems.
+        tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+            .map_err(|e| format!("journal index refresh failed: {e}"))?;
+
+        // Translate kind strings to the typed Kind enum.
+        let mut kinds: Vec<Kind> = Vec::new();
+        if let Some(ks) = &p.kinds {
+            for s in ks {
+                kinds.push(Kind::parse_helpful(s).map_err(|e| e.to_string())?);
+            }
+        }
+
+        let opts = tempyr_journal_index::SearchOptions {
+            query: p.query,
+            kinds,
+            limit: p.limit.unwrap_or(10),
+            since_days: p.since_days,
+            token_budget: p
+                .token_budget
+                .unwrap_or(tempyr_journal_index::search::DEFAULT_TOKEN_BUDGET),
+            explain: p.explain.unwrap_or(false),
+        };
+
+        let conn = tempyr_journal_index::schema::open(&db_path).map_err(|e| e.to_string())?;
+        let hits = tempyr_journal_index::search(&conn, &opts).map_err(|e| e.to_string())?;
+
+        serde_json::to_string_pretty(&json!({
+            "query": opts.query,
+            "count": hits.len(),
+            "hits": hits,
+        }))
+        .map_err(|e| e.to_string())
     }
 
     #[tool(

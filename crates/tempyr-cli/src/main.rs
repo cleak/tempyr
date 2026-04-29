@@ -373,6 +373,16 @@ pub enum JournalAction {
     /// session safe); add `--force` to delete the db file outright
     /// for corrupt-db recovery.
     Index(commands::journal_cmd::IndexArgs),
+
+    /// Search journal entries by full-text query. Ranked by BM25 +
+    /// recency boost (14d half-life) + kind boost (decisions/
+    /// dead-ends weighted higher). Filter by `--kind` to focus on
+    /// the high-value entries. Use `--explain` for score breakdown.
+    Search(commands::journal_cmd::SearchArgs),
+
+    /// Show one journal entry by id. The id is what `journal log`
+    /// and `journal search` print.
+    Show(commands::journal_cmd::ShowArgs),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -714,6 +724,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             JournalAction::Logs(args) => commands::journal_cmd::run_logs(args, cli.json),
             JournalAction::Fetch(args) => commands::journal_cmd::run_fetch(args, cli.json),
             JournalAction::Index(args) => commands::journal_cmd::run_index(args, cli.json),
+            JournalAction::Search(args) => commands::journal_cmd::run_search(args, cli.json),
+            JournalAction::Show(args) => commands::journal_cmd::run_show(args, cli.json),
         },
         Commands::Update { check, force } => commands::update::run(check, force),
         Commands::Doctor => {

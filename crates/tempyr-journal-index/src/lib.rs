@@ -19,6 +19,7 @@
 pub mod indexer;
 pub mod lookup;
 pub mod schema;
+pub mod search;
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +27,7 @@ use thiserror::Error;
 
 pub use indexer::{IndexerReport, refresh_index};
 pub use lookup::{count_entries, get_entry};
+pub use search::{ScoreBreakdown, SearchHit, SearchOptions, search};
 
 /// Resolved location of `index.db` for a given git common dir.
 pub fn index_db_path(common_dir: &Path) -> PathBuf {

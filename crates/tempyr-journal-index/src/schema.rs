@@ -8,12 +8,20 @@
 //! and safe to call on every open. The schema version sits in a tiny
 //! `schema_meta` table; future migrations check it and bump.
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 
 use crate::Result;
 
 /// Bump when the schema changes in a way that needs a migration.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// History:
+/// - **1** (slice 3a): structural tables only — `entries`,
+///   junction tables, `sessions`, `indexer_state`.
+/// - **2** (slice 3b1): added `entries_fts` (FTS5 virtual table)
+///   and `AFTER INSERT/DELETE` triggers on `entries`. Open of an
+///   older db rebuilds the FTS5 contents from `entries` so
+///   existing 3a installs upgrade seamlessly.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Open the index db at `path`, creating its parent directory and
 /// applying the schema if needed. Pragmas are set for durability +
@@ -28,12 +36,71 @@ pub fn open(path: &std::path::Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     apply(&conn)?;
+    // Slice 3b1 schema-bump migration: if `entries_fts` is empty but
+    // `entries` already has rows (3a-era db opened by 3b1+ code),
+    // rebuild the FTS5 contents from `entries`. One-time O(n) scan;
+    // subsequent inserts feed via the AFTER INSERT trigger.
+    rebuild_fts_if_needed(&mut conn)?;
     Ok(conn)
+}
+
+/// Populate `entries_fts` from `entries` once on the 3a → 3b1
+/// upgrade path. We can't probe FTS5 directly to detect "is the
+/// index populated?": with `content='entries'`, `COUNT(*) FROM
+/// entries_fts` queries the linked entries table, not the FTS5
+/// index. Instead, we track the migration via a flag in
+/// `schema_meta` — set once, read cheaply on every open.
+const FTS_REBUILT_KEY: &str = "fts5_rebuilt_at_v2";
+
+/// Run the v1 → v2 FTS5 rebuild atomically.
+///
+/// The whole sequence — read flag, count entries, INSERT INTO
+/// entries_fts, INSERT OR REPLACE flag — runs inside `BEGIN IMMEDIATE`,
+/// which acquires the SQLite write lock up front. With multiple
+/// processes racing to open the same db, only one acquires the lock
+/// and runs the rebuild; the others block on `BEGIN IMMEDIATE`, then
+/// observe the flag set and skip. Without this, both processes could
+/// rebuild concurrently — FTS5 rebuild is idempotent (so no
+/// corruption) but the wasted O(n) scan compounds at scale.
+fn rebuild_fts_if_needed(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+    // Already rebuilt? Inside the IMMEDIATE transaction, this read
+    // sees any prior commit before we proceed.
+    let already: Option<String> = tx
+        .query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1",
+            params![FTS_REBUILT_KEY],
+            |r| r.get(0),
+        )
+        .ok();
+    if already.is_some() {
+        return Ok(()); // tx drops, rolls back the (no-op) read.
+    }
+
+    // Not flagged yet. If entries is empty, there's nothing to rebuild
+    // — but flag anyway so we don't redo this check on every open.
+    let entries_count: i64 = tx.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
+    if entries_count > 0 {
+        // FTS5's `rebuild` command re-derives the index from
+        // `content=` (the linked `entries` table). Atomic and faster
+        // than a manual INSERT-from-SELECT loop.
+        tx.execute(
+            "INSERT INTO entries_fts(entries_fts) VALUES ('rebuild')",
+            [],
+        )?;
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?1, 'true')",
+        params![FTS_REBUILT_KEY],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Apply (idempotently) the current schema. Records the schema version
@@ -109,6 +176,36 @@ pub fn apply(conn: &Connection) -> Result<()> {
             ts          TEXT NOT NULL,
             PRIMARY KEY (source_kind, source_key)
         );
+
+        -- FTS5 virtual table mirroring entries.summary + entries.detail.
+        -- `content='entries'` keeps content stored only in entries (no
+        -- duplication); `content_rowid='rowid'` lets us address rows by
+        -- the entries table's implicit rowid. Tokenizer: porter unicode61
+        -- stems prose words and folds diacritics — fits agent-written
+        -- summaries; code identifiers (`parse_and_insert`, `JournalConfig`)
+        -- mostly survive Porter stemming intact.
+        CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+            summary,
+            detail,
+            content='entries',
+            content_rowid='rowid',
+            tokenize='porter unicode61'
+        );
+
+        -- Keep entries_fts in sync. INSERT side: the indexer's
+        -- INSERT OR IGNORE path produces real inserts whose AFTER
+        -- INSERT trigger feeds FTS5; ignored rows (id collision) emit
+        -- no trigger, which is what we want. DELETE side fires the
+        -- contentless-table 'delete' command that tells FTS5 to
+        -- forget the row.
+        CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
+            INSERT INTO entries_fts(rowid, summary, detail)
+            VALUES (new.rowid, new.summary, COALESCE(new.detail, ''));
+        END;
+        CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
+            INSERT INTO entries_fts(entries_fts, rowid, summary, detail)
+            VALUES ('delete', old.rowid, old.summary, COALESCE(old.detail, ''));
+        END;
         "#,
     )?;
     conn.execute(
@@ -126,7 +223,8 @@ pub fn apply(conn: &Connection) -> Result<()> {
 pub fn truncate(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     // Order matters only because of FK cascades; with foreign_keys=ON
-    // deleting `entries` cascades to junction tables. We still
+    // deleting `entries` cascades to junction tables, and the AFTER
+    // DELETE trigger on entries cascades into entries_fts. We still
     // explicit-truncate `indexer_state` and `sessions` since they're
     // not FK-linked to entries.
     tx.execute_batch(

@@ -642,3 +642,191 @@ pub fn run_index(args: IndexArgs, json_output: bool) -> Result<()> {
 fn plural(n: u64) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
+
+#[derive(Args, Debug)]
+pub struct SearchArgs {
+    /// Full-text query. FTS5 syntax: `"phrase"`, `term1 OR term2`, `prefix*`.
+    pub query: String,
+    /// Restrict to one or more kinds (repeatable).
+    #[arg(long = "kind")]
+    pub kinds: Vec<String>,
+    /// Cap on returned hits (default 10).
+    #[arg(long, default_value = "10")]
+    pub limit: usize,
+    /// Filter to entries newer than N days.
+    #[arg(long)]
+    pub since_days: Option<u32>,
+    /// Token budget for the response. Detail bodies are truncated to fit.
+    #[arg(long)]
+    pub token_budget: Option<usize>,
+    /// Show per-hit score breakdown (BM25 / recency / kind / total).
+    #[arg(long)]
+    pub explain: bool,
+}
+
+pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("read current directory")?;
+    let common_dir =
+        jpath::git_common_dir(&cwd).map_err(|e| anyhow!("not in a git repository: {e}"))?;
+    let repo_root =
+        jpath::repo_toplevel(&cwd).map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
+
+    // Refresh first so the search sees anything the user just logged.
+    tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+        .map_err(|e| anyhow!("refresh index: {e}"))?;
+
+    let mut kinds: Vec<Kind> = Vec::new();
+    for s in &args.kinds {
+        kinds.push(Kind::parse_helpful(s).map_err(|e| anyhow!(format!("{e}")))?);
+    }
+
+    let opts = tempyr_journal_index::SearchOptions {
+        query: args.query.clone(),
+        kinds,
+        limit: args.limit,
+        since_days: args.since_days,
+        token_budget: args
+            .token_budget
+            .unwrap_or(tempyr_journal_index::search::DEFAULT_TOKEN_BUDGET),
+        explain: args.explain,
+    };
+
+    let db_path = tempyr_journal_index::index_db_path(&common_dir);
+    let conn =
+        tempyr_journal_index::schema::open(&db_path).map_err(|e| anyhow!("open index: {e}"))?;
+    let hits = tempyr_journal_index::search(&conn, &opts).map_err(|e| anyhow!("search: {e}"))?;
+
+    if json_output {
+        let payload = serde_json::json!({
+            "query": args.query,
+            "count": hits.len(),
+            "hits": hits,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+    } else if hits.is_empty() {
+        println!("no hits");
+    } else {
+        for (i, hit) in hits.iter().enumerate() {
+            let entry = &hit.entry;
+            println!(
+                "[{:>2}] {:<10} {} ({})",
+                i + 1,
+                entry.kind.as_str(),
+                entry.id,
+                entry.ts.format("%Y-%m-%d")
+            );
+            println!("     {}", entry.summary);
+            if let Some(detail) = &entry.detail
+                && !detail.is_empty()
+            {
+                println!("     {}", detail.lines().next().unwrap_or(detail));
+            }
+            if args.explain
+                && let Some(b) = &hit.explain
+            {
+                println!(
+                    "     score: {:.3} (bm25={:.3}, recency={:.3}, kind={:.3})",
+                    b.total, b.bm25, b.recency, b.kind
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Args, Debug)]
+pub struct ShowArgs {
+    /// Entry id (e.g. `j-4b511f6f9cf9425b906ae90c31bd3367`).
+    pub id: String,
+}
+
+pub fn run_show(args: ShowArgs, json_output: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("read current directory")?;
+    let common_dir =
+        jpath::git_common_dir(&cwd).map_err(|e| anyhow!("not in a git repository: {e}"))?;
+    let repo_root =
+        jpath::repo_toplevel(&cwd).map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
+
+    let db_path = tempyr_journal_index::index_db_path(&common_dir);
+
+    // Mirror journal_get: try, refresh on miss, retry once.
+    let conn =
+        tempyr_journal_index::schema::open(&db_path).map_err(|e| anyhow!("open index: {e}"))?;
+    let mut entry =
+        tempyr_journal_index::get_entry(&conn, &args.id).map_err(|e| anyhow!("lookup: {e}"))?;
+    drop(conn);
+    if entry.is_none() {
+        tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+            .map_err(|e| anyhow!("refresh index: {e}"))?;
+        let conn =
+            tempyr_journal_index::schema::open(&db_path).map_err(|e| anyhow!("open index: {e}"))?;
+        entry =
+            tempyr_journal_index::get_entry(&conn, &args.id).map_err(|e| anyhow!("lookup: {e}"))?;
+    }
+
+    let Some(entry) = entry else {
+        if json_output {
+            println!("null");
+        } else {
+            println!("no entry {} in index", args.id);
+            println!(
+                "(if the entry was published from another machine, run `tempyr journal fetch` first)"
+            );
+        }
+        // Non-zero so scripts can tell.
+        std::process::exit(1);
+    };
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&entry).unwrap_or_default()
+        );
+    } else {
+        println!("id:        {}", entry.id);
+        println!("kind:      {}", entry.kind.as_str());
+        println!("ts:        {}", entry.ts.to_rfc3339());
+        println!("agent:     {}", entry.agent);
+        println!("session:   {}", entry.session_id);
+        if let Some(b) = &entry.branch {
+            println!("branch:    {b}");
+        }
+        if let Some(h) = &entry.head {
+            println!("head:      {h}");
+        }
+        println!();
+        println!("summary:   {}", entry.summary);
+        if let Some(d) = &entry.detail {
+            println!();
+            println!("detail:");
+            for line in d.lines() {
+                println!("  {line}");
+            }
+        }
+        // Per-kind structured fields, when present.
+        if let Some(c) = &entry.chosen {
+            println!();
+            println!("chosen:    {c}");
+        }
+        if let Some(r) = &entry.rationale {
+            println!("rationale: {r}");
+        }
+        if let Some(rev) = entry.reversible {
+            println!("reversible: {rev}");
+        }
+        if let Some(a) = &entry.approach {
+            println!();
+            println!("approach:     {a}");
+        }
+        if let Some(f) = &entry.failure_mode {
+            println!("failure:      {f}");
+        }
+        if let Some(n) = &entry.next_to_try {
+            println!("next-to-try:  {n}");
+        }
+    }
+    Ok(())
+}
