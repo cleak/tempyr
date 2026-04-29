@@ -160,34 +160,11 @@ fn parse_opt<T: FromStr<Err = tempyr_journal::JournalError>>(s: Option<&str>) ->
         .map_err(|e| anyhow!(format!("{e}")))
 }
 
-/// Refresh the journal index, preferring the embedder path so vector
-/// search sees freshly-indexed entries. If the embedder is loaded but
-/// `refresh_index_with_embedder` fails (transient ONNX runtime error,
-/// embedding shape mismatch, vec0 hiccup), log the error and fall
-/// back to a structural-only `refresh_index` — the structural data
-/// has already been committed at the time the embed pass runs, so
-/// the second call is effectively idempotent and just gets us a
-/// usable report. Used by `run_flush`, `run_index`, and `run_search`
-/// to keep the recovery semantics identical at all three sites.
-fn refresh_index_preferring_embeddings(
-    common_dir: &std::path::Path,
-    repo_root: &std::path::Path,
-) -> std::result::Result<tempyr_journal_index::IndexerReport, tempyr_journal_index::IndexError> {
-    match tempyr_journal_index::try_shared_embedder() {
-        Some(emb) => {
-            match tempyr_journal_index::refresh_index_with_embedder(common_dir, repo_root, emb) {
-                Ok(report) => Ok(report),
-                Err(e) => {
-                    eprintln!(
-                        "warning: refresh with embedder failed, falling back to BM25-only: {e}"
-                    );
-                    tempyr_journal_index::refresh_index(common_dir, repo_root)
-                }
-            }
-        }
-        None => tempyr_journal_index::refresh_index(common_dir, repo_root),
-    }
-}
+// `refresh_index_preferring_embeddings` lives in `tempyr-journal-index`
+// (re-exported from the crate root) so the CLI and the MCP server
+// share a single fallback policy: try the embedder path, log + retry
+// with structural-only on embedder error, surface only hard failures.
+use tempyr_journal_index::refresh_index_preferring_embeddings;
 
 #[derive(Args, Debug)]
 pub struct FlushArgs {

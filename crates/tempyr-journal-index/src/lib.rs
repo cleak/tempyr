@@ -28,7 +28,9 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub use embed::{Embedder, try_shared_embedder};
-pub use indexer::{IndexerReport, refresh_index, refresh_index_with_embedder};
+pub use indexer::{
+    IndexerReport, refresh_index, refresh_index_preferring_embeddings, refresh_index_with_embedder,
+};
 pub use lookup::{count_entries, get_entry};
 pub use search::{ScoreBreakdown, SearchHit, SearchOptions, search};
 

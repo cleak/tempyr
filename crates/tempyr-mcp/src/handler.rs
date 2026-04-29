@@ -1902,24 +1902,15 @@ impl TempyrServer {
         let db_path = tempyr_journal_index::index_db_path(&common_dir);
 
         // Refresh once before searching so an agent can find entries
-        // they just wrote via `journal_log`. Same rationale as
-        // `journal_get`: incremental refresh is cheap when the only
-        // new content is what just landed in `<journals>/open/`.
-        // Failure here surfaces — silently returning stale results
-        // would hide real problems.
-        //
-        // Use the embedder when available so semantic search is ready
-        // immediately for newly-indexed entries; structural-only
-        // fallback on embedder load failure (e.g., model not yet
-        // downloaded on a fresh machine).
+        // they just wrote via `journal_log`. The shared
+        // `refresh_index_preferring_embeddings` helper handles the
+        // embedder-failure → structural-only fallback so a transient
+        // ONNX runtime / sqlite-vec hiccup mid-embed doesn't fail
+        // the whole search; only a hard structural-refresh failure
+        // surfaces here.
+        tempyr_journal_index::refresh_index_preferring_embeddings(&common_dir, &repo_root)
+            .map_err(|e| format!("journal index refresh failed: {e}"))?;
         let embedder = tempyr_journal_index::try_shared_embedder();
-        let refresh_result = match embedder {
-            Some(emb) => {
-                tempyr_journal_index::refresh_index_with_embedder(&common_dir, &repo_root, emb)
-            }
-            None => tempyr_journal_index::refresh_index(&common_dir, &repo_root),
-        };
-        refresh_result.map_err(|e| format!("journal index refresh failed: {e}"))?;
 
         // Translate kind strings to the typed Kind enum.
         let mut kinds: Vec<Kind> = Vec::new();

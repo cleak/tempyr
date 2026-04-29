@@ -94,29 +94,49 @@ impl Embedder {
 }
 
 /// Try to get a process-wide shared embedder. Lazy-initialized on
-/// the first call; subsequent calls return the same instance. On
-/// load failure (no ONNX runtime, network down for the first
-/// download, etc.) returns `None` — callers should fall back to
-/// BM25-only behavior cleanly rather than failing the whole
-/// search/refresh.
+/// the first successful call; subsequent calls return the same
+/// instance.
 ///
-/// The cost of the first `Some(_)` is the model download (~80 MB on
-/// first machine encounter) + ONNX runtime warmup (~1-2s). All
-/// subsequent calls are O(1).
+/// **Failure handling**: load errors do **not** poison the slot.
+/// Earlier versions memoized `None` on the first failure, which
+/// turned a transient error (network down for the first model
+/// download, ONNX runtime momentarily unavailable, disk briefly
+/// locked) into a permanent BM25-only mode for the rest of the
+/// process. Now the OnceLock only stores successful values; a
+/// failed call returns `None` *without* setting the slot, so the
+/// next call retries. The "warning" stderr line is gated on a
+/// separate one-shot flag so we don't spam.
+///
+/// The cost of the first `Some(_)` is the model download (~80 MB
+/// on first machine encounter) + ONNX runtime warmup (~1-2s). All
+/// subsequent successful calls are O(1).
 pub fn try_shared_embedder() -> Option<&'static Embedder> {
     use std::sync::OnceLock;
-    static EMB: OnceLock<Option<Embedder>> = OnceLock::new();
-    EMB.get_or_init(|| match Embedder::new() {
-        Ok(e) => Some(e),
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static EMB: OnceLock<Embedder> = OnceLock::new();
+    static WARNED: AtomicBool = AtomicBool::new(false);
+
+    if let Some(e) = EMB.get() {
+        return Some(e);
+    }
+    match Embedder::new() {
+        Ok(e) => {
+            // `set` returns Err if another thread won the race; in
+            // that case the slot already holds a value we can fetch
+            // unchanged. Either way `EMB.get()` succeeds afterward.
+            let _ = EMB.set(e);
+            EMB.get()
+        }
         Err(err) => {
-            // Best-effort: print once to stderr so the user sees
-            // why semantic search isn't kicking in. Subsequent
-            // callers see None silently.
-            eprintln!("warning: tempyr journal embedder unavailable, using BM25 only: {err}");
+            // Log on the first failure only — subsequent retries
+            // stay quiet so a hard "no model" environment doesn't
+            // emit a warning per search call.
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!("warning: tempyr journal embedder unavailable, using BM25 only: {err}");
+            }
             None
         }
-    })
-    .as_ref()
+    }
 }
 
 /// Convert a `Vec<f32>` to the little-endian bytes that sqlite-vec

@@ -407,6 +407,18 @@ fn run_vector_query(
     query_vector: &[f32],
     pull: i64,
 ) -> Result<Vec<RawHit>> {
+    // Front-load the contract check: the index's vec0 table is
+    // fixed at `EMBED_DIM` floats, and binding a wrong-length blob
+    // produces an opaque sqlite-vec error like "expected dim N got
+    // M" buried in a SqliteFailure. Catch it here so callers see a
+    // clear `IndexError::Embed` instead.
+    if query_vector.len() != crate::schema::EMBED_DIM {
+        return Err(crate::IndexError::Embed(format!(
+            "invalid query vector length: expected {}, got {}",
+            crate::schema::EMBED_DIM,
+            query_vector.len()
+        )));
+    }
     let qbytes = crate::embed::vec_to_bytes(query_vector);
     // Bind layout:
     //   ?1                        → query vec blob
@@ -1386,6 +1398,48 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n_cache_2, 1);
+        drop(outer);
+    }
+
+    #[test]
+    fn vector_query_rejects_wrong_dim_query_vector() {
+        // Regression: callers passing a query_vector of the wrong
+        // length used to fail with an opaque sqlite-vec error
+        // ("dimension mismatch") buried in a SqliteFailure. The
+        // pre-bind guard now returns IndexError::Embed with a clear
+        // message. Doesn't require fastembed (we hand-craft the
+        // bad vector) so this test stays in the default suite.
+        let (outer, repo, common) = fresh_repo();
+        // Seed at least one entry so the index db is set up; we
+        // never run the vector query against a real model here.
+        write_test_entry(
+            &common,
+            &repo,
+            Utc::now(),
+            Kind::Decision,
+            "decision summary that is sufficiently long to satisfy the validator",
+            None,
+        );
+        refresh_index(&common, &repo).unwrap();
+        let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+
+        // 100 floats — wrong length for the 384-d schema.
+        let bad_vec = vec![0.1_f32; 100];
+        let opts = SearchOptions {
+            query: "decision".to_string(),
+            query_vector: Some(bad_vec),
+            ..Default::default()
+        };
+        let err = search(&conn, &opts).unwrap_err();
+        match err {
+            crate::IndexError::Embed(msg) => {
+                assert!(
+                    msg.contains("expected 384") && msg.contains("got 100"),
+                    "error should name expected + actual dim: {msg}"
+                );
+            }
+            other => panic!("expected IndexError::Embed, got {other:?}"),
+        }
         drop(outer);
     }
 }

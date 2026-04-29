@@ -103,6 +103,37 @@ pub fn refresh_index_with_embedder(
     Ok(report)
 }
 
+/// Refresh the index, preferring the embedder path so vector
+/// search sees freshly-indexed entries.
+///
+/// **Fallback semantics**: if the embedder is loaded
+/// ([`crate::try_shared_embedder`] returns `Some`) and
+/// [`refresh_index_with_embedder`] succeeds, we're done. If it
+/// fails (transient ONNX runtime error, embedding shape mismatch,
+/// vec0 hiccup), this function logs the embedder error and retries
+/// with structural-only [`refresh_index`] — the structural data
+/// has already committed at that point, so the second call is
+/// effectively idempotent and just gets us a usable report. If
+/// the embedder isn't loaded, we go straight to structural-only.
+///
+/// Returns the report from whichever path succeeded; only a hard
+/// failure on the structural-only retry surfaces as an error.
+pub fn refresh_index_preferring_embeddings(
+    common_dir: &Path,
+    repo_root: &Path,
+) -> Result<IndexerReport> {
+    match crate::try_shared_embedder() {
+        Some(emb) => match refresh_index_with_embedder(common_dir, repo_root, emb) {
+            Ok(report) => Ok(report),
+            Err(e) => {
+                eprintln!("warning: refresh with embedder failed, falling back to BM25-only: {e}");
+                refresh_index(common_dir, repo_root)
+            }
+        },
+        None => refresh_index(common_dir, repo_root),
+    }
+}
+
 // --- Open-source refresh ---------------------------------------------------
 
 fn refresh_open(
