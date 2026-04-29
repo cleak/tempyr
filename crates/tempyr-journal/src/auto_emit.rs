@@ -74,37 +74,60 @@ fn build_draft(t: &TaskTransition<'_>) -> Option<EntryDraft> {
     if prior == t.new_status {
         return None;
     }
-    match (prior, t.new_status) {
+    let summary = match (prior, t.new_status) {
+        ("backlog", "in_progress") => format!("starting task {}: {}", t.node_id, t.title),
+        ("in_progress", "done") => format!("completed task {}: {}", t.node_id, t.title),
+        ("in_progress", "blocked") => format!("task {} blocked: {}", t.node_id, t.title),
+        _ => return None,
+    };
+    let summary = clamp_summary(summary);
+    let mut d = match (prior, t.new_status) {
         ("backlog", "in_progress") => {
-            let mut d = EntryDraft::new(
-                Kind::Plan,
-                format!("starting task {}: {}", t.node_id, t.title),
-            );
+            let mut d = EntryDraft::new(Kind::Plan, summary);
             d.provisional = true;
-            d.references = vec![t.node_id.to_string()];
-            Some(d)
+            d
         }
         ("in_progress", "done") => {
-            let mut d = EntryDraft::new(
-                Kind::Outcome,
-                format!("completed task {}: {}", t.node_id, t.title),
-            );
+            let mut d = EntryDraft::new(Kind::Outcome, summary);
             d.passed = Some(true);
             d.is_final = true;
-            d.references = vec![t.node_id.to_string()];
-            Some(d)
+            d
         }
         ("in_progress", "blocked") => {
-            let mut d = EntryDraft::new(
-                Kind::Risk,
-                format!("task {} blocked: {}", t.node_id, t.title),
-            );
+            let mut d = EntryDraft::new(Kind::Risk, summary);
             d.severity = Some(Severity::Blocker);
-            d.references = vec![t.node_id.to_string()];
-            Some(d)
+            d
         }
-        _ => None,
+        _ => unreachable!("filtered above"),
+    };
+    d.references = vec![t.node_id.to_string()];
+    Some(d)
+}
+
+/// Largest summary length the journal validator will accept (matches
+/// the upper bound enforced by `kind::validate_entry`). Synthesized
+/// summaries reuse the user-supplied node title verbatim, so a long
+/// H1 — or a future schema with relaxed title bounds — could blow the
+/// limit. Truncate at this many *Unicode scalars* so we never split a
+/// multi-byte char, and append a marker so the truncation is visible
+/// in the journal.
+const MAX_SUMMARY_CHARS: usize = 200;
+
+/// Truncation marker appended when a summary is shortened. Six chars
+/// is enough for `…` plus a `[cut]` tag — picked so the marker fits
+/// inside the budget and reads clearly in a CLI listing.
+const TRUNCATION_MARKER: &str = " […cut]";
+
+fn clamp_summary(s: String) -> String {
+    let len = s.chars().count();
+    if len <= MAX_SUMMARY_CHARS {
+        return s;
     }
+    let marker_chars = TRUNCATION_MARKER.chars().count();
+    let keep = MAX_SUMMARY_CHARS.saturating_sub(marker_chars);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push_str(TRUNCATION_MARKER);
+    out
 }
 
 #[cfg(test)]
@@ -177,5 +200,55 @@ mod tests {
         assert!(build_draft(&t("task", Some("backlog"), "done")).is_none());
         // done -> in_progress (re-opening) — also unmapped.
         assert!(build_draft(&t("task", Some("done"), "in_progress")).is_none());
+    }
+
+    #[test]
+    fn long_title_is_truncated_below_summary_limit() {
+        // Construct a title pushing the formatted summary well past the
+        // 200-char ceiling. Without truncation this would fail the
+        // writer's `validate_entry` length check at runtime.
+        let long_title = "x".repeat(500);
+        let transition = TaskTransition {
+            node_id: "task-overflow-aaaaaa",
+            node_type: "task",
+            title: &long_title,
+            prior_status: Some("backlog"),
+            new_status: "in_progress",
+        };
+        let draft = build_draft(&transition).unwrap();
+        assert!(
+            draft.summary.chars().count() <= MAX_SUMMARY_CHARS,
+            "summary still over limit: {} chars",
+            draft.summary.chars().count()
+        );
+        assert!(draft.summary.ends_with(TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn truncation_does_not_split_multibyte_characters() {
+        // Padding from the front with a 4-byte emoji ensures the
+        // boundary cuts inside what would be a multi-byte sequence
+        // for a byte-oriented truncation. Char-aware truncation must
+        // produce a valid UTF-8 string regardless.
+        let title: String = "🦀".repeat(300);
+        let transition = TaskTransition {
+            node_id: "task-utf8-aaaaaa",
+            node_type: "task",
+            title: &title,
+            prior_status: Some("backlog"),
+            new_status: "in_progress",
+        };
+        let draft = build_draft(&transition).unwrap();
+        // Round-trip through validation surrogate: every char boundary
+        // is intact (this would have panicked on a byte-split slice).
+        assert!(draft.summary.chars().count() <= MAX_SUMMARY_CHARS);
+        let reparsed: String = draft.summary.chars().collect();
+        assert_eq!(reparsed, draft.summary);
+    }
+
+    #[test]
+    fn short_summary_is_left_unchanged() {
+        let draft = build_draft(&t("task", Some("backlog"), "in_progress")).unwrap();
+        assert!(!draft.summary.ends_with(TRUNCATION_MARKER));
     }
 }

@@ -1,4 +1,5 @@
 use crate::config::ProjectContext;
+use std::path::Path;
 use tempyr_core::ops;
 use tempyr_journal::{TaskTransition, auto_emit_task_transition, path as jpath};
 
@@ -12,23 +13,29 @@ pub fn run(ctx: &ProjectContext, id: &str, new_status: &str) -> anyhow::Result<(
     // Phase 4a: best-effort journal entry on task status transitions.
     // A failure to find a git repo, open a session, or write the entry
     // must not roll back or report-fail the status change — we only log.
-    emit_journal_for_transition(id, new_status, &outcome);
+    emit_journal_for_transition(&ctx.root, id, new_status, &outcome);
 
     Ok(())
 }
 
-fn emit_journal_for_transition(id: &str, new_status: &str, outcome: &ops::UpdateOutcome) {
-    let cwd = match std::env::current_dir() {
+fn emit_journal_for_transition(
+    project_root: &Path,
+    id: &str,
+    new_status: &str,
+    outcome: &ops::UpdateOutcome,
+) {
+    // Anchor on the resolved project root, NOT `current_dir()`. With
+    // `--graph-dir /elsewhere/graph` (or a redirect) the user's shell
+    // can sit in a totally different repo — a cwd-based lookup would
+    // either skip the journal write or, worse, target the wrong repo's
+    // refs entirely.
+    let common_dir = match jpath::git_common_dir(project_root) {
         Ok(c) => c,
+        // Project is not inside a git repo. Tempyr supports that mode
+        // (no journals, no publisher) — silently skip the auto-emit.
         Err(_) => return,
     };
-    let common_dir = match jpath::git_common_dir(&cwd) {
-        Ok(c) => c,
-        // Not in a git repo — graph could still live outside one in
-        // tests / unusual setups. Silently skip the journal hook.
-        Err(_) => return,
-    };
-    let worktree_top = match jpath::repo_toplevel(&cwd) {
+    let worktree_top = match jpath::repo_toplevel(project_root) {
         Ok(w) => w,
         Err(_) => return,
     };

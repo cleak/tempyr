@@ -1119,7 +1119,8 @@ impl TempyrServer {
         // Failures are reported as a trailing warning line, never as a
         // tool error — the status change has already committed.
         if let Some(new_status) = p.status.as_deref()
-            && let Some(warning) = self.emit_journal_for_transition(&resolved, new_status, &outcome)
+            && let Some(warning) =
+                self.emit_journal_for_transition(&graph_dir, &resolved, new_status, &outcome)
         {
             response.push_str(&format!("\nWarning: {}", warning));
         }
@@ -1132,15 +1133,22 @@ impl TempyrServer {
     /// tool response), `None` on success or when no transition rule
     /// matched. Never propagates a hard error — the underlying status
     /// change has already been applied to disk.
+    ///
+    /// Anchors path resolution on the resolved project (`graph_dir`'s
+    /// parent), matching `journal_log` in this same file. The server's
+    /// `current_dir()` can point anywhere — particularly when an MCP
+    /// client launches `tempyr` from a different workspace — so using
+    /// it as the journal anchor would write to the wrong repo's refs.
     fn emit_journal_for_transition(
         &self,
+        graph_dir: &Path,
         node_id: &str,
         new_status: &str,
         outcome: &ops::UpdateOutcome,
     ) -> Option<String> {
-        let cwd = std::env::current_dir().ok()?;
-        let common_dir = jpath::git_common_dir(&cwd).ok()?;
-        let worktree_top = jpath::repo_toplevel(&cwd).ok()?;
+        let project_root = graph_dir.parent()?;
+        let common_dir = jpath::git_common_dir(project_root).ok()?;
+        let worktree_top = jpath::repo_toplevel(project_root).ok()?;
         let transition = TaskTransition {
             node_id,
             node_type: &outcome.node_type,

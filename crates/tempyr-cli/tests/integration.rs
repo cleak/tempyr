@@ -1036,12 +1036,17 @@ fn test_status_does_not_emit_for_non_task_nodes() {
 }
 
 fn init_git_repo(dir: &Path) {
-    ProcessCommand::new("git")
+    let status = ProcessCommand::new("git")
         .arg("init")
         .arg("--quiet")
         .current_dir(dir)
         .status()
-        .expect("git init should succeed");
+        .expect("git init should spawn");
+    assert!(
+        status.success(),
+        "git init exited with non-zero status {status} in {}",
+        dir.display()
+    );
 }
 
 fn read_journal_entries(open_dir: &Path) -> Vec<serde_json::Value> {
