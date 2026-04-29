@@ -1840,7 +1840,14 @@ impl TempyrServer {
         // a still-missing id after a refresh is a legitimate result
         // (e.g. cross-machine entry that hasn't been fetched).
         if entry.is_none() {
-            let _ = tempyr_journal_index::refresh_index(&common_dir, &repo_root);
+            // Propagate refresh failures rather than silently
+            // returning null — a `null` from journal_get should mean
+            // "definitely not in the index", not "we tried to refresh
+            // but couldn't tell you". Common refresh failures (db
+            // locked, git error, perms) are real problems the agent
+            // should see.
+            tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+                .map_err(|e| format!("journal index refresh failed: {e}"))?;
             let conn = tempyr_journal_index::schema::open(&db_path).map_err(|e| e.to_string())?;
             entry = tempyr_journal_index::get_entry(&conn, &p.id).map_err(|e| e.to_string())?;
         }

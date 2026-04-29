@@ -137,7 +137,15 @@ fn ingest_open_file(conn: &mut Connection, path: &Path, report: &mut IndexerRepo
             match parse_and_insert(&tx, line, "open") {
                 Ok(true) => report.inserted += 1,
                 Ok(false) => report.already_indexed += 1,
-                Err(_) => report.corrupt_lines += 1,
+                // Only un-parseable JSON / per-kind validation
+                // failures count as "corrupt_lines" — these are recoverable
+                // input problems where the right move is to skip the line
+                // and keep going. SQLite errors, IO errors, and re-serialize
+                // Json errors are real failures that must propagate so the
+                // caller sees them (and so the rolling transaction's
+                // implicit rollback on drop applies cleanly).
+                Err(IndexError::InvalidEntry(_)) => report.corrupt_lines += 1,
+                Err(e) => return Err(e),
             }
         }
         consumed += n as u64;
@@ -241,7 +249,12 @@ fn ingest_archive_ref(
         match parse_and_insert(&tx, line, "archive") {
             Ok(true) => report.inserted += 1,
             Ok(false) => report.already_indexed += 1,
-            Err(_) => report.corrupt_lines += 1,
+            // Same classification as the open path: only InvalidEntry
+            // (un-parseable JSON or per-kind validation failure) is a
+            // skippable corrupt line. Anything else is a real failure
+            // and must propagate.
+            Err(IndexError::InvalidEntry(_)) => report.corrupt_lines += 1,
+            Err(e) => return Err(e),
         }
     }
     write_last_sha(&tx, "archive", refname, sha)?;
@@ -780,5 +793,77 @@ mod tests {
         assert_eq!(off, 0);
         let sha = read_last_sha(&conn, "archive", "refs/never/seen/before").unwrap();
         assert!(sha.is_none());
+    }
+
+    #[test]
+    fn parse_and_insert_propagates_non_invalid_entry_errors() {
+        // Regression: previously the call sites' `Err(_)` arm collapsed
+        // every parse_and_insert error into `corrupt_lines`, hiding
+        // genuine SQLite / IO failures behind the corrupt-line counter.
+        // The fix narrows that arm to `IndexError::InvalidEntry`;
+        // anything else propagates.
+        //
+        // We trigger the propagation path by dropping the `entries`
+        // table BEFORE calling parse_and_insert. The serde parse
+        // succeeds (so we're past the InvalidEntry branch), but the
+        // SQL INSERT then fails with "no such table: entries", which
+        // `INSERT OR IGNORE` does NOT suppress (OR IGNORE only
+        // swallows constraint violations, not statement-execution
+        // errors). So we get back IndexError::Sqlite, which must
+        // propagate.
+        use tempyr_journal::{Entry, Kind};
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = schema::open(&dir.path().join("index.db")).unwrap();
+
+        // Drop the entries table to force a "no such table" on INSERT.
+        // We turn off foreign_keys for this connection first so the
+        // FK references in junction tables don't block the drop.
+        conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        conn.execute("DROP TABLE entries", []).unwrap();
+
+        let entry = Entry {
+            schema_version: tempyr_journal::SCHEMA_VERSION,
+            id: "j-test-propagation".into(),
+            ts: fixed_ts(),
+            agent: "claude".into(),
+            kind: Kind::Plan,
+            summary: "valid summary that is sufficiently long to satisfy the validator".into(),
+            detail: None,
+            tags: vec![],
+            files: vec![],
+            references: vec![],
+            session_id: "20260428-deadbeef-120000".into(),
+            worktree_hash: "deadbeef".into(),
+            branch: None,
+            head: None,
+            cwd: None,
+            provisional: false,
+            confidence: None,
+            severity: None,
+            alternatives: vec![],
+            chosen: None,
+            rationale: None,
+            reversible: None,
+            approach: None,
+            failure_mode: None,
+            next_to_try: None,
+            polarity: None,
+            passed: None,
+            build_ok: None,
+            commit_sha: None,
+            is_final: false,
+        };
+        let line = serde_json::to_vec(&entry).unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let result = parse_and_insert(&tx, &line, "open");
+        match result {
+            Err(IndexError::Sqlite(_)) => {} // expected
+            Err(IndexError::InvalidEntry(_)) => {
+                panic!("write-path SQLite error must not be classified as InvalidEntry")
+            }
+            Err(other) => panic!("expected Sqlite error, got {other:?}"),
+            Ok(_) => panic!("INSERT against a dropped table should have failed"),
+        }
     }
 }
