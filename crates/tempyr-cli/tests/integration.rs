@@ -1044,6 +1044,44 @@ fn test_status_auto_emits_journal_entry_on_task_transition() {
     );
 }
 
+/// `tempyr status --agent <name>` should record `<name>` on the
+/// auto-emitted entry so non-Claude agents can attribute the
+/// transition correctly. Mirrors the `--agent` flag already exposed
+/// on `tempyr journal log`.
+#[test]
+fn test_status_agent_override_attributes_journal_entry() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    write_node(
+        &tmp,
+        "tasks",
+        "task-attribute-thing-cccccc",
+        "---\nid: task-attribute-thing-cccccc\ntype: task\nstatus: backlog\n---\n# Attribute thing\n",
+    );
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "status",
+            "task-attribute-thing-cccccc",
+            "in_progress",
+            "--agent",
+            "codex",
+        ])
+        .assert()
+        .success();
+
+    let open_dir = tmp.path().join(".git/tempyr/journals/open");
+    let entries = read_journal_entries(&open_dir);
+    assert_eq!(entries.len(), 1, "expected exactly one auto-emitted entry");
+    assert_eq!(
+        entries[0]["agent"], "codex",
+        "agent override should be recorded on the entry"
+    );
+}
+
 /// Status changes on non-task nodes must NOT spawn a journal entry —
 /// auto-emit is scoped to the task lifecycle.
 #[test]

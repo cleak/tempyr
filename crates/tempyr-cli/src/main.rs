@@ -105,7 +105,17 @@ pub enum Commands {
     },
 
     /// Change a node's status
-    Status { id: String, new_status: String },
+    Status {
+        id: String,
+        new_status: String,
+        /// Agent name recorded on the auto-emitted journal entry (if
+        /// the status change matches a tracked task transition).
+        /// Mirrors the `--agent` flag on `tempyr journal log`. Set
+        /// this when running `tempyr status` from a non-Claude agent
+        /// so the journal correctly attributes the transition.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+    },
 
     /// Show all nodes reachable from a root
     Traverse {
@@ -555,9 +565,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             commands::rename::run(&ctx, &old_id, new_id.as_deref(), slug.as_deref())
         }
-        Commands::Status { id, new_status } => {
+        Commands::Status {
+            id,
+            new_status,
+            agent,
+        } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
-            commands::status_cmd::run(&ctx, &id, &new_status)
+            commands::status_cmd::run(&ctx, &id, &new_status, &agent)
         }
         Commands::Traverse {
             id,

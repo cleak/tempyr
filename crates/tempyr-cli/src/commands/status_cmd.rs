@@ -3,9 +3,7 @@ use std::path::Path;
 use tempyr_core::ops;
 use tempyr_journal::{TaskTransition, auto_emit_task_transition, path as jpath};
 
-const DEFAULT_JOURNAL_AGENT: &str = "claude";
-
-pub fn run(ctx: &ProjectContext, id: &str, new_status: &str) -> anyhow::Result<()> {
+pub fn run(ctx: &ProjectContext, id: &str, new_status: &str, agent: &str) -> anyhow::Result<()> {
     // Resolve up front so the user-printed message, the file lookup
     // inside `update_status`, and the journal entry all reference the
     // canonical full id. Tempyr accepts the 6-char suffix as a short
@@ -19,13 +17,14 @@ pub fn run(ctx: &ProjectContext, id: &str, new_status: &str) -> anyhow::Result<(
     // Phase 4a: best-effort journal entry on task status transitions.
     // A failure to find a git repo, open a session, or write the entry
     // must not roll back or report-fail the status change — we only log.
-    emit_journal_for_transition(&ctx.root, &resolved_id, new_status, &outcome);
+    emit_journal_for_transition(&ctx.root, agent, &resolved_id, new_status, &outcome);
 
     Ok(())
 }
 
 fn emit_journal_for_transition(
     project_root: &Path,
+    agent: &str,
     id: &str,
     new_status: &str,
     outcome: &ops::UpdateOutcome,
@@ -53,12 +52,7 @@ fn emit_journal_for_transition(
         prior_status: outcome.prior_status.as_deref(),
         new_status,
     };
-    if let Err(e) = auto_emit_task_transition(
-        &common_dir,
-        &worktree_top,
-        DEFAULT_JOURNAL_AGENT,
-        &transition,
-    ) {
+    if let Err(e) = auto_emit_task_transition(&common_dir, &worktree_top, agent, &transition) {
         eprintln!("warning: journal auto-emit for {id} failed: {e}");
     }
 }
