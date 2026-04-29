@@ -4,7 +4,7 @@
 
 - **Author**: Caleb (Principal Graphics Engineer)
 - **Created**: 2026-04-28
-- **Status**: Specification — Phases 1 and 2 implemented; Phase 3 (search) and Phase 4 (auto-emit + polish) pending
+- **Status**: Specification — Phases 1–4 implemented; cross-encoder rerank shipped post-Phase 4. Tracking remaining v2 backlog items inline.
 - **Scope**: The `tempyr-journal` crate, the `tempyr journal *` CLI surface, and the `journal_log` MCP tool. Does **not** cover the knowledge graph (see `graphspec.md`) or the interview engine (see `tempyr-interview-spec.md`).
 - **Repository language**: Rust (2024 edition, stable)
 
@@ -17,7 +17,7 @@ The Tempyr **journal** is an append-only log of agent reasoning, captured during
 Two design rules govern the whole subsystem:
 
 1. **Survive worktree abandonment.** Journal storage lives in the *primary* repo's `.git/` (resolved via `git rev-parse --git-common-dir`), not in a worktree's gitfile-style `.git`. Committing to refs means `git gc` won't reclaim the data; pushing means another machine can fetch it.
-2. **No external dependencies at runtime.** The journal subsystem is git-only — no daemon, no SQLite (yet — Phase 3), no embedding API. Agents write entries; a single in-process tokio ticker (or the `tempyr journal flush` CLI) commits and pushes them.
+2. **No external dependencies at runtime.** The journal subsystem is git-only at the storage layer — no daemon, no API to call. Phase 3 added a *derived* SQLite + FTS5 + sqlite-vec index for search, but it sits next to the storage layer (rebuildable from git refs and the open JSONL files); the journal itself is still git. Agents write entries; a single in-process tokio ticker (or the `tempyr journal flush` CLI) commits and pushes them.
 
 ### Why a separate journal at all?
 
@@ -29,8 +29,8 @@ The graph (PRD/TDD/task nodes) captures the *current* state of a project. The jo
 |---|---|---|
 | **1. Capture** | ✅ Shipped (PR #20) | JSONL writer, redaction, session lifecycle, `journal_log` MCP tool, `tempyr journal log` CLI |
 | **2. Publish** | ✅ Shipped (PRs #22, #23, #24) | Publisher pipeline (commit + push + cleanup), in-process tokio ticker, lockfile coordination, `[journal]` config, `tempyr journal flush`/`status`/`logs`/`fetch`, init wizard with public-repo detection, pack-refs cadence, multi-machine sync |
-| **3. Search** | 📋 Planned | SQLite + FTS5 + sqlite-vec index, hybrid retrieval (BM25 + vector + RRF + recency), `journal_search` and `journal_get` MCP tools, `tempyr journal search`/`show`/`sessions`/`tail`/`index` CLIs |
-| **4. Polish** | 📋 Planned | Auto-emit on task status transitions and interview lifecycle, `.claude/settings.json` hook templates, MCP annotations across existing tools, README/CLAUDE.md updates |
+| **3. Search** | ✅ Shipped (PRs #26, #27, #28) | SQLite + FTS5 + sqlite-vec index, hybrid retrieval (BM25 + vector + RRF + recency + kind boost), optional BGE-Reranker cross-encoder pass, `journal_search` and `journal_get` MCP tools, `tempyr journal search`/`show`/`sessions`/`tail`/`index` CLIs |
+| **4. Polish** | ✅ Shipped (PRs #29, #30, #31, #32) | Auto-emit on task status transitions (4a) and interview lifecycle (4b), `.claude/settings.json` SessionStart/SessionEnd hooks + `tempyr journal bootstrap`/`finalize` (4c), MCP annotations across all tools (4c), `tempyr doctor` journal section (4c), CLAUDE.md/AGENTS.md journal section (4d) |
 
 ---
 
@@ -321,15 +321,15 @@ Journals committed on machine A appear on machine B in two ways:
 
 The leading `+` allows forced updates so a republished session (rare but possible — e.g. after a remote-side history rewrite) doesn't wedge the fetch.
 
-GitHub's web UI doesn't render arbitrary refs under `refs/tempyr/journals/*`, so journal refs are invisible from the PR view. That's intentional — the journal is for agents and CLI tools, not human browsing. Phase 4 will add a `tempyr journal report` digest the user can paste into a PR description.
+GitHub's web UI doesn't render arbitrary refs under `refs/tempyr/journals/*`, so journal refs are invisible from the PR view. That's intentional — the journal is for agents and CLI tools, not human browsing. A `tempyr journal pr` digest the user can paste into a PR description is tracked in the v2 backlog ("PR description block"); not shipped yet.
 
 ---
 
 ## 9. Roadmap
 
-### Phase 3: Search and Retrieval
+### Phase 3: Search and Retrieval (shipped — PRs #26, #27, #28)
 
-The journal becomes useful when agents can find old reasoning. Phase 3 builds a derived search index next to the existing graph index.
+The journal becomes useful when agents can find old reasoning. Phase 3 built a derived search index next to the existing graph index. Sub-slices and the artifacts they produced:
 
 #### Slice 3a — Index foundation
 
@@ -356,14 +356,15 @@ The journal becomes useful when agents can find old reasoning. Phase 3 builds a 
   - RRF fusion (k=60) blends the two ranked lists
   - Recency boost: exponential decay with 14d half-life, additive in fused-rank space
   - Kind boost: `decision`/`dead_end` weighted higher than `plan`/`finding`/`question`
+  - **Optional cross-encoder rerank** (opt-in via `--rerank` / `rerank: true`): the top 50 RRF candidates are re-scored by the BGE-Reranker-base cross-encoder and re-sorted; the rerank score replaces the sort key while the other components stay populated for `--explain` inspection. Off by default because the model is ~280 MB and adds ~200 ms inference per query. Falls back transparently to the unreranked RRF order on model-load or inference failure.
   - Deduplication by `(summary, kind)` hash
   - Token-budget greedy fill: order by combined score, truncate `detail` to fit
-- New MCP tools: `journal_search(query, ...)` with `--explain` score breakdown.
-- New CLIs: `tempyr journal search`, `show <id>`, `sessions`, `tail`.
+- New MCP tools: `journal_search(query, ...)` with `--explain` score breakdown and a `rerank: bool` parameter.
+- New CLIs: `tempyr journal search` (with `--rerank`), `show <id>`, `sessions`, `tail`.
 
-### Phase 4: Auto-Emit, Hooks, and Polish
+### Phase 4: Auto-Emit, Hooks, and Polish (shipped — PRs #29, #30, #31, #32)
 
-Once search lands, the journal is useful when agents query it. Phase 4 closes the loop by making sure entries get *written* without an agent having to call `journal_log` explicitly, and tightens the surface around the existing tool set.
+With search shipped, the journal became useful when agents queried it. Phase 4 closed the loop by making sure entries get *written* without an agent having to call `journal_log` explicitly, and tightened the surface around the existing tool set.
 
 - Auto-emit on task status transitions (CLI `tempyr status` and MCP `graph_update_node`) — **implemented in slice 4a**:
   - `backlog → in_progress` → emit `plan` (provisional)
@@ -381,7 +382,9 @@ Once search lands, the journal is useful when agents query it. Phase 4 closes th
 Tracked but not committed. Listed roughly in expected priority order:
 
 - **HTML viewer** — `tempyr journal serve` opens a local axum SPA for browsing sessions.
-- **Cross-encoder reranking** — top-k from RRF rerun through a small reranker for higher precision on close calls.
+<!-- Cross-encoder reranking implemented post-Phase 4; folded into the
+     canonical Slice 3b retrieval pipeline above. -->
+
 - **Range queries** — `tempyr journal range A..B` filters to entries between two commit SHAs.
 - **Path-scoped queries** — `tempyr journal blame <file>` surfaces decisions/dead-ends touching a path.
 - **PR description block** — `tempyr journal pr` generates a markdown summary suitable for paste-into-PR.
@@ -414,7 +417,7 @@ Multi-publisher would require a much heavier coordination protocol: leader elect
 
 ### Why no SQLite in Phase 1+2?
 
-The capture and publish layers don't need a query interface — entries are written and pushed, never read except by humans browsing refs. Phase 3 introduces SQLite specifically for the search use case, where FTS5 + sqlite-vec deliver hybrid retrieval without external infrastructure. Building it in earlier would have added boot-time cost (db migrations, schema versioning) for no immediate benefit.
+The capture and publish layers don't need a query interface — entries are written and pushed, never read except by humans browsing refs. Phase 3 introduced SQLite specifically for the search use case, where FTS5 + sqlite-vec deliver hybrid retrieval without external infrastructure. Building it in earlier would have added boot-time cost (db migrations, schema versioning) for no immediate benefit.
 
 ### Why `gh` for visibility, not the GitHub API?
 
@@ -430,15 +433,15 @@ On Windows, exclusive byte-range locks (`File::lock`) prevent reads from a *diff
 
 ---
 
-## 11. Open Questions for Phase 3
+## 11. Open Questions (Phase 3 — historical)
 
-1. **Embedding model migration**: when fastembed adds a newer/better default, do we re-embed everything or version the embeddings table by `(model, dim)` and let queries fall back to the best available? Probably the latter.
-2. **Cross-repo search**: if a user has multiple tempyr-initialized projects, should `journal_search` search across all of them or just the current one? Default to current; add `--scope all` later.
-3. **Provisional filtering**: `--exclude-provisional` is the obvious flag, but should `journal_search` *exclude* provisional by default and require `--include-provisional`? Lean exclude-by-default.
-4. **PII redaction at search time**: should the search index re-apply the redactor on read in case the rules tightened since write? Probably yes, with an opt-out for trusted callers.
-5. **Auto-emit volume**: per-task and per-interview-action emissions could 10× the entry count. Do we deduplicate at write time (skip if last entry for this (kind, ref) was identical) or at search time? Deduplicate at write time — keeps the index lean.
+These were the open questions captured before slice 3a shipped. Kept here for the trade-off context they encode; the **resolution** column records what the implementation actually picked.
 
-These are worth answering before implementing 3a, but none gate it. Recording them here so a future contributor doesn't have to re-derive the trade-offs.
+1. **Embedding model migration**: when fastembed adds a newer/better default, do we re-embed everything or version the embeddings table by `(model, dim)` and let queries fall back to the best available? — *Resolution: deferred. The shipped index keys embeddings by `(body_hash, model)` in the cache so a model swap re-embeds rather than version-falling-back; no production model swap has happened yet.*
+2. **Cross-repo search**: if a user has multiple tempyr-initialized projects, should `journal_search` search across all of them or just the current one? — *Resolution: current repo only; `--scope all` not implemented and lives in the v2 backlog.*
+3. **Provisional filtering**: `--exclude-provisional` is the obvious flag, but should `journal_search` *exclude* provisional by default and require `--include-provisional`? — *Resolution: include-by-default. The auto-emit slices (4a/4b) write a lot of provisional entries; excluding them by default would hide most lifecycle context.*
+4. **PII redaction at search time**: should the search index re-apply the redactor on read in case the rules tightened since write? — *Resolution: not implemented. Redaction runs at write time only; tightening rules requires re-flushing affected sessions.*
+5. **Auto-emit volume**: per-task and per-interview-action emissions could 10× the entry count. Do we deduplicate at write time (skip if last entry for this `(kind, ref)` was identical) or at search time? — *Resolution: neither yet. The auto-emit transitions are bounded (≤1 per status change, ≤1 per interview event), so the predicted 10× growth hasn't materialized. Search-time dedup by `(summary_normalized, kind)` happens regardless.*
 
 ---
 
@@ -449,4 +452,4 @@ These are worth answering before implementing 3a, but none gate it. Recording th
 - `crates/tempyr-cli/src/commands/journal_init.rs` — init wizard helpers
 - `crates/tempyr-mcp/src/journal_ticker.rs` — in-process tokio ticker
 - `crates/tempyr-mcp/src/handler.rs` — MCP tool surface (search for `journal_log`)
-- PRs that built this: [#20](https://github.com/cleak/tempyr/pull/20) (capture), [#22](https://github.com/cleak/tempyr/pull/22) (publish), [#23](https://github.com/cleak/tempyr/pull/23) (CLIs + ticker), [#24](https://github.com/cleak/tempyr/pull/24) (config + init)
+- PRs that built this: [#20](https://github.com/cleak/tempyr/pull/20) (capture), [#22](https://github.com/cleak/tempyr/pull/22) (publish), [#23](https://github.com/cleak/tempyr/pull/23) (CLIs + ticker), [#24](https://github.com/cleak/tempyr/pull/24) (config + init), [#26](https://github.com/cleak/tempyr/pull/26) (slice 3a index foundation), [#27](https://github.com/cleak/tempyr/pull/27) (slice 3b1 BM25 search), [#28](https://github.com/cleak/tempyr/pull/28) (slice 3b2 hybrid retrieval), [#29](https://github.com/cleak/tempyr/pull/29) (slice 4a task auto-emit), [#30](https://github.com/cleak/tempyr/pull/30) (slice 4b interview auto-emit), [#31](https://github.com/cleak/tempyr/pull/31) (slice 4c hooks/annotations/doctor), [#32](https://github.com/cleak/tempyr/pull/32) (slice 4d docs)

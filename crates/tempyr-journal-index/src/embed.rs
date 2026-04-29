@@ -107,27 +107,78 @@ impl Embedder {
 /// next call retries. The "warning" stderr line is gated on a
 /// separate one-shot flag so we don't spam.
 ///
+/// How long to short-circuit `try_shared_embedder` after a failed
+/// load attempt. Without this backoff, a hard "no model" environment
+/// makes every `Embedder::new()` call hit the slow timeout path
+/// behind the INIT mutex; the backoff coalesces bursts of search
+/// requests in such an environment. 5 seconds matches the rerank
+/// module's value.
+const EMBED_RETRY_BACKOFF_MS: u64 = 5_000;
+
+/// **Cold-start serialization + retry backoff**: under concurrent
+/// first calls (two MCP `journal_search` requests racing for the
+/// first embedder), the `OnceLock` alone would let both threads kick
+/// off independent `Embedder::new()` invocations — each pulling
+/// ~80 MB and warming its own ONNX runtime, of which only one's
+/// value would actually be stored via `OnceLock::set`. We gate the
+/// load behind a separate `Mutex` and re-check `EMB.get()` after
+/// acquiring it (double-checked locking) so at most one model load
+/// is in flight at a time. After a *failed* load, an atomic
+/// last-failure timestamp short-circuits subsequent attempts within
+/// [`EMBED_RETRY_BACKOFF_MS`] so a hard-failing environment doesn't
+/// pay the slow timeout per search.
+///
 /// The cost of the first `Some(_)` is the model download (~80 MB
 /// on first machine encounter) + ONNX runtime warmup (~1-2s). All
 /// subsequent successful calls are O(1).
 pub fn try_shared_embedder() -> Option<&'static Embedder> {
-    use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
     static EMB: OnceLock<Embedder> = OnceLock::new();
+    static INIT: Mutex<()> = Mutex::new(());
     static WARNED: AtomicBool = AtomicBool::new(false);
+    /// Wall-clock millis (since UNIX epoch) of the last failed load.
+    /// 0 = no recorded failure. Relaxed ordering — stale reads at
+    /// most cause one extra retry past the backoff window.
+    static LAST_FAIL_MS: AtomicU64 = AtomicU64::new(0);
 
     if let Some(e) = EMB.get() {
         return Some(e);
     }
+    // Skip the full load if a recent attempt failed and we're still
+    // inside the backoff window.
+    let now_ms = unix_epoch_ms();
+    let last_fail = LAST_FAIL_MS.load(Ordering::Relaxed);
+    if last_fail != 0 && now_ms.saturating_sub(last_fail) < EMBED_RETRY_BACKOFF_MS {
+        return None;
+    }
+    // Serialize the cold-start path so racing callers don't each kick
+    // off their own ~80 MB download + warmup. A poisoned mutex from a
+    // panicked prior loader is recovered by destructuring the guard —
+    // the lock only acts as a barrier, it doesn't protect data.
+    let _guard = INIT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = EMB.get() {
+        return Some(e);
+    }
+    // Re-check the backoff window after acquiring the lock — another
+    // thread may have just failed while we were waiting.
+    let last_fail = LAST_FAIL_MS.load(Ordering::Relaxed);
+    if last_fail != 0 && unix_epoch_ms().saturating_sub(last_fail) < EMBED_RETRY_BACKOFF_MS {
+        return None;
+    }
     match Embedder::new() {
         Ok(e) => {
-            // `set` returns Err if another thread won the race; in
-            // that case the slot already holds a value we can fetch
-            // unchanged. Either way `EMB.get()` succeeds afterward.
+            // `set` only returns Err if another thread snuck a value
+            // in past us, which the INIT lock makes impossible — but
+            // ignore the error result anyway so future contributors
+            // don't have to reason about it.
             let _ = EMB.set(e);
+            // Clear any stale failure stamp on success.
+            LAST_FAIL_MS.store(0, Ordering::Relaxed);
             EMB.get()
         }
         Err(err) => {
+            LAST_FAIL_MS.store(unix_epoch_ms(), Ordering::Relaxed);
             // Log on the first failure only — subsequent retries
             // stay quiet so a hard "no model" environment doesn't
             // emit a warning per search call.
@@ -137,6 +188,16 @@ pub fn try_shared_embedder() -> Option<&'static Embedder> {
             None
         }
     }
+}
+
+/// Wall-clock millis since the UNIX epoch, saturating to 0 on the
+/// (effectively impossible) `SystemTime::now() < UNIX_EPOCH`.
+fn unix_epoch_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// Emit a one-shot warning to stderr that the query-embedding path

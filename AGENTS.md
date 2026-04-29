@@ -147,7 +147,7 @@ A failed auto-emit is downgraded to a warning, never aborts the underlying mutat
 
 Before re-deriving something, search the journal:
 
-- `journal_search "<query>"` -- hybrid retrieval (BM25 + recency + kind boost; vector reranking when embeddings are available). Filter by `--kind dead_end` to surface "approaches that didn't work."
+- `journal_search "<query>"` -- hybrid retrieval (BM25 + vec0 RRF + recency + kind boost). Pass `--rerank` to run a BGE cross-encoder over the top 50 RRF candidates and re-sort by relevance -- better on close calls (e.g. lexically distant but semantically on-topic). Filter by `--kind dead_end` to surface "approaches that didn't work."
 - `journal_get <id>` -- fetch one entry by id, transparently refreshes the index on a cache miss.
 
 ### Session lifecycle

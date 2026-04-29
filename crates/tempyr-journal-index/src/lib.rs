@@ -20,6 +20,7 @@ pub mod embed;
 pub mod embed_cache;
 pub mod indexer;
 pub mod lookup;
+pub mod rerank;
 pub mod schema;
 pub mod search;
 
@@ -32,6 +33,7 @@ pub use indexer::{
     IndexerReport, refresh_index, refresh_index_preferring_embeddings, refresh_index_with_embedder,
 };
 pub use lookup::{count_entries, get_entry};
+pub use rerank::{Reranker, try_shared_reranker, warn_query_rerank_failure_once};
 pub use search::{ScoreBreakdown, SearchHit, SearchOptions, search};
 
 /// Resolved location of `index.db` for a given git common dir.

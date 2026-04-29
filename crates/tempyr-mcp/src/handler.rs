@@ -717,6 +717,12 @@ pub struct JournalSearchParams {
     /// Include a per-hit score breakdown (BM25 / recency / kind /
     /// total). Useful when ranking surprises you. Default false.
     pub explain: Option<bool>,
+    /// Run a cross-encoder over the top-50 RRF candidates and re-sort
+    /// by relevance. Higher accuracy on close calls at the cost of a
+    /// one-time ~280 MB model download and ~200 ms of inference per
+    /// query. Falls back transparently to the unreranked RRF order
+    /// if the model fails to load. Default false.
+    pub rerank: Option<bool>,
 }
 
 // Server
@@ -2272,6 +2278,7 @@ impl TempyrServer {
                 .token_budget
                 .unwrap_or(tempyr_journal_index::search::DEFAULT_TOKEN_BUDGET),
             explain: p.explain.unwrap_or(false),
+            rerank: p.rerank.unwrap_or(false),
         };
 
         let conn = tempyr_journal_index::schema::open(&db_path).map_err(|e| e.to_string())?;

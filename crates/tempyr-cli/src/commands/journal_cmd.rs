@@ -691,6 +691,14 @@ pub struct SearchArgs {
     /// Show per-hit score breakdown (BM25 / recency / kind / total).
     #[arg(long)]
     pub explain: bool,
+    /// Run a cross-encoder over the top-50 RRF candidates and re-sort
+    /// by relevance. Higher accuracy on close calls (decisions vs.
+    /// dead-ends, semantically-related-but-lexically-distant hits)
+    /// at the cost of a one-time ~280 MB model download and ~200 ms
+    /// of inference per query. Falls back transparently to the
+    /// unreranked RRF order if the model fails to load.
+    #[arg(long)]
+    pub rerank: bool,
 }
 
 pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
@@ -739,6 +747,7 @@ pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
             .token_budget
             .unwrap_or(tempyr_journal_index::search::DEFAULT_TOKEN_BUDGET),
         explain: args.explain,
+        rerank: args.rerank,
     };
 
     let db_path = tempyr_journal_index::index_db_path(&common_dir);
@@ -780,11 +789,21 @@ pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
                 // Vector and rrf are 0 in BM25-only mode; we still
                 // print them so the line shape is stable across
                 // modes and the agent can tell which mode is active
-                // from the values.
-                println!(
-                    "     score: {:.3} (bm25={:.3}, vector={:.3}, rrf={:.3}, recency={:.3}, kind={:.3})",
-                    b.total, b.bm25, b.vector, b.rrf, b.recency, b.kind
-                );
+                // from the values. The `reranked` flag distinguishes
+                // "rerank actually ran" from "rerank was requested
+                // but the model failed to load and we fell back to
+                // RRF" — `args.rerank` alone can't tell those apart.
+                if b.reranked {
+                    println!(
+                        "     score: {:.3} = rerank (bm25={:.3}, vector={:.3}, rrf={:.3}, recency={:.3}, kind={:.3} — informational only)",
+                        b.total, b.bm25, b.vector, b.rrf, b.recency, b.kind
+                    );
+                } else {
+                    println!(
+                        "     score: {:.3} (bm25={:.3}, vector={:.3}, rrf={:.3}, recency={:.3}, kind={:.3})",
+                        b.total, b.bm25, b.vector, b.rrf, b.recency, b.kind
+                    );
+                }
             }
         }
     }
