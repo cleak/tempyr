@@ -884,3 +884,147 @@ pub fn run_show(args: ShowArgs, json_output: bool) -> Result<()> {
     }
     Ok(())
 }
+
+#[derive(Args, Debug)]
+pub struct BootstrapArgs {
+    /// Suppress the "bootstrapped" success line. Useful inside hook
+    /// commands where stdout is shown to the user verbatim and we
+    /// only want output on failure.
+    #[arg(long)]
+    pub quiet: bool,
+}
+
+/// Ensure `<git-common-dir>/tempyr/journals/{open,publisher.log}` exists.
+/// Designed for the `SessionStart` Claude Code hook so a freshly-opened
+/// agent session has a place to write journal entries before any other
+/// tool runs. Idempotent — calling it twice (or against an already-
+/// populated layout) is a no-op.
+///
+/// Outside a git repo we exit 0 silently rather than erroring: tempyr
+/// supports operating outside git (no journal, no publisher) and a
+/// hook that fails on every Claude session start would be worse than
+/// no hook at all.
+pub fn run_bootstrap(args: BootstrapArgs, json_output: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("read current directory")?;
+    let common_dir = match jpath::git_common_dir(&cwd) {
+        Ok(c) => c,
+        Err(_) => {
+            // Not in a git repo — silently succeed. Hooks should not
+            // fail just because the user opened Claude in a non-tempyr
+            // directory.
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "bootstrapped": false,
+                        "reason": "not in a git repository",
+                    }))
+                    .unwrap_or_default()
+                );
+            }
+            return Ok(());
+        }
+    };
+    jpath::ensure_layout(&common_dir).context("ensure journal layout")?;
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "bootstrapped": true,
+                "journals_dir": jpath::journals_root(&common_dir).to_string_lossy(),
+            }))
+            .unwrap_or_default()
+        );
+    } else if !args.quiet {
+        println!(
+            "Journal layout ready at {}",
+            jpath::journals_root(&common_dir).display()
+        );
+    }
+    Ok(())
+}
+
+#[derive(Args, Debug)]
+pub struct FinalizeArgs {
+    /// Agent name. Defaults to "claude". A finalize call only acts on
+    /// the active session belonging to *this* agent on *this* worktree;
+    /// other agents' sessions are left alone.
+    #[arg(long, default_value = "claude")]
+    pub agent: String,
+    /// Suppress success output, mirroring the `bootstrap` flag.
+    #[arg(long)]
+    pub quiet: bool,
+}
+
+/// Mark the active journal session for the (worktree, agent) pair as
+/// ready for the publisher to archive. Designed for the `SessionEnd`
+/// Claude Code hook.
+///
+/// Behavior:
+/// - Outside a git repo → silent no-op (same rationale as `bootstrap`).
+/// - No active session → silent no-op (the agent never logged anything,
+///   so there's nothing to finalize).
+/// - Active session → write the `.ready` marker. Idempotent: if the
+///   marker already exists `Session::finalize` just touches it again.
+///
+/// Doesn't trigger publish — that stays in `tempyr journal flush` so
+/// CI/local timing stays explicit. A user wanting auto-publish on
+/// session end can chain `tempyr journal finalize && tempyr journal flush`
+/// in their hook.
+pub fn run_finalize(args: FinalizeArgs, json_output: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("read current directory")?;
+    let common_dir = match jpath::git_common_dir(&cwd) {
+        Ok(c) => c,
+        Err(_) => {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "finalized": false,
+                        "reason": "not in a git repository",
+                    }))
+                    .unwrap_or_default()
+                );
+            }
+            return Ok(());
+        }
+    };
+    let worktree_top =
+        jpath::repo_toplevel(&cwd).map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
+
+    let active = Session::find_active(&common_dir, &worktree_top, &args.agent)
+        .map_err(|e| anyhow!("look up active session: {e}"))?;
+
+    let outcome = match active {
+        Some(session) => {
+            session
+                .finalize()
+                .map_err(|e| anyhow!("finalize session: {e}"))?;
+            Some(session.id().as_str().to_string())
+        }
+        None => None,
+    };
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "finalized": outcome.is_some(),
+                "session_id": outcome,
+            }))
+            .unwrap_or_default()
+        );
+    } else if !args.quiet {
+        match &outcome {
+            Some(id) => println!("Finalized session {id}"),
+            None => {
+                println!(
+                    "No active session for agent '{}' on this worktree.",
+                    args.agent
+                )
+            }
+        }
+    }
+    Ok(())
+}

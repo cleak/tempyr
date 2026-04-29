@@ -873,7 +873,13 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_search",
-        description = "Full-text keyword search across all graph nodes. Searches body text, titles, and tags. Optionally filter results by metadata (type, status, owner)."
+        description = "Full-text keyword search across all graph nodes. Searches body text, titles, and tags. Optionally filter results by metadata (type, status, owner).",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn graph_search(&self, Parameters(p): Parameters<GraphSearchParams>) -> Result<String, String> {
         let max_results = p.max_results.unwrap_or(10) as usize;
@@ -908,7 +914,13 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_list",
-        description = "List graph nodes by metadata filters. Unlike graph_search, no search query is needed - filters on type, status, and owner directly."
+        description = "List graph nodes by metadata filters. Unlike graph_search, no search query is needed - filters on type, status, and owner directly.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn graph_list(&self, Parameters(p): Parameters<GraphListParams>) -> Result<String, String> {
         let max_results = p.max_results.unwrap_or(50) as usize;
@@ -943,7 +955,13 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_context",
-        description = "Hybrid retrieval combining structural traversal, keyword search, and semantic search"
+        description = "Hybrid retrieval combining structural traversal, keyword search, and semantic search",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn graph_context(
         &self,
@@ -993,7 +1011,13 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_traverse",
-        description = "Follow edges from a node to find connected nodes"
+        description = "Follow edges from a node to find connected nodes",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn graph_traverse(
         &self,
@@ -1023,7 +1047,13 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_get_node",
-        description = "Get the full content of a specific node by ID"
+        description = "Get the full content of a specific node by ID",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn graph_get_node(
         &self,
@@ -1037,7 +1067,13 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_stats",
-        description = "Get graph statistics: node counts by type, edge counts"
+        description = "Get graph statistics: node counts by type, edge counts",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn graph_stats(&self) -> Result<String, String> {
         let (graph_dir, _, schema) = self.find_project()?;
@@ -1059,7 +1095,13 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_add_node",
-        description = "Create a new node in the graph. Provide a human-readable slug; the system generates a 6-char suffix to form the full ID (e.g. slug 'session-replay' -> ID 'session-replay-a1b2c3')."
+        description = "Create a new node in the graph. Provide a human-readable slug; the system generates a 6-char suffix to form the full ID (e.g. slug 'session-replay' -> ID 'session-replay-a1b2c3').",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     fn graph_add_node(
         &self,
@@ -1086,7 +1128,13 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_update_node",
-        description = "Update an existing node's body, status, owner, or tags. Only provided fields are changed."
+        description = "Update an existing node's body, status, owner, or tags. Only provided fields are changed.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     fn graph_update_node(
         &self,
@@ -1195,7 +1243,13 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_add_edge",
-        description = "Add a directed edge between two existing nodes. The reverse edge is written automatically."
+        description = "Add a directed edge between two existing nodes. The reverse edge is written automatically.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     fn graph_add_edge(
         &self,
@@ -1228,7 +1282,13 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_validate",
-        description = "Validate graph consistency. Returns any errors or warnings."
+        description = "Validate graph consistency. Returns any errors or warnings.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn graph_validate(&self) -> Result<String, String> {
         let (graph_dir, _, schema) = self.find_project()?;
@@ -1249,7 +1309,13 @@ impl TempyrServer {
 
     #[tool(
         name = "graph_render",
-        description = "Render a document (PRD, TDD) from a root node"
+        description = "Render a document (PRD, TDD) from a root node",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn graph_render(&self, Parameters(p): Parameters<GraphRenderParams>) -> Result<String, String> {
         let (graph_dir, gf_dir, schema) = self.find_project()?;
@@ -1280,7 +1346,13 @@ impl TempyrServer {
 
     #[tool(
         name = "interview_start",
-        description = "Start a new interview session from a brain dump or idea description. Returns tentative nodes, existing graph context, gaps to explore, and the first questions to ask."
+        description = "Start a new interview session from a brain dump or idea description. Returns tentative nodes, existing graph context, gaps to explore, and the first questions to ask.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     fn interview_start(
         &self,
@@ -1353,7 +1425,13 @@ impl TempyrServer {
 
     #[tool(
         name = "interview_answer",
-        description = "Process a user's answer during an interview. Updates session state, fills gaps, may advance the interview phase."
+        description = "Process a user's answer during an interview. Updates session state, fills gaps, may advance the interview phase.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     fn interview_answer(
         &self,
@@ -1426,7 +1504,13 @@ impl TempyrServer {
 
     #[tool(
         name = "interview_show",
-        description = "Return the full tentative graph state for review. Shows all proposed nodes grouped by type, edges, remaining gaps, and Q&A history."
+        description = "Return the full tentative graph state for review. Shows all proposed nodes grouped by type, edges, remaining gaps, and Q&A history.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn interview_show(
         &self,
@@ -1443,7 +1527,13 @@ impl TempyrServer {
 
     #[tool(
         name = "interview_commit",
-        description = "Write all tentative nodes and edges to disk, creating graph files. Validates the resulting graph. Deletes the session on success."
+        description = "Write all tentative nodes and edges to disk, creating graph files. Validates the resulting graph. Deletes the session on success.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     fn interview_commit(
         &self,
@@ -1499,7 +1589,13 @@ impl TempyrServer {
 
     #[tool(
         name = "interview_adjust",
-        description = "Modify a tentative node during an interview (change body, status, or ID). Re-runs gap analysis after the adjustment."
+        description = "Modify a tentative node during an interview (change body, status, or ID). Re-runs gap analysis after the adjustment.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     fn interview_adjust(
         &self,
@@ -1571,7 +1667,13 @@ impl TempyrServer {
 
     #[tool(
         name = "interview_resume",
-        description = "Resume an interrupted interview session. Returns the full current state so the conversation can continue."
+        description = "Resume an interrupted interview session. Returns the full current state so the conversation can continue.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn interview_resume(
         &self,
@@ -1588,7 +1690,13 @@ impl TempyrServer {
 
     #[tool(
         name = "interview_add_node",
-        description = "Add a tentative node to an active interview session. The node is stored in session state (not written to disk) until interview_commit. Automatically re-analyzes gaps and may advance the interview phase."
+        description = "Add a tentative node to an active interview session. The node is stored in session state (not written to disk) until interview_commit. Automatically re-analyzes gaps and may advance the interview phase.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     fn interview_add_node(
         &self,
@@ -1649,7 +1757,13 @@ impl TempyrServer {
 
     #[tool(
         name = "interview_add_edge",
-        description = "Add a tentative edge to an active interview session. Both source and target can be tentative node IDs (from interview_add_node) or existing graph node IDs. Stored in session state until interview_commit."
+        description = "Add a tentative edge to an active interview session. Both source and target can be tentative node IDs (from interview_add_node) or existing graph node IDs. Stored in session state until interview_commit.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     fn interview_add_edge(
         &self,
@@ -1696,7 +1810,13 @@ impl TempyrServer {
 
     #[tool(
         name = "linear_push",
-        description = "Push graph node(s) to Linear with full context and data lineage."
+        description = "Push graph node(s) to Linear with full context and data lineage.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     fn linear_push(&self, Parameters(p): Parameters<LinearPushParams>) -> Result<String, String> {
         let dry_run = p.dry_run.unwrap_or(false);
@@ -1807,7 +1927,13 @@ impl TempyrServer {
 
     #[tool(
         name = "linear_pull",
-        description = "Pull changes from Linear into the graph. Updates node statuses based on Linear issue state changes."
+        description = "Pull changes from Linear into the graph. Updates node statuses based on Linear issue state changes.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     fn linear_pull(&self, Parameters(p): Parameters<LinearDryRunParams>) -> Result<String, String> {
         let dry_run = p.dry_run.unwrap_or(false);
@@ -1860,7 +1986,13 @@ impl TempyrServer {
 
     #[tool(
         name = "linear_sync",
-        description = "Bidirectional sync: push local graph changes to Linear, then pull remote changes back."
+        description = "Bidirectional sync: push local graph changes to Linear, then pull remote changes back.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     fn linear_sync(&self, Parameters(p): Parameters<LinearDryRunParams>) -> Result<String, String> {
         let dry_run = p.dry_run.unwrap_or(false);
@@ -1926,7 +2058,13 @@ impl TempyrServer {
 
     #[tool(
         name = "system_doctor",
-        description = "Report system health: active embedding provider/model, paths to all config files, index state, env files, and warnings. API key VALUES are never returned — only env var names and a boolean indicating whether the key is set."
+        description = "Report system health: active embedding provider/model, paths to all config files, index state, env files, and warnings. API key VALUES are never returned — only env var names and a boolean indicating whether the key is set.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn system_doctor(&self) -> Result<String, String> {
         let (graph_dir, gf_dir, schema) = self.find_project()?;
@@ -1936,6 +2074,11 @@ impl TempyrServer {
             .to_path_buf();
         let cache = tempyr_core::project::cache_layout(&root, &gf_dir);
 
+        // Pull the git common dir so the report includes a journal
+        // section. `NotAGitRepo` (project outside a git tree) is a
+        // valid configuration — the journal section just gets omitted.
+        let journal_common_dir = jpath::git_common_dir(&root).ok();
+
         let inputs = HealthInputs {
             root: &root,
             graph_dir: &graph_dir,
@@ -1943,6 +2086,7 @@ impl TempyrServer {
             cache: &cache,
             schema: &schema,
             tempyr_version: env!("CARGO_PKG_VERSION"),
+            journal_common_dir: journal_common_dir.as_deref(),
         };
         let report = health::build_report(&inputs);
         serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
@@ -1950,7 +2094,13 @@ impl TempyrServer {
 
     #[tool(
         name = "journal_log",
-        description = "Append one moment of agent reasoning to the session journal: a plan, finding, decision, dead end, assumption, question, risk, or outcome. Cheap and append-only — log freely, including failures and surprises. This is NOT how knowledge graduates into the project; promote durable facts via graph_add_node.\n\nKinds:\n  plan       — what you're about to attempt and why\n  finding    — something you learned by reading code or running a tool\n  assumption — something you're assuming without verifying (polarity required)\n  question   — something you don't know yet — to ask or look up\n  decision   — a choice with reasoning (chosen, rationale, reversible required; detail ≥ 50 chars)\n  dead_end   — an approach that didn't work (approach, failure_mode required; detail ≥ 50 chars). HIGH-VALUE — future agents read these to avoid repeating you.\n  risk       — a potential problem identified but not yet hit (severity recommended)\n  outcome    — the result of work; set final=true on the session-closing entry to trigger publish\n\nLog freely on dead ends and decisions — the system is empty if you don't. Successes are less valuable than failures here. For curated knowledge that should outlive this session, use graph_add_node."
+        description = "Append one moment of agent reasoning to the session journal: a plan, finding, decision, dead end, assumption, question, risk, or outcome. Cheap and append-only — log freely, including failures and surprises. This is NOT how knowledge graduates into the project; promote durable facts via graph_add_node.\n\nKinds:\n  plan       — what you're about to attempt and why\n  finding    — something you learned by reading code or running a tool\n  assumption — something you're assuming without verifying (polarity required)\n  question   — something you don't know yet — to ask or look up\n  decision   — a choice with reasoning (chosen, rationale, reversible required; detail ≥ 50 chars)\n  dead_end   — an approach that didn't work (approach, failure_mode required; detail ≥ 50 chars). HIGH-VALUE — future agents read these to avoid repeating you.\n  risk       — a potential problem identified but not yet hit (severity recommended)\n  outcome    — the result of work; set final=true on the session-closing entry to trigger publish\n\nLog freely on dead ends and decisions — the system is empty if you don't. Successes are less valuable than failures here. For curated knowledge that should outlive this session, use graph_add_node.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     fn journal_log(&self, Parameters(p): Parameters<JournalLogParams>) -> Result<String, String> {
         let kind = Kind::parse_helpful(&p.kind).map_err(|e| e.to_string())?;
@@ -2137,7 +2287,13 @@ impl TempyrServer {
 
     #[tool(
         name = "linear_status",
-        description = "Show Linear sync state: linked nodes, pending changes, stale entries, and conflicts."
+        description = "Show Linear sync state: linked nodes, pending changes, stale entries, and conflicts.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn linear_status(&self) -> Result<String, String> {
         let (graph_dir, gf_dir, schema) = self.find_project()?;

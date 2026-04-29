@@ -410,6 +410,21 @@ pub enum JournalAction {
     /// Show one journal entry by id. The id is what `journal log`
     /// and `journal search` print.
     Show(commands::journal_cmd::ShowArgs),
+
+    /// Ensure the journal directory layout exists. Idempotent. Designed
+    /// for the `SessionStart` Claude Code hook so a freshly-opened
+    /// session has a place to write before any other tool runs.
+    Bootstrap(commands::journal_cmd::BootstrapArgs),
+
+    /// Mark the active journal session for this (worktree, agent) pair
+    /// as ready for the publisher to archive. Idempotent — running it
+    /// twice does no harm, and running it with no active session
+    /// performs no on-disk change. By default it still prints a
+    /// human-readable status line ("Finalized session ..." or
+    /// "No active session ..."); pass `--quiet` to suppress that, or
+    /// `--json` to swap it for a structured payload. Designed for the
+    /// `SessionEnd` Claude Code hook.
+    Finalize(commands::journal_cmd::FinalizeArgs),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -771,6 +786,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             JournalAction::Fetch(args) => commands::journal_cmd::run_fetch(args, cli.json),
             JournalAction::Index(args) => commands::journal_cmd::run_index(args, cli.json),
             JournalAction::Search(args) => commands::journal_cmd::run_search(args, cli.json),
+            JournalAction::Bootstrap(args) => commands::journal_cmd::run_bootstrap(args, cli.json),
+            JournalAction::Finalize(args) => commands::journal_cmd::run_finalize(args, cli.json),
             JournalAction::Show(args) => commands::journal_cmd::run_show(args, cli.json),
         },
         Commands::Update { check, force } => commands::update::run(check, force),

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 tempyr-core = { path = "../tempyr-core" }
+tempyr-journal = { path = "../tempyr-journal" }
 rusqlite = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
