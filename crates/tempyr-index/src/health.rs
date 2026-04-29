@@ -27,6 +27,11 @@ pub struct HealthInputs<'a> {
     pub cache: &'a CacheLayout,
     pub schema: &'a Schema,
     pub tempyr_version: &'a str,
+    /// `<git-common-dir>` if the project is inside a git repository.
+    /// `None` for projects sitting outside a git tree (the journal
+    /// subsystem is unavailable in that mode, so the journal section
+    /// of the report is omitted).
+    pub journal_common_dir: Option<&'a Path>,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +45,11 @@ pub struct HealthReport {
     pub graph: Option<GraphSection>,
     pub graph_error: Option<String>,
     pub index: IndexSection,
+    /// Journal subsystem state: open/ready session counts, publisher
+    /// lock, etc. `None` when the project isn't inside a git
+    /// repository (the journal lives under `<git-common-dir>` so
+    /// there's nothing to report).
+    pub journal: Option<tempyr_journal::JournalHealthReport>,
     pub warnings: Vec<String>,
 }
 
@@ -123,6 +133,9 @@ pub fn build_report(inputs: &HealthInputs<'_>) -> HealthReport {
     let env_files = build_env_files(inputs);
     let (graph_section, graph_error) = build_graph_section(inputs, &mut warnings);
     let index_section = build_index_section(inputs, embedding.store_path.as_deref());
+    let journal = inputs
+        .journal_common_dir
+        .map(tempyr_journal::build_journal_health);
 
     if !project.graph_dir_exists {
         warnings.push(format!(
@@ -166,6 +179,7 @@ pub fn build_report(inputs: &HealthInputs<'_>) -> HealthReport {
         graph: graph_section,
         graph_error,
         index: index_section,
+        journal,
         warnings,
     }
 }
@@ -456,6 +470,7 @@ allowed_edges = []
             cache,
             schema,
             tempyr_version: "test-version",
+            journal_common_dir: None,
         }
     }
 

@@ -1,5 +1,25 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tempyr journal bootstrap --quiet --json"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tempyr journal finalize --quiet --json"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "mcp__tempyr__graph_add_node|mcp__tempyr__graph_update_node|mcp__tempyr__graph_add_edge|mcp__tempyr__interview_commit",

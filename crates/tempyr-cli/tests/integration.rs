@@ -1082,6 +1082,123 @@ fn test_status_agent_override_attributes_journal_entry() {
     );
 }
 
+/// `tempyr journal bootstrap` should create the journal layout
+/// idempotently. `tempyr journal finalize` should mark the active
+/// session as ready. Together these power the SessionStart /
+/// SessionEnd Claude Code hooks.
+#[test]
+fn test_journal_bootstrap_and_finalize_lifecycle() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    let journals_dir = tmp.path().join(".git/tempyr/journals");
+    assert!(
+        !journals_dir.exists(),
+        "journals dir should not exist before bootstrap"
+    );
+
+    // bootstrap: creates the layout, emits JSON when --json passed
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "bootstrap"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["bootstrapped"], true);
+    assert!(
+        journals_dir.exists(),
+        "bootstrap should create journals dir"
+    );
+
+    // bootstrap is idempotent: a second call does not error
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["journal", "bootstrap", "--quiet"])
+        .assert()
+        .success();
+
+    // No active session yet → finalize is a silent no-op
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "finalize"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["finalized"], false,
+        "finalize with no active session should report finalized=false"
+    );
+
+    // Create an active session via journal log, then finalize
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "journal",
+            "log",
+            "finding",
+            "this is a test entry that satisfies the 20-char minimum",
+        ])
+        .assert()
+        .success();
+
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "finalize"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["finalized"], true);
+    let session_id = json["session_id"].as_str().unwrap();
+    let ready_marker = journals_dir
+        .join("open")
+        .join(format!("{session_id}.ready"));
+    assert!(
+        ready_marker.exists(),
+        "finalize should write .ready marker at {ready_marker:?}"
+    );
+}
+
+/// Outside a git repo, `bootstrap` and `finalize` should both exit 0
+/// silently — they're hook commands, and a Claude session opened in
+/// a non-tempyr directory must not blow up.
+#[test]
+fn test_journal_bootstrap_and_finalize_silent_outside_git_repo() {
+    let tmp = TempDir::new().unwrap();
+    // No init_git_repo here — the dir is just a plain folder.
+
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "bootstrap"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["bootstrapped"], false);
+
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "finalize"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["finalized"], false);
+}
+
 /// Status changes on non-task nodes must NOT spawn a journal entry —
 /// auto-emit is scoped to the task lifecycle.
 #[test]

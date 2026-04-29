@@ -12,6 +12,7 @@ pub mod auto_emit;
 pub mod config;
 pub mod entry;
 pub mod git;
+pub mod health;
 pub mod kind;
 pub mod lockfile;
 pub mod path;
@@ -26,6 +27,7 @@ pub use auto_emit::{
 };
 pub use config::JournalConfig;
 pub use entry::{Confidence, Entry, Polarity, SCHEMA_VERSION, Severity};
+pub use health::{JournalHealthReport, build_journal_health};
 pub use kind::{Kind, validate_entry};
 pub use lockfile::PublisherLock;
 pub use publisher::{

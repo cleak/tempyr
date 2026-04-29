@@ -7,6 +7,7 @@ use std::io::{self, Write};
 
 use crate::config::ProjectContext;
 use tempyr_index::health::{self, HealthInputs, HealthReport};
+use tempyr_journal::path as jpath;
 
 pub fn run(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
     let report = build_report(ctx);
@@ -23,6 +24,11 @@ pub fn run(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
 }
 
 pub(crate) fn build_report(ctx: &ProjectContext) -> HealthReport {
+    // Resolve the git common dir up front so the health report can
+    // include a journal section. `git_common_dir` returns `NotAGitRepo`
+    // for projects sitting outside a git tree — perfectly valid for
+    // tempyr, just means there's no journal subsystem to inspect.
+    let journal_common_dir = jpath::git_common_dir(&ctx.root).ok();
     let inputs = HealthInputs {
         root: &ctx.root,
         graph_dir: &ctx.graph_dir,
@@ -30,6 +36,7 @@ pub(crate) fn build_report(ctx: &ProjectContext) -> HealthReport {
         cache: &ctx.cache,
         schema: &ctx.schema,
         tempyr_version: env!("CARGO_PKG_VERSION"),
+        journal_common_dir: journal_common_dir.as_deref(),
     };
     health::build_report(&inputs)
 }
@@ -191,6 +198,47 @@ pub(crate) fn render_text(out: &mut impl Write, report: &HealthReport) -> io::Re
         writeln!(out, "  embedded nodes: {count}")?;
     }
 
+    if let Some(journal) = &report.journal {
+        writeln!(out, "\nJournal")?;
+        writeln!(
+            out,
+            "  journals dir: {}{}",
+            journal.journals_dir.display(),
+            missing_marker(journal.journals_dir_exists)
+        )?;
+        writeln!(
+            out,
+            "  open dir:     {}{}",
+            journal.open_dir.display(),
+            missing_marker(journal.open_dir_exists)
+        )?;
+        writeln!(
+            out,
+            "  open sessions:  {} (still being written)",
+            journal.open_session_count
+        )?;
+        writeln!(
+            out,
+            "  ready sessions: {} (awaiting publisher flush)",
+            journal.ready_session_count
+        )?;
+        writeln!(
+            out,
+            "  publisher lock: {}",
+            if journal.publisher_lock_held {
+                "held"
+            } else {
+                "not held"
+            }
+        )?;
+        if let Some(pid) = journal.publisher_stamped_pid {
+            writeln!(out, "  stamped pid:    {pid}")?;
+        }
+        for err in &journal.errors {
+            writeln!(out, "  probe error:    {err}")?;
+        }
+    }
+
     if !report.warnings.is_empty() {
         writeln!(out, "\nWarnings")?;
         for warning in &report.warnings {
@@ -271,6 +319,7 @@ mod tests {
                 fts_entries: None,
                 embedding_count_for_index: None,
             },
+            journal: None,
             warnings: vec!["something is amiss".to_string()],
         }
     }
@@ -338,5 +387,36 @@ mod tests {
         let out = render_to_string(&report);
         assert!(out.contains("No warnings."));
         assert!(!out.contains("\nWarnings\n"));
+    }
+
+    #[test]
+    fn render_text_omits_journal_section_when_absent() {
+        let report = fixture_report();
+        assert!(report.journal.is_none());
+        let out = render_to_string(&report);
+        assert!(!out.contains("\nJournal\n"));
+    }
+
+    #[test]
+    fn render_text_includes_journal_section_when_present() {
+        use tempyr_journal::JournalHealthReport;
+        let mut report = fixture_report();
+        report.journal = Some(JournalHealthReport {
+            journals_dir: "/tmp/repo/.git/tempyr/journals".into(),
+            journals_dir_exists: true,
+            open_dir: "/tmp/repo/.git/tempyr/journals/open".into(),
+            open_dir_exists: true,
+            open_session_count: 2,
+            ready_session_count: 1,
+            publisher_lock_held: true,
+            publisher_stamped_pid: Some(12345),
+            errors: vec![],
+        });
+        let out = render_to_string(&report);
+        assert!(out.contains("\nJournal\n"));
+        assert!(out.contains("open sessions:  2"));
+        assert!(out.contains("ready sessions: 1"));
+        assert!(out.contains("publisher lock: held"));
+        assert!(out.contains("stamped pid:    12345"));
     }
 }
