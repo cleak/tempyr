@@ -206,9 +206,16 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
     }
 
     // Pull headroom for dedup + token-budget truncation. 4× cap is
-    // empirical (matches 3b1). saturating_mul + try_from keep us
-    // robust against pathological `limit` from external callers.
-    let pull_usize = opts.limit.max(1).saturating_mul(4).max(40);
+    // empirical (matches 3b1). When `--rerank` is on, also ensure we
+    // pull at least RERANK_CANDIDATE_COUNT — the reranker scores up
+    // to that many candidates, and at the default `limit = 10` the
+    // 4× rule alone gives us 40, leaving the reranker chronically
+    // under-fed. saturating_mul + try_from keep us robust against a
+    // pathological `limit` from external callers.
+    let mut pull_usize = opts.limit.max(1).saturating_mul(4).max(40);
+    if opts.rerank {
+        pull_usize = pull_usize.max(RERANK_CANDIDATE_COUNT);
+    }
     let pull_i64 = i64::try_from(pull_usize).unwrap_or(i64::MAX);
 
     // BM25 side — always runs.
