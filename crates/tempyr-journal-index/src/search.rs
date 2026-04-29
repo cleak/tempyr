@@ -152,7 +152,19 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
     // ts column is RFC3339 text — a string compare against a cutoff
     // is enough.
     if let Some(days) = opts.since_days {
-        let cutoff = Utc::now() - chrono::Duration::days(days as i64);
+        // `Duration::days` is soft-deprecated in chrono 0.4.32+ —
+        // it panics on overflow. `try_days` returns Option and lets
+        // us reject pathological inputs cleanly. `days` is u32 so it
+        // always fits in i64 and (well under chrono's ~9.2e15-day
+        // ceiling) always succeeds, but using the non-panicking API
+        // pins the contract: a malicious / misconfigured caller
+        // can't crash the server with a giant `since_days`.
+        let duration = chrono::Duration::try_days(i64::from(days)).ok_or_else(|| {
+            crate::IndexError::InvalidEntry(format!(
+                "since_days {days} too large to express as a Duration"
+            ))
+        })?;
+        let cutoff = Utc::now() - duration;
         sql.push_str(&format!(" AND e.ts >= ?{}", bind.len() + 1));
         bind.push(Value::Text(cutoff.to_rfc3339()));
     }
@@ -296,14 +308,27 @@ fn apply_token_budget(hits: Vec<SearchHit>, budget: usize) -> Vec<SearchHit> {
         remaining -= summary_cost;
 
         // Truncate detail to fit the rest of the budget.
-        if let Some(detail) = hit.entry.detail.as_mut() {
-            let detail_cost = detail.chars().count() / CHARS_PER_TOKEN + 1;
+        if hit.entry.detail.is_some() {
+            let detail_cost = hit
+                .entry
+                .detail
+                .as_deref()
+                .map(|s| s.chars().count() / CHARS_PER_TOKEN + 1)
+                .unwrap_or(0);
             if detail_cost > remaining {
                 let max_chars = remaining.saturating_sub(1) * CHARS_PER_TOKEN;
-                if max_chars < detail.chars().count() {
+                if max_chars == 0 {
+                    // Not enough budget left for any meaningful detail
+                    // — even after the +1 token reserved for the
+                    // ellipsis. Drop the detail entirely rather than
+                    // emit a lone "…", which carries no information
+                    // and just confuses readers.
+                    hit.entry.detail = None;
+                } else if let Some(detail) = hit.entry.detail.as_mut()
+                    && max_chars < detail.chars().count()
+                {
                     let truncated: String = detail.chars().take(max_chars).collect();
-                    let truncated = format!("{truncated}\u{2026}");
-                    *detail = truncated;
+                    *detail = format!("{truncated}\u{2026}");
                 }
                 remaining = 0;
             } else {
@@ -862,5 +887,44 @@ mod tests {
         // get the seeded match back.
         let hits = search(&conn, &opts).unwrap();
         assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn truncation_drops_detail_instead_of_emitting_ellipsis_only() {
+        // Regression: when the budget left after the summary is
+        // exactly 1 token, `max_chars = (1 - 1) * 4 = 0`, and the
+        // old truncation path produced a useless detail of just
+        // "…". The fix sets detail to None instead.
+        //
+        // To get into that state we need a summary that consumes
+        // most of the budget and a detail that's longer than what
+        // 0 chars + ellipsis can accommodate. Use a 24-char summary
+        // (≈ 7 tokens after the +1 rounding) + budget 7 → remaining
+        // after summary = 0 → max_chars stays 0.
+        let (outer, repo, common) = fresh_repo();
+        write_test_entry(
+            &common,
+            &repo,
+            Utc::now(),
+            Kind::Plan,
+            "exact-budget summary fits.",
+            Some("body that won't fit because remaining tokens hit zero"),
+        );
+        refresh_index(&common, &repo).unwrap();
+        let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+        let opts = SearchOptions {
+            query: "summary".to_string(),
+            // Just enough for the summary cost (≈ 7 tokens).
+            token_budget: 7,
+            ..Default::default()
+        };
+        let hits = search(&conn, &opts).unwrap();
+        assert_eq!(hits.len(), 1);
+        // The detail is dropped, not "…".
+        assert!(
+            hits[0].entry.detail.is_none(),
+            "detail should be None when no budget remains, not '\u{2026}'"
+        );
+        drop(outer);
     }
 }
