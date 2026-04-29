@@ -709,12 +709,15 @@ pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
     }
 
     // Embed the query string if an embedder is loaded. None →
-    // BM25-only mode; identical 3b1 behavior preserved.
+    // BM25-only mode; identical 3b1 behavior preserved. The shared
+    // `warn_query_embed_failure_once` helper gates the warning so
+    // a hard "embedding always fails" environment doesn't emit one
+    // log line per `journal search` invocation.
     let query_vector = match embedder {
         Some(emb) => match emb.embed_one(&args.query) {
             Ok(v) => Some(v),
             Err(e) => {
-                eprintln!("warning: query embedding failed, falling back to BM25 only: {e}");
+                tempyr_journal_index::warn_query_embed_failure_once(&e);
                 None
             }
         },

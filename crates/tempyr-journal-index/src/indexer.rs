@@ -333,14 +333,14 @@ fn ingest_archive_ref(
 }
 
 // --- Embedding pass --------------------------------------------------------
-
-/// True if this entry kind carries enough semantic content to be
-/// worth embedding. Plans/questions/risks/assumptions are excluded
-/// per the spec — they're often too short or hypothetical to score
-/// well on vector queries, and skipping them saves embedding cost.
-fn is_embeddable_kind(kind_str: &str) -> bool {
-    matches!(kind_str, "decision" | "finding" | "dead_end" | "outcome")
-}
+//
+// The list of kinds we embed (`decision`, `finding`, `dead_end`,
+// `outcome`) appears literally in two SQL statements: the SELECT in
+// `embed_pending` and the COUNT in `count_pending_non_embeddable`.
+// They MUST stay in sync — if you add or remove a kind from one, do
+// it to both. Per the spec, plans/questions/risks/assumptions are
+// skipped because they're often too short or hypothetical to score
+// well on vector queries.
 
 /// Embed every pending high-value entry: rows whose kind is in the
 /// allow-list AND that don't yet have a row in `entry_embeddings`.
@@ -358,52 +358,62 @@ fn embed_pending(
     let cache_path = crate::embed_cache::cache_db_path(common_dir);
     let cache = crate::embed_cache::open(&cache_path)?;
 
-    // Find pending rows. We pull rowid + kind + body_hash + summary
-    // + detail in one query and filter the kinds in Rust so the
-    // SQL stays simple. The LEFT JOIN ensures we only see entries
-    // whose embedding row is missing.
+    // Pre-pull the count of pending non-embeddable entries so we
+    // can populate `report.embed_filtered` without bringing those
+    // rows back from SQL. Filtering in Rust would re-scan permanent
+    // low-info rows on every refresh — push the kind predicate into
+    // the SELECT below and run a separate COUNT for the metric.
+    report.embed_filtered = count_pending_non_embeddable(conn)?;
+
+    // Find pending rows whose kind is in the embeddable allow-list.
+    // The LEFT JOIN ensures we only see entries whose embedding
+    // row is missing; the AND e.kind IN (...) keeps low-info rows
+    // out entirely so they're not re-scanned each refresh.
     let mut stmt = conn.prepare(
         r#"
-        SELECT e.rowid, e.kind, e.body_hash, e.summary, e.detail
+        SELECT e.rowid, e.summary, e.detail
         FROM entries e
         LEFT JOIN entry_embeddings ee ON ee.rowid = e.rowid
         WHERE ee.rowid IS NULL
+          AND e.kind IN ('decision', 'finding', 'dead_end', 'outcome')
         "#,
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
-            r.get::<_, Vec<u8>>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(2)?,
         ))
     })?;
 
     // Bucket pending rows into:
     //  - cache_hits: (rowid, vec_bytes) — copy directly into vec0
-    //  - to_embed:   (rowid, body_hash, text) — call fastembed
+    //  - to_embed:   (rowid, content_hash, text) — call fastembed
+    //
+    // Cache key is `blake3(text)` (the actual embedded content), not
+    // `entries.body_hash`. body_hash is over the full Entry JSON
+    // including session_id/ts/agent/branch/head — two semantically
+    // identical entries written in different sessions would miss the
+    // cache despite producing the same embedding. The content hash
+    // gives the dedup we actually want.
     let mut cache_hits: Vec<(i64, Vec<u8>)> = Vec::new();
-    let mut to_embed: Vec<(i64, Vec<u8>, String)> = Vec::new();
+    let mut to_embed: Vec<(i64, [u8; 32], String)> = Vec::new();
 
+    let model = embedder.model_name();
     for row in rows {
-        let (rowid, kind, body_hash, summary, detail) = row?;
-        if !is_embeddable_kind(&kind) {
-            report.embed_filtered += 1;
-            continue;
-        }
-        let model = embedder.model_name();
-        if let Some(cached) = crate::embed_cache::get(&cache, &body_hash, model)? {
+        let (rowid, summary, detail) = row?;
+        // Combine summary + detail for the embedding text. Detail
+        // carries the bulk of semantic content for decisions/
+        // dead-ends; summary alone is too sparse.
+        let text = match detail.as_deref() {
+            Some(d) if !d.is_empty() => format!("{summary}\n\n{d}"),
+            _ => summary,
+        };
+        let content_hash = *blake3::hash(text.as_bytes()).as_bytes();
+        if let Some(cached) = crate::embed_cache::get(&cache, &content_hash, model)? {
             cache_hits.push((rowid, cached));
         } else {
-            // Combine summary + detail for the embedding text.
-            // Detail carries the bulk of semantic content for
-            // decisions/dead-ends; summary alone is too sparse.
-            let text = match detail.as_deref() {
-                Some(d) if !d.is_empty() => format!("{summary}\n\n{d}"),
-                _ => summary,
-            };
-            to_embed.push((rowid, body_hash, text));
+            to_embed.push((rowid, content_hash, text));
         }
     }
     drop(stmt);
@@ -432,7 +442,7 @@ fn embed_pending(
         let vecs = embedder.embed(&texts)?;
 
         let tx = conn.transaction()?;
-        for ((rowid, body_hash, _), vec) in to_embed.iter().zip(vecs.iter()) {
+        for ((rowid, content_hash, _), vec) in to_embed.iter().zip(vecs.iter()) {
             let bytes = crate::embed::vec_to_bytes(vec);
             // Both `params!` and `embed_cache::put` accept a slice;
             // borrow `bytes` for both call sites instead of cloning
@@ -444,7 +454,7 @@ fn embed_pending(
             )?;
             crate::embed_cache::put(
                 &cache,
-                body_hash,
+                content_hash,
                 embedder.model_name(),
                 embedder.dim(),
                 &bytes,
@@ -455,6 +465,26 @@ fn embed_pending(
     }
 
     Ok(())
+}
+
+/// How many pending entries (no embedding row yet) carry a
+/// non-embeddable kind. Used to populate
+/// `IndexerReport::embed_filtered` without bringing those rows
+/// back from SQL — a single COUNT(*) is much cheaper than the
+/// full SELECT + Rust filter that earlier versions ran.
+fn count_pending_non_embeddable(conn: &Connection) -> Result<u64> {
+    let n: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM entries e
+        LEFT JOIN entry_embeddings ee ON ee.rowid = e.rowid
+        WHERE ee.rowid IS NULL
+          AND e.kind NOT IN ('decision', 'finding', 'dead_end', 'outcome')
+        "#,
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n as u64)
 }
 
 // --- Per-line insert -------------------------------------------------------

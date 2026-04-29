@@ -1922,18 +1922,17 @@ impl TempyrServer {
 
         // Embed the query string for the vector side. On embedder
         // unavailability OR per-call embedding error, fall back to
-        // BM25-only ranking (identical to slice 3b1 behavior). The
-        // per-call error path logs to stderr so a transient ONNX
-        // hiccup doesn't silently drop semantic search for the
-        // session — the agent (and the human running with
-        // `tempyr --mcp`) can see why hybrid mode isn't kicking in.
+        // BM25-only ranking (identical to slice 3b1 behavior).
+        // The shared `warn_query_embed_failure_once` helper emits
+        // exactly one stderr warning per process across both the
+        // CLI and the MCP path — a long-running MCP server doesn't
+        // log per-search noise when embedding is consistently
+        // unavailable.
         let query_vector = match embedder {
             Some(emb) => match emb.embed_one(&p.query) {
                 Ok(v) => Some(v),
                 Err(e) => {
-                    eprintln!(
-                        "warning: journal_search query embedding failed, falling back to BM25 only: {e}"
-                    );
+                    tempyr_journal_index::warn_query_embed_failure_once(&e);
                     None
                 }
             },

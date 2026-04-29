@@ -139,6 +139,25 @@ pub fn try_shared_embedder() -> Option<&'static Embedder> {
     }
 }
 
+/// Emit a one-shot warning to stderr that the query-embedding path
+/// failed. Both the CLI (`tempyr journal search`) and the MCP
+/// `journal_search` tool fall back to BM25-only when `embed_one`
+/// errors, but if they each warn on every call the user gets one
+/// log line per search — noisy and not useful. Warn once per
+/// process, then stay quiet; subsequent retries proceed silently.
+///
+/// Mirrors the warn-once pattern used by [`try_shared_embedder`]
+/// for model-load failures, so the user sees at most two warnings
+/// total in a process: one for the model load and one for query
+/// embedding.
+pub fn warn_query_embed_failure_once(err: &IndexError) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!("warning: journal query embedding failed, falling back to BM25 only: {err}");
+    }
+}
+
 /// Convert a `Vec<f32>` to the little-endian bytes that sqlite-vec
 /// expects when binding a `vec_f32(...)` parameter. We bind the bytes
 /// as a SQLite BLOB and let sqlite-vec parse it.
