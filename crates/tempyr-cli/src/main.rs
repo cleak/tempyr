@@ -418,8 +418,12 @@ pub enum JournalAction {
 
     /// Mark the active journal session for this (worktree, agent) pair
     /// as ready for the publisher to archive. Idempotent — running it
-    /// twice or with no active session is a silent no-op. Designed for
-    /// the `SessionEnd` Claude Code hook.
+    /// twice does no harm, and running it with no active session
+    /// performs no on-disk change. By default it still prints a
+    /// human-readable status line ("Finalized session ..." or
+    /// "No active session ..."); pass `--quiet` to suppress that, or
+    /// `--json` to swap it for a structured payload. Designed for the
+    /// `SessionEnd` Claude Code hook.
     Finalize(commands::journal_cmd::FinalizeArgs),
 }
 
