@@ -106,6 +106,66 @@ If you're given a task description but not an ID:
 2. `graph_list` filtered to type `task` with status `backlog` or `in_progress`
 3. If no matching task exists, proceed without tracking — don't create task nodes ad hoc
 
+## Session Journal
+
+The journal is an append-only log of agent reasoning — decisions, dead ends, findings, plans, risks — stored as JSONL under `<git-common-dir>/tempyr/journals/` and published as Git refs (`refs/tempyr/journals/archive/<YYYY>/<MM>/<DD>/<id>`). It runs alongside the graph: the graph is curated knowledge that outlives this session, the journal is *how that knowledge was reached* (and how it changes when you have to throw it out). Spec: `docs/journal-spec.md`.
+
+### When to log manually
+
+Use `journal_log` (MCP) or `tempyr journal log` (CLI) freely as you work. The eight kinds:
+
+| Kind | When |
+|------|------|
+| `plan` | What you're about to attempt and why |
+| `finding` | Something you learned by reading code or running a tool |
+| `assumption` | Something you're acting on without verifying (`polarity` required) |
+| `question` | Something you don't know yet — to ask or look up |
+| `decision` | A choice with reasoning (`chosen`, `rationale`, `reversible` required; `detail` ≥ 50 chars) |
+| `dead_end` | An approach that didn't work (`approach`, `failure_mode` required; `detail` ≥ 50 chars). **Highest signal** — future agents read these to avoid repeating you. |
+| `risk` | A potential problem identified but not yet hit (`severity` recommended) |
+| `outcome` | The result of a plan (`passed`, optional `commit_sha`); set `final = true` to close the session and trigger publish |
+
+Log freely on dead ends and decisions — the journal is empty if you don't, and a missing entry teaches no one. Successes alone are low-signal here.
+
+### What's auto-emitted (don't double-log)
+
+These transitions emit a journal entry automatically — don't also call `journal_log` for them:
+
+| Trigger | Emits |
+|---------|-------|
+| `tempyr status <task> in_progress` (or MCP `graph_update_node` from `backlog`) | `plan` (provisional) |
+| Task `in_progress → done` | `outcome` with `passed = true`, `final = true` |
+| Task `in_progress → blocked` | `risk` with `severity = blocker` |
+| `interview start` | `plan` (provisional) |
+| `interview answer` | `finding` (provisional); plus `finding` for any phase advance |
+| `interview adjust`/`add_node`/`add_edge` | `finding` (provisional) |
+| `interview commit` | `outcome` with `final = true` |
+
+A failed auto-emit is downgraded to a warning, never aborts the underlying mutation.
+
+### Searching prior reasoning
+
+Before re-deriving something, search the journal:
+
+- `journal_search "<query>"` — hybrid retrieval (BM25 + recency + kind boost; vector reranking when embeddings are available). Filter by `--kind dead_end` to surface "approaches that didn't work."
+- `journal_get <id>` — fetch one entry by id, transparently refreshes the index on a cache miss.
+
+### Session lifecycle
+
+Sessions are per `(worktree, agent)` pair. The first `journal_log` opens one; subsequent calls reuse it. Closing the session means writing a `.ready` marker, which the publisher (`tempyr journal flush`) archives as a Git ref and pushes to the remote.
+
+Three ways a session ends:
+
+1. An entry with `final = true` (your own `outcome`, or an auto-emitted task-done / interview-commit) → marker written immediately.
+2. The `SessionEnd` Claude Code hook → runs `tempyr journal finalize`, idempotent.
+3. Manual: `tempyr journal finalize` from the shell.
+
+The `SessionStart` hook runs `tempyr journal bootstrap` to ensure the layout exists. Both hooks are no-ops outside a git repo, so opening Claude Code in a non-tempyr directory is safe.
+
+### Diagnostics
+
+`tempyr doctor` shows a `Journal` section: open / ready session counts, publisher lock state, stamped PID. Use it when sessions seem to be queuing up locally — usually means the publisher hasn't run.
+
 ## Conventions
 
 - Node IDs are human-readable kebab-case slugs (e.g., `feat-session-replay`, `decision-storage-backend`)
