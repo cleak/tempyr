@@ -8,7 +8,7 @@
 //! and safe to call on every open. The schema version sits in a tiny
 //! `schema_meta` table; future migrations check it and bump.
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 
 use crate::Result;
 
@@ -36,7 +36,7 @@ pub fn open(path: &std::path::Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -45,7 +45,7 @@ pub fn open(path: &std::path::Path) -> Result<Connection> {
     // `entries` already has rows (3a-era db opened by 3b1+ code),
     // rebuild the FTS5 contents from `entries`. One-time O(n) scan;
     // subsequent inserts feed via the AFTER INSERT trigger.
-    rebuild_fts_if_needed(&conn)?;
+    rebuild_fts_if_needed(&mut conn)?;
     Ok(conn)
 }
 
@@ -57,9 +57,22 @@ pub fn open(path: &std::path::Path) -> Result<Connection> {
 /// `schema_meta` — set once, read cheaply on every open.
 const FTS_REBUILT_KEY: &str = "fts5_rebuilt_at_v2";
 
-fn rebuild_fts_if_needed(conn: &Connection) -> Result<()> {
-    // Already rebuilt?
-    let already: Option<String> = conn
+/// Run the v1 → v2 FTS5 rebuild atomically.
+///
+/// The whole sequence — read flag, count entries, INSERT INTO
+/// entries_fts, INSERT OR REPLACE flag — runs inside `BEGIN IMMEDIATE`,
+/// which acquires the SQLite write lock up front. With multiple
+/// processes racing to open the same db, only one acquires the lock
+/// and runs the rebuild; the others block on `BEGIN IMMEDIATE`, then
+/// observe the flag set and skip. Without this, both processes could
+/// rebuild concurrently — FTS5 rebuild is idempotent (so no
+/// corruption) but the wasted O(n) scan compounds at scale.
+fn rebuild_fts_if_needed(conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+    // Already rebuilt? Inside the IMMEDIATE transaction, this read
+    // sees any prior commit before we proceed.
+    let already: Option<String> = tx
         .query_row(
             "SELECT value FROM schema_meta WHERE key = ?1",
             params![FTS_REBUILT_KEY],
@@ -67,25 +80,26 @@ fn rebuild_fts_if_needed(conn: &Connection) -> Result<()> {
         )
         .ok();
     if already.is_some() {
-        return Ok(());
+        return Ok(()); // tx drops, rolls back the (no-op) read.
     }
 
     // Not flagged yet. If entries is empty, there's nothing to rebuild
     // — but flag anyway so we don't redo this check on every open.
-    let entries_count: i64 = conn.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
+    let entries_count: i64 = tx.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
     if entries_count > 0 {
         // FTS5's `rebuild` command re-derives the index from
         // `content=` (the linked `entries` table). Atomic and faster
         // than a manual INSERT-from-SELECT loop.
-        conn.execute(
+        tx.execute(
             "INSERT INTO entries_fts(entries_fts) VALUES ('rebuild')",
             [],
         )?;
     }
-    conn.execute(
+    tx.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?1, 'true')",
         params![FTS_REBUILT_KEY],
     )?;
+    tx.commit()?;
     Ok(())
 }
 

@@ -162,8 +162,15 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
     // Pull more than `limit` so dedup + token-budget truncation has
     // headroom. 4× cap is empirical — small enough to not blow up
     // for a wide query, large enough to cover most dedup churn.
-    let pull = (opts.limit.max(1) * 4).max(40);
-    bind.push(Value::Integer(pull as i64));
+    //
+    // `saturating_mul` and the `i64::try_from` fallback keep us
+    // robust against pathological `limit` inputs from external
+    // callers (the MCP API exposes `limit: Option<usize>`):
+    // `usize::MAX * 4` would otherwise panic in debug or wrap to
+    // garbage in release.
+    let pull_usize = opts.limit.max(1).saturating_mul(4).max(40);
+    let pull_i64 = i64::try_from(pull_usize).unwrap_or(i64::MAX);
+    bind.push(Value::Integer(pull_i64));
 
     let now = Utc::now();
     let mut stmt = conn.prepare(&sql)?;
@@ -280,11 +287,11 @@ fn apply_token_budget(hits: Vec<SearchHit>, budget: usize) -> Vec<SearchHit> {
     for mut hit in hits {
         let summary_cost = hit.entry.summary.chars().count() / CHARS_PER_TOKEN + 1;
         if summary_cost > remaining {
-            // Even the summary doesn't fit — drop the hit and any
-            // remaining ones that won't fit either. We could continue
-            // looking for smaller hits but that complicates ranking
-            // semantics; greedy fill matches the spec.
-            break;
+            // Skip this oversized hit and keep going — a slightly
+            // smaller lower-ranked hit still deserves a chance to
+            // fit. Strict rank order is a soft preference; "agent
+            // gets some useful results within budget" wins.
+            continue;
         }
         remaining -= summary_cost;
 
@@ -791,5 +798,88 @@ mod tests {
             1,
             "rebuilt FTS5 should let us find the 3a-era entry"
         );
+    }
+
+    #[test]
+    fn token_budget_skips_oversized_hit_and_keeps_smaller_ones() {
+        // Regression: with the previous `break`-on-oversize, a giant
+        // first hit would lock out smaller lower-ranked hits. The new
+        // `continue` should skip the giant one and still surface the
+        // smaller siblings. We seed two entries — a huge-detail
+        // monster and a tiny one — and use a budget that fits the
+        // tiny one but not the huge one.
+        let (outer, repo, common) = fresh_repo();
+        let now = Utc::now();
+        let huge = "x".repeat(20_000);
+        // Big entry with detail far exceeding the budget. Use a
+        // common search term ("budget") in both summaries so both
+        // match the same query.
+        write_entry_with_ts(
+            &common,
+            &repo,
+            now,
+            Kind::Plan,
+            // Long enough summary to also blow the cap (≈ 100 chars
+            // base + padding makes summary alone ~25 tokens; budget
+            // below is set to 10 so even the summary won't fit).
+            "budget oversize regression hit huge entry with very long summary that exceeds the tight budget on its own",
+            Some(&huge),
+        );
+        // Small entry that fits. Summary needs to be 20+ chars to
+        // pass the writer's per-kind validator, so we pad the "tiny"
+        // sibling with filler that still fits a 12-token budget
+        // (≈ 48 chars).
+        write_entry_with_ts(
+            &common,
+            &repo,
+            now + chrono::Duration::seconds(1),
+            Kind::Plan,
+            "budget tiny ok fits.",
+            None,
+        );
+        refresh_index(&common, &repo).unwrap();
+        let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+        let opts = SearchOptions {
+            query: "budget".to_string(),
+            limit: 10,
+            // Tight budget: 6 tokens. The tiny summary is 19 chars
+            // (≈ 5 tokens after the +1 rounding); the huge summary
+            // is ≈ 30 tokens and won't fit.
+            token_budget: 6,
+            ..Default::default()
+        };
+        let hits = search(&conn, &opts).unwrap();
+        // The huge hit was dropped; the tiny one survived.
+        assert_eq!(
+            hits.len(),
+            1,
+            "tiny hit should survive even though huge hit got skipped"
+        );
+        assert!(
+            hits[0].entry.summary.contains("tiny"),
+            "the surviving hit should be the small one"
+        );
+        drop(outer);
+    }
+
+    #[test]
+    fn pull_does_not_overflow_for_huge_limit() {
+        // Regression: `limit * 4` would panic on `usize::MAX` in
+        // debug builds; saturating_mul should clamp it cleanly to
+        // i64::MAX. We verify by issuing a search with a pathological
+        // limit and confirming we still get ranked results without
+        // panic.
+        let (_o, _r, _c, conn) = seed_and_open(Utc::now());
+        let opts = SearchOptions {
+            query: "auth".to_string(),
+            limit: usize::MAX,
+            ..Default::default()
+        };
+        // The hard-`limit` cap at the end of `search` clamps to
+        // usize::MAX (no-op), but the SQL LIMIT is bound to i64::MAX
+        // via the saturating path. Just ensure we don't panic and
+        // get the seeded match back.
+        let hits = search(&conn, &opts).unwrap();
+        assert!(!hits.is_empty());
     }
 }
