@@ -99,6 +99,16 @@ impl Reranker {
     }
 }
 
+/// How long to short-circuit `try_shared_reranker` after a failed
+/// load attempt. A hard "no model" environment (no network, ONNX
+/// runtime missing) makes every `Reranker::new()` call hit the
+/// slow timeout path; without this backoff, a flurry of search
+/// requests would each pay that cost in series behind the INIT
+/// mutex. 5 seconds is short enough that a transient network glitch
+/// resolves into a retry quickly, long enough to coalesce a burst
+/// of searches issued back-to-back.
+const RERANK_RETRY_BACKOFF_MS: u64 = 5_000;
+
 /// Process-wide shared reranker, lazy-initialized on the first
 /// successful call. Same retry-on-failure pattern as
 /// [`crate::try_shared_embedder`]: a failed load does **not** poison
@@ -107,28 +117,43 @@ impl Reranker {
 /// "RRF-only mode" until restart. The "warning" stderr line is gated
 /// on a one-shot flag so a hard "no model" environment doesn't spam.
 ///
-/// **Cold-start serialization**: under concurrent first calls (two
-/// MCP `journal_search` requests racing for the first reranker), the
-/// `OnceLock` alone would let both threads kick off independent
-/// `Reranker::new()` invocations — each pulling ~280 MB and warming
-/// its own ONNX runtime, of which only one's value would actually be
-/// stored via `OnceLock::set`. We gate the load behind a separate
-/// `Mutex` and re-check `RR.get()` after acquiring it (double-checked
-/// locking) so at most one model load is in flight at a time. Once
-/// the slot is populated, subsequent calls take the fast path before
-/// touching the lock.
+/// **Cold-start serialization + retry backoff**: under concurrent
+/// first calls (two MCP `journal_search` requests racing for the
+/// first reranker), the `OnceLock` alone would let both threads kick
+/// off independent `Reranker::new()` invocations — each pulling
+/// ~280 MB and warming its own ONNX runtime, of which only one's
+/// value would actually be stored via `OnceLock::set`. We gate the
+/// load behind a separate `Mutex` and re-check `RR.get()` after
+/// acquiring it (double-checked locking) so at most one model load
+/// is in flight at a time. After a *failed* load, an atomic
+/// last-failure timestamp short-circuits subsequent attempts within
+/// [`RERANK_RETRY_BACKOFF_MS`] so a hard-failing environment doesn't
+/// pay the slow timeout per search.
 ///
 /// First successful call costs the model download + warmup; all
 /// subsequent successful calls are O(1).
 pub fn try_shared_reranker() -> Option<&'static Reranker> {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
     static RR: OnceLock<Reranker> = OnceLock::new();
     static INIT: Mutex<()> = Mutex::new(());
     static WARNED: AtomicBool = AtomicBool::new(false);
+    /// Wall-clock millis (since UNIX epoch) of the last failed load.
+    /// 0 = no recorded failure. Reads/writes are `Relaxed`: stale
+    /// reads at most cause one extra retry past the backoff window,
+    /// which is harmless.
+    static LAST_FAIL_MS: AtomicU64 = AtomicU64::new(0);
 
     if let Some(r) = RR.get() {
         return Some(r);
+    }
+    // Skip the full load if a recent attempt failed and we're still
+    // inside the backoff window. Cheap atomic read on the hot path
+    // for repeat-failure environments.
+    let now_ms = unix_epoch_ms();
+    let last_fail = LAST_FAIL_MS.load(Ordering::Relaxed);
+    if last_fail != 0 && now_ms.saturating_sub(last_fail) < RERANK_RETRY_BACKOFF_MS {
+        return None;
     }
     // Serialize the cold-start path so racing callers don't each kick
     // off their own ~280 MB download + warmup. A poisoned mutex from
@@ -138,6 +163,13 @@ pub fn try_shared_reranker() -> Option<&'static Reranker> {
     if let Some(r) = RR.get() {
         return Some(r);
     }
+    // Re-check the backoff window after acquiring the lock — another
+    // thread may have just failed and stamped LAST_FAIL_MS while we
+    // were waiting.
+    let last_fail = LAST_FAIL_MS.load(Ordering::Relaxed);
+    if last_fail != 0 && unix_epoch_ms().saturating_sub(last_fail) < RERANK_RETRY_BACKOFF_MS {
+        return None;
+    }
     match Reranker::new() {
         Ok(r) => {
             // `set` only returns Err if another thread snuck a value
@@ -145,9 +177,12 @@ pub fn try_shared_reranker() -> Option<&'static Reranker> {
             // ignore the error result anyway so future contributors
             // don't have to reason about it.
             let _ = RR.set(r);
+            // Clear any stale failure stamp on success.
+            LAST_FAIL_MS.store(0, Ordering::Relaxed);
             RR.get()
         }
         Err(err) => {
+            LAST_FAIL_MS.store(unix_epoch_ms(), Ordering::Relaxed);
             if !WARNED.swap(true, Ordering::Relaxed) {
                 eprintln!(
                     "warning: tempyr journal reranker unavailable, falling back to RRF only: {err}"
@@ -156,6 +191,16 @@ pub fn try_shared_reranker() -> Option<&'static Reranker> {
             None
         }
     }
+}
+
+/// Wall-clock millis since the UNIX epoch, saturating to 0 on the
+/// (effectively impossible) `SystemTime::now() < UNIX_EPOCH`.
+fn unix_epoch_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// Emit a one-shot warning when query-time reranking inference fails

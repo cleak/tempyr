@@ -150,6 +150,13 @@ pub struct ScoreBreakdown {
     /// recency / kind columns are still populated for inspection
     /// but don't influence ordering).
     pub rerank: f64,
+    /// True only when the cross-encoder actually scored this hit —
+    /// distinguishes "rerank was requested but the model failed to
+    /// load and we fell back to RRF" from "rerank ran successfully".
+    /// `rerank: 0.0` alone is ambiguous (a real cross-encoder score
+    /// can be 0); this flag is the unambiguous signal callers should
+    /// use to label output.
+    pub reranked: bool,
     pub total: f64,
 }
 
@@ -305,6 +312,7 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
             kind: kindb,
             // Filled in by the rerank pass below if it runs.
             rerank: 0.0,
+            reranked: false,
             total,
         });
 
@@ -445,6 +453,7 @@ fn apply_rerank_scores(mut head: Vec<SearchHit>, n: usize, scores: &[f32]) -> Ve
         hit.score = score;
         if let Some(b) = hit.explain.as_mut() {
             b.rerank = score;
+            b.reranked = true;
             b.total = score;
         }
     }
@@ -938,11 +947,16 @@ mod tests {
             recency: 0.4,
             kind: 0.5,
             rerank: 0.0,
+            reranked: false,
             total: 1.5,
         });
         let out = apply_rerank_scores(vec![hit], 1, &[0.77]);
         let breakdown = out[0].explain.as_ref().unwrap();
         assert!((breakdown.rerank - 0.77_f32 as f64).abs() < 1e-6);
+        assert!(
+            breakdown.reranked,
+            "the `reranked` flag must flip to true once a score is applied"
+        );
         assert!((breakdown.total - 0.77_f32 as f64).abs() < 1e-6);
         // The pre-rerank components stay populated for inspection,
         // they just don't drive ordering.

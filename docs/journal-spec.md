@@ -4,7 +4,7 @@
 
 - **Author**: Caleb (Principal Graphics Engineer)
 - **Created**: 2026-04-28
-- **Status**: Specification — Phases 1 and 2 implemented; Phase 3 (search) and Phase 4 (auto-emit + polish) pending
+- **Status**: Specification — Phases 1–4 implemented; cross-encoder rerank shipped post-Phase 4. Tracking remaining v2 backlog items inline.
 - **Scope**: The `tempyr-journal` crate, the `tempyr journal *` CLI surface, and the `journal_log` MCP tool. Does **not** cover the knowledge graph (see `graphspec.md`) or the interview engine (see `tempyr-interview-spec.md`).
 - **Repository language**: Rust (2024 edition, stable)
 
@@ -29,8 +29,8 @@ The graph (PRD/TDD/task nodes) captures the *current* state of a project. The jo
 |---|---|---|
 | **1. Capture** | ✅ Shipped (PR #20) | JSONL writer, redaction, session lifecycle, `journal_log` MCP tool, `tempyr journal log` CLI |
 | **2. Publish** | ✅ Shipped (PRs #22, #23, #24) | Publisher pipeline (commit + push + cleanup), in-process tokio ticker, lockfile coordination, `[journal]` config, `tempyr journal flush`/`status`/`logs`/`fetch`, init wizard with public-repo detection, pack-refs cadence, multi-machine sync |
-| **3. Search** | 📋 Planned | SQLite + FTS5 + sqlite-vec index, hybrid retrieval (BM25 + vector + RRF + recency), `journal_search` and `journal_get` MCP tools, `tempyr journal search`/`show`/`sessions`/`tail`/`index` CLIs |
-| **4. Polish** | 📋 Planned | Auto-emit on task status transitions and interview lifecycle, `.claude/settings.json` hook templates, MCP annotations across existing tools, README/CLAUDE.md updates |
+| **3. Search** | ✅ Shipped (PRs #26, #27, #28) | SQLite + FTS5 + sqlite-vec index, hybrid retrieval (BM25 + vector + RRF + recency + kind boost), optional BGE-Reranker cross-encoder pass, `journal_search` and `journal_get` MCP tools, `tempyr journal search`/`show`/`sessions`/`tail`/`index` CLIs |
+| **4. Polish** | ✅ Shipped (PRs #29, #30, #31, #32) | Auto-emit on task status transitions (4a) and interview lifecycle (4b), `.claude/settings.json` SessionStart/SessionEnd hooks + `tempyr journal bootstrap`/`finalize` (4c), MCP annotations across all tools (4c), `tempyr doctor` journal section (4c), CLAUDE.md/AGENTS.md journal section (4d) |
 
 ---
 
