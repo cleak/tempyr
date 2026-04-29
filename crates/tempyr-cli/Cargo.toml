@@ -15,6 +15,7 @@ tempyr-render = { path = "../tempyr-render" }
 tempyr-linear = { path = "../tempyr-linear" }
 tempyr-mcp = { path = "../tempyr-mcp" }
 tempyr-journal = { path = "../tempyr-journal" }
+tempyr-journal-index = { path = "../tempyr-journal-index" }
 anyhow = "1"
 blake3 = { workspace = true }
 clap = { workspace = true }

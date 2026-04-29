@@ -3118,6 +3118,7 @@ dependencies = [
  "tempyr-index",
  "tempyr-interview",
  "tempyr-journal",
+ "tempyr-journal-index",
  "tempyr-linear",
  "tempyr-mcp",
  "tempyr-render",
@@ -3197,6 +3198,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempyr-journal-index"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tempyr-journal",
+ "thiserror",
+]
+
+[[package]]
 name = "tempyr-linear"
 version = "0.1.0"
 dependencies = [
@@ -3228,6 +3243,7 @@ dependencies = [
  "tempyr-index",
  "tempyr-interview",
  "tempyr-journal",
+ "tempyr-journal-index",
  "tempyr-linear",
  "tempyr-render",
  "tokio",

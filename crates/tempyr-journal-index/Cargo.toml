@@ -1,0 +1,16 @@
+[package]
+name = "tempyr-journal-index"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tempyr-journal = { path = "../tempyr-journal" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

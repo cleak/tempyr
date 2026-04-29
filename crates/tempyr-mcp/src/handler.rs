@@ -670,6 +670,15 @@ fn parse_opt<T: FromStr<Err = tempyr_journal::JournalError>>(
     s.map(T::from_str).transpose().map_err(|e| e.to_string())
 }
 
+/// Parameters for the `journal_get` MCP tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalGetParams {
+    /// Entry id, e.g. `j-4b511f6f9cf9425b906ae90c31bd3367`. The id is
+    /// returned by `journal_log` and stays stable for the entry's
+    /// lifetime.
+    pub id: String,
+}
+
 // Server
 
 /// Default agent identity when the embedder doesn't configure one. Most
@@ -1797,6 +1806,56 @@ impl TempyrServer {
             "finalized": outcome.finalized,
         }))
         .unwrap_or_default())
+    }
+
+    #[tool(
+        name = "journal_get",
+        description = "Fetch one journal entry by id. Returns the full Entry JSON (kind, summary, detail, per-kind structured fields like chosen/rationale/approach/failure_mode, plus session and git context). On a cache miss, refreshes the index once and retries — so an agent can read an entry it just wrote via journal_log without waiting for the next flush. Returns null if the id is still missing after the retry, e.g. when the entry was published from another machine and you haven't fetched journal refs yet (`tempyr journal fetch`)."
+    )]
+    fn journal_get(&self, Parameters(p): Parameters<JournalGetParams>) -> Result<String, String> {
+        let (graph_dir, _gf_dir, _schema) = self.find_project()?;
+        let project_root = graph_dir
+            .parent()
+            .ok_or_else(|| "Failed to resolve project root from graph dir".to_string())?
+            .to_path_buf();
+        let common_dir = jpath::git_common_dir(&project_root).map_err(|e| e.to_string())?;
+        let repo_root = jpath::repo_toplevel(&project_root).map_err(|e| e.to_string())?;
+        let db_path = tempyr_journal_index::index_db_path(&common_dir);
+
+        // First try: query whatever the index already has. The
+        // connection is dropped after the lookup so a subsequent
+        // refresh_index call (which opens its own write connection)
+        // doesn't contend with an open read on Windows.
+        let mut entry = {
+            let conn = tempyr_journal_index::schema::open(&db_path).map_err(|e| e.to_string())?;
+            tempyr_journal_index::get_entry(&conn, &p.id).map_err(|e| e.to_string())?
+        };
+
+        // Cache miss → run a single refresh and re-query. This is what
+        // makes "agent reads its own write" work: `journal_log` appends
+        // to the live JSONL but doesn't push the entry into the index
+        // (the indexer is the only writer there). One refresh is
+        // bounded — incremental scanning is cheap when nothing has
+        // changed beyond the new entry. We deliberately don't loop:
+        // a still-missing id after a refresh is a legitimate result
+        // (e.g. cross-machine entry that hasn't been fetched).
+        if entry.is_none() {
+            // Propagate refresh failures rather than silently
+            // returning null — a `null` from journal_get should mean
+            // "definitely not in the index", not "we tried to refresh
+            // but couldn't tell you". Common refresh failures (db
+            // locked, git error, perms) are real problems the agent
+            // should see.
+            tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+                .map_err(|e| format!("journal index refresh failed: {e}"))?;
+            let conn = tempyr_journal_index::schema::open(&db_path).map_err(|e| e.to_string())?;
+            entry = tempyr_journal_index::get_entry(&conn, &p.id).map_err(|e| e.to_string())?;
+        }
+
+        match entry {
+            Some(e) => serde_json::to_string_pretty(&e).map_err(|e| e.to_string()),
+            None => Ok("null".to_string()),
+        }
     }
 
     #[tool(
