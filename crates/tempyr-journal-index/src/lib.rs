@@ -16,6 +16,8 @@
 //!
 //! See `docs/journal-spec.md` §9 for the full Phase 3 design.
 
+pub mod embed;
+pub mod embed_cache;
 pub mod indexer;
 pub mod lookup;
 pub mod schema;
@@ -25,7 +27,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-pub use indexer::{IndexerReport, refresh_index};
+pub use embed::{Embedder, try_shared_embedder};
+pub use indexer::{IndexerReport, refresh_index, refresh_index_with_embedder};
 pub use lookup::{count_entries, get_entry};
 pub use search::{ScoreBreakdown, SearchHit, SearchOptions, search};
 

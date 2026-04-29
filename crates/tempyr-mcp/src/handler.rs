@@ -1907,8 +1907,19 @@ impl TempyrServer {
         // new content is what just landed in `<journals>/open/`.
         // Failure here surfaces — silently returning stale results
         // would hide real problems.
-        tempyr_journal_index::refresh_index(&common_dir, &repo_root)
-            .map_err(|e| format!("journal index refresh failed: {e}"))?;
+        //
+        // Use the embedder when available so semantic search is ready
+        // immediately for newly-indexed entries; structural-only
+        // fallback on embedder load failure (e.g., model not yet
+        // downloaded on a fresh machine).
+        let embedder = tempyr_journal_index::try_shared_embedder();
+        let refresh_result = match embedder {
+            Some(emb) => {
+                tempyr_journal_index::refresh_index_with_embedder(&common_dir, &repo_root, emb)
+            }
+            None => tempyr_journal_index::refresh_index(&common_dir, &repo_root),
+        };
+        refresh_result.map_err(|e| format!("journal index refresh failed: {e}"))?;
 
         // Translate kind strings to the typed Kind enum.
         let mut kinds: Vec<Kind> = Vec::new();
@@ -1918,8 +1929,18 @@ impl TempyrServer {
             }
         }
 
+        // Embed the query string for the vector side. None on
+        // embedder unavailability or per-call embedding error —
+        // search falls back to BM25-only ranking, identical to
+        // slice 3b1 behavior.
+        let query_vector = match embedder {
+            Some(emb) => emb.embed_one(&p.query).ok(),
+            None => None,
+        };
+
         let opts = tempyr_journal_index::SearchOptions {
             query: p.query,
+            query_vector,
             kinds,
             limit: p.limit.unwrap_or(10),
             since_days: p.since_days,

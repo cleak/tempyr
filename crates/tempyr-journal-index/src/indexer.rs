@@ -48,11 +48,26 @@ pub struct IndexerReport {
     pub open_files: u64,
     /// Archived refs visited (whether or not they had new content).
     pub archive_refs: u64,
+    /// Entries embedded this run (slice 3b2). Counts both fresh
+    /// embeddings and cache hits — i.e., how many `entry_embeddings`
+    /// rows the indexer populated this pass.
+    pub embedded: u64,
+    /// Entries skipped from embedding because their kind is
+    /// low-information for vector search (plan, question, risk,
+    /// assumption). Stored for diagnostics; agents can `journal index`
+    /// to see how many entries were filtered out.
+    pub embed_filtered: u64,
 }
 
 /// Refresh the index at `<common_dir>/tempyr/journals/index.db` from
 /// both live JSONL and archived refs in `repo_root`. Opens (and
 /// migrates) the db lazily.
+///
+/// **Structural-only**: this variant does not populate
+/// `entry_embeddings`. Use [`refresh_index_with_embedder`] when you
+/// want vector search to see freshly-ingested entries on the next
+/// query. (Tests that don't need vector search use this signature
+/// to skip the fastembed model load.)
 pub fn refresh_index(common_dir: &Path, repo_root: &Path) -> Result<IndexerReport> {
     let db_path = crate::index_db_path(common_dir);
     let mut conn = schema::open(&db_path)?;
@@ -60,6 +75,30 @@ pub fn refresh_index(common_dir: &Path, repo_root: &Path) -> Result<IndexerRepor
 
     refresh_open(&mut conn, common_dir, &mut report)?;
     refresh_archive(&mut conn, repo_root, &mut report)?;
+
+    Ok(report)
+}
+
+/// Same as [`refresh_index`] but also embeds pending high-value
+/// entries via the supplied [`crate::Embedder`]. Embedding failures
+/// are non-fatal: structural refresh always succeeds first; embed
+/// pass is best-effort, with each failed row logged on the report
+/// (`embed_filtered` does NOT include embed errors — those still
+/// count as "attempted, failed silently"). The intent is that
+/// callers get vector search "for free" on the next query without
+/// needing a separate `embed` step.
+pub fn refresh_index_with_embedder(
+    common_dir: &Path,
+    repo_root: &Path,
+    embedder: &crate::Embedder,
+) -> Result<IndexerReport> {
+    let db_path = crate::index_db_path(common_dir);
+    let mut conn = schema::open(&db_path)?;
+    let mut report = IndexerReport::default();
+
+    refresh_open(&mut conn, common_dir, &mut report)?;
+    refresh_archive(&mut conn, repo_root, &mut report)?;
+    embed_pending(&mut conn, common_dir, embedder, &mut report)?;
 
     Ok(report)
 }
@@ -259,6 +298,129 @@ fn ingest_archive_ref(
     }
     write_last_sha(&tx, "archive", refname, sha)?;
     tx.commit()?;
+    Ok(())
+}
+
+// --- Embedding pass --------------------------------------------------------
+
+/// True if this entry kind carries enough semantic content to be
+/// worth embedding. Plans/questions/risks/assumptions are excluded
+/// per the spec — they're often too short or hypothetical to score
+/// well on vector queries, and skipping them saves embedding cost.
+fn is_embeddable_kind(kind_str: &str) -> bool {
+    matches!(kind_str, "decision" | "finding" | "dead_end" | "outcome")
+}
+
+/// Embed every pending high-value entry: rows whose kind is in the
+/// allow-list AND that don't yet have a row in `entry_embeddings`.
+/// Uses the on-disk `embeddings.db` cache (keyed by `body_hash`) to
+/// avoid re-embedding bytes-identical content.
+fn embed_pending(
+    conn: &mut Connection,
+    common_dir: &Path,
+    embedder: &crate::Embedder,
+    report: &mut IndexerReport,
+) -> Result<()> {
+    use rusqlite::params;
+
+    // Open the embedding cache (separate db). We hold this for the
+    // duration of the embed pass; per-row cache lookups + writes go
+    // through it.
+    let cache_path = crate::embed_cache::cache_db_path(common_dir);
+    let cache = crate::embed_cache::open(&cache_path)?;
+
+    // Find pending rows. We pull rowid + kind + body_hash + summary
+    // + detail in one query and filter the kinds in Rust so the
+    // SQL stays simple. The LEFT JOIN ensures we only see entries
+    // whose embedding row is missing.
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT e.rowid, e.kind, e.body_hash, e.summary, e.detail
+        FROM entries e
+        LEFT JOIN entry_embeddings ee ON ee.rowid = e.rowid
+        WHERE ee.rowid IS NULL
+        "#,
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Vec<u8>>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+
+    // Bucket pending rows into:
+    //  - cache_hits: (rowid, vec_bytes) — copy directly into vec0
+    //  - to_embed:   (rowid, body_hash, text) — call fastembed
+    let mut cache_hits: Vec<(i64, Vec<u8>)> = Vec::new();
+    let mut to_embed: Vec<(i64, Vec<u8>, String)> = Vec::new();
+
+    for row in rows {
+        let (rowid, kind, body_hash, summary, detail) = row?;
+        if !is_embeddable_kind(&kind) {
+            report.embed_filtered += 1;
+            continue;
+        }
+        let model = embedder.model_name();
+        if let Some(cached) = crate::embed_cache::get(&cache, &body_hash, model)? {
+            cache_hits.push((rowid, cached));
+        } else {
+            // Combine summary + detail for the embedding text.
+            // Detail carries the bulk of semantic content for
+            // decisions/dead-ends; summary alone is too sparse.
+            let text = match detail.as_deref() {
+                Some(d) if !d.is_empty() => format!("{summary}\n\n{d}"),
+                _ => summary,
+            };
+            to_embed.push((rowid, body_hash, text));
+        }
+    }
+    drop(stmt);
+
+    // Cache-hit pass: write directly into entry_embeddings.
+    if !cache_hits.is_empty() {
+        let tx = conn.transaction()?;
+        for (rowid, bytes) in &cache_hits {
+            tx.execute(
+                "INSERT OR IGNORE INTO entry_embeddings(rowid, embedding) VALUES (?1, ?2)",
+                params![rowid, bytes],
+            )?;
+            report.embedded += 1;
+        }
+        tx.commit()?;
+    }
+
+    // Embed-and-write pass: feed fastembed in one batch (it pools
+    // internally), then write to both the cache and entry_embeddings.
+    if !to_embed.is_empty() {
+        let texts: Vec<&str> = to_embed.iter().map(|(_, _, t)| t.as_str()).collect();
+        // If embedding fails (e.g., ONNX runtime hiccup), surface
+        // the error — the caller decides whether to retry. We're
+        // already past the structural-refresh commit, so a failure
+        // here doesn't undo any structural work.
+        let vecs = embedder.embed(&texts)?;
+
+        let tx = conn.transaction()?;
+        for ((rowid, body_hash, _), vec) in to_embed.iter().zip(vecs.iter()) {
+            let bytes = crate::embed::vec_to_bytes(vec);
+            tx.execute(
+                "INSERT OR IGNORE INTO entry_embeddings(rowid, embedding) VALUES (?1, ?2)",
+                params![rowid, bytes.clone()],
+            )?;
+            crate::embed_cache::put(
+                &cache,
+                body_hash,
+                embedder.model_name(),
+                embedder.dim(),
+                &bytes,
+            )?;
+            report.embedded += 1;
+        }
+        tx.commit()?;
+    }
+
     Ok(())
 }
 

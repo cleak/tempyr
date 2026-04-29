@@ -298,11 +298,20 @@ pub fn run_flush(args: FlushArgs, json_output: bool) -> Result<()> {
     // commit + push already succeeded; the user has their data on the
     // remote). The user can always rebuild via `tempyr journal index
     // --rebuild`. Errors get a single warning line to stderr.
-    if !args.dry_run
-        && report.published_count() > 0
-        && let Err(e) = tempyr_journal_index::refresh_index(&common_dir, &repo_root)
-    {
-        eprintln!("warning: post-flush index refresh failed: {e}");
+    if !args.dry_run && report.published_count() > 0 {
+        // Use the embedder if available (semantic search ready
+        // immediately), fall back to structural-only refresh on
+        // embedder load failure. Either way, refresh failures are
+        // non-fatal — flush already succeeded.
+        let refresh_result = match tempyr_journal_index::try_shared_embedder() {
+            Some(emb) => {
+                tempyr_journal_index::refresh_index_with_embedder(&common_dir, &repo_root, emb)
+            }
+            None => tempyr_journal_index::refresh_index(&common_dir, &repo_root),
+        };
+        if let Err(e) = refresh_result {
+            eprintln!("warning: post-flush index refresh failed: {e}");
+        }
     }
 
     if any_failed {
@@ -594,8 +603,18 @@ pub fn run_index(args: IndexArgs, json_output: bool) -> Result<()> {
         }
     }
 
-    let report = tempyr_journal_index::refresh_index(&common_dir, &repo_root)
-        .map_err(|e| anyhow!("refresh index: {e}"))?;
+    // Try the embedder; fall back to structural-only refresh on
+    // load failure (no ONNX runtime, network issue on first
+    // download, etc.). The structural index is always populated;
+    // only `embedded` is 0 in the BM25-only fallback.
+    let report = match tempyr_journal_index::try_shared_embedder() {
+        Some(emb) => {
+            tempyr_journal_index::refresh_index_with_embedder(&common_dir, &repo_root, emb)
+                .map_err(|e| anyhow!("refresh index with embedder: {e}"))?
+        }
+        None => tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+            .map_err(|e| anyhow!("refresh index: {e}"))?,
+    };
 
     if json_output {
         println!(
@@ -605,6 +624,8 @@ pub fn run_index(args: IndexArgs, json_output: bool) -> Result<()> {
                 "inserted": report.inserted,
                 "already_indexed": report.already_indexed,
                 "corrupt_lines": report.corrupt_lines,
+                "embedded": report.embedded,
+                "embed_filtered": report.embed_filtered,
                 "open_files": report.open_files,
                 "archive_refs": report.archive_refs,
                 "rebuilt": args.rebuild,
@@ -635,6 +656,14 @@ pub fn run_index(args: IndexArgs, json_output: bool) -> Result<()> {
             report.already_indexed,
             report.corrupt_lines,
         );
+        if report.embedded > 0 || report.embed_filtered > 0 {
+            println!(
+                "embedded {} entr{}, filtered {} (low-info kind)",
+                report.embedded,
+                if report.embedded == 1 { "y" } else { "ies" },
+                report.embed_filtered,
+            );
+        }
     }
     Ok(())
 }
@@ -671,17 +700,39 @@ pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
     let repo_root =
         jpath::repo_toplevel(&cwd).map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
 
-    // Refresh first so the search sees anything the user just logged.
-    tempyr_journal_index::refresh_index(&common_dir, &repo_root)
-        .map_err(|e| anyhow!("refresh index: {e}"))?;
+    // Refresh first so the search sees anything the user just
+    // logged. Use the embedder when available so freshly-indexed
+    // entries are immediately searchable via the vector path.
+    let embedder = tempyr_journal_index::try_shared_embedder();
+    let refresh_result = match embedder {
+        Some(emb) => {
+            tempyr_journal_index::refresh_index_with_embedder(&common_dir, &repo_root, emb)
+        }
+        None => tempyr_journal_index::refresh_index(&common_dir, &repo_root),
+    };
+    refresh_result.map_err(|e| anyhow!("refresh index: {e}"))?;
 
     let mut kinds: Vec<Kind> = Vec::new();
     for s in &args.kinds {
         kinds.push(Kind::parse_helpful(s).map_err(|e| anyhow!(format!("{e}")))?);
     }
 
+    // Embed the query string if an embedder is loaded. None →
+    // BM25-only mode; identical 3b1 behavior preserved.
+    let query_vector = match embedder {
+        Some(emb) => match emb.embed_one(&args.query) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("warning: query embedding failed, falling back to BM25 only: {e}");
+                None
+            }
+        },
+        None => None,
+    };
+
     let opts = tempyr_journal_index::SearchOptions {
         query: args.query.clone(),
+        query_vector,
         kinds,
         limit: args.limit,
         since_days: args.since_days,
@@ -727,9 +778,13 @@ pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
             if args.explain
                 && let Some(b) = &hit.explain
             {
+                // Vector and rrf are 0 in BM25-only mode; we still
+                // print them so the line shape is stable across
+                // modes and the agent can tell which mode is active
+                // from the values.
                 println!(
-                    "     score: {:.3} (bm25={:.3}, recency={:.3}, kind={:.3})",
-                    b.total, b.bm25, b.recency, b.kind
+                    "     score: {:.3} (bm25={:.3}, vector={:.3}, rrf={:.3}, recency={:.3}, kind={:.3})",
+                    b.total, b.bm25, b.vector, b.rrf, b.recency, b.kind
                 );
             }
         }

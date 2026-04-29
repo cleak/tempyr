@@ -29,6 +29,7 @@ thiserror = "2"
 regex = "1"
 strsim = "0.11"
 rusqlite = { version = "0.34", features = ["bundled"] }
+sqlite-vec = "0.1.9"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
