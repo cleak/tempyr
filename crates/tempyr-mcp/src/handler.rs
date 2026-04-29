@@ -237,6 +237,29 @@ pub struct LinearDryRunParams {
 
 // Schema defaults
 
+/// Shell out to `git rev-list <expr>` and return the SHAs it emits.
+/// Used by the `journal_range` tool to expand range expressions.
+/// Errors get surfaced verbatim so the caller can correct a bad
+/// range string.
+fn run_git_rev_list(repo_root: &Path, expr: &str) -> Result<Vec<String>, String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-list", expr])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| format!("git rev-list: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("git rev-list {expr} failed: {}", stderr.trim()));
+    }
+    let stdout =
+        String::from_utf8(out.stdout).map_err(|_| "git rev-list emitted non-UTF8".to_string())?;
+    Ok(stdout
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
 fn default_2() -> u64 {
     2
 }
@@ -723,6 +746,27 @@ pub struct JournalSearchParams {
     /// query. Falls back transparently to the unreranked RRF order
     /// if the model fails to load. Default false.
     pub rerank: Option<bool>,
+}
+
+/// Parameters for the `journal_range` MCP tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalRangeParams {
+    /// Range expression understood by `git rev-list`: `A..B`,
+    /// `HEAD~10..HEAD`, `feature..main`, etc. The tool shells out
+    /// to `git rev-list` to expand it; whatever that command
+    /// accepts works here.
+    pub range: String,
+    /// Restrict to one or more kinds. Snake_case strings (`plan`,
+    /// `finding`, `decision`, `dead_end`, `assumption`, `question`,
+    /// `risk`, `outcome`). Empty/absent = no filter.
+    pub kinds: Option<Vec<String>>,
+    /// Cap on returned hits. Default 50.
+    pub limit: Option<usize>,
+    /// Token budget for the response payload. Detail bodies are
+    /// truncated to fit. Default 4000.
+    pub token_budget: Option<usize>,
+    /// Include a per-hit recency / kind breakdown. Default false.
+    pub explain: Option<bool>,
 }
 
 // Server
@@ -2286,6 +2330,68 @@ impl TempyrServer {
 
         serde_json::to_string_pretty(&json!({
             "query": opts.query,
+            "count": hits.len(),
+            "hits": hits,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "journal_range",
+        description = "List journal entries written while one of the in-range commits was checked out. Pairs naturally with `git log A..B` workflows: \"what reasoning happened during the work between v1.4 and v1.5?\". The `range` field is whatever `git rev-list` accepts (`A..B`, `HEAD~10..HEAD`, `feature..main`). Filter by `kinds` to focus on `dead_end` / `decision` content. Returns hits ordered by timestamp descending.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn journal_range(
+        &self,
+        Parameters(p): Parameters<JournalRangeParams>,
+    ) -> Result<String, String> {
+        let (graph_dir, _gf_dir, _schema) = self.find_project()?;
+        let project_root = graph_dir
+            .parent()
+            .ok_or_else(|| "Failed to resolve project root from graph dir".to_string())?
+            .to_path_buf();
+        let common_dir = jpath::git_common_dir(&project_root).map_err(|e| e.to_string())?;
+        let repo_root = jpath::repo_toplevel(&project_root).map_err(|e| e.to_string())?;
+        let db_path = tempyr_journal_index::index_db_path(&common_dir);
+
+        // Refresh once before querying so an agent can see entries
+        // they just wrote via `journal_log`. Structural-only refresh
+        // is enough — no query string means no embedding is needed.
+        tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+            .map_err(|e| format!("journal index refresh failed: {e}"))?;
+
+        // Expand the range expression via `git rev-list`. Failure
+        // surfaces as a tool error so the caller can correct the
+        // range expression.
+        let commits = run_git_rev_list(&repo_root, &p.range)?;
+
+        let mut kinds: Vec<Kind> = Vec::new();
+        if let Some(ks) = &p.kinds {
+            for s in ks {
+                kinds.push(Kind::parse_helpful(s).map_err(|e| e.to_string())?);
+            }
+        }
+
+        let opts = tempyr_journal_index::RangeOptions {
+            commits,
+            kinds,
+            limit: p.limit.unwrap_or(50),
+            token_budget: p
+                .token_budget
+                .unwrap_or(tempyr_journal_index::search::DEFAULT_TOKEN_BUDGET),
+            explain: p.explain.unwrap_or(false),
+        };
+
+        let conn = tempyr_journal_index::schema::open(&db_path).map_err(|e| e.to_string())?;
+        let hits = tempyr_journal_index::range_query(&conn, &opts).map_err(|e| e.to_string())?;
+
+        serde_json::to_string_pretty(&json!({
+            "range": p.range,
             "count": hits.len(),
             "hits": hits,
         }))

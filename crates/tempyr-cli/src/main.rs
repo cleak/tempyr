@@ -411,6 +411,13 @@ pub enum JournalAction {
     /// and `journal search` print.
     Show(commands::journal_cmd::ShowArgs),
 
+    /// List journal entries written while one of the in-range commits
+    /// was checked out. Pairs with `git log A..B` workflows: "what
+    /// reasoning happened during the work between v1.4 and v1.5?".
+    /// The range expression is whatever `git rev-list` understands:
+    /// `A..B`, `HEAD~10..HEAD`, `feature-branch..main`, etc.
+    Range(commands::journal_cmd::RangeArgs),
+
     /// Ensure the journal directory layout exists. Idempotent. Designed
     /// for the `SessionStart` Claude Code hook so a freshly-opened
     /// session has a place to write before any other tool runs.
@@ -786,6 +793,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             JournalAction::Fetch(args) => commands::journal_cmd::run_fetch(args, cli.json),
             JournalAction::Index(args) => commands::journal_cmd::run_index(args, cli.json),
             JournalAction::Search(args) => commands::journal_cmd::run_search(args, cli.json),
+            JournalAction::Range(args) => commands::journal_cmd::run_range(args, cli.json),
             JournalAction::Bootstrap(args) => commands::journal_cmd::run_bootstrap(args, cli.json),
             JournalAction::Finalize(args) => commands::journal_cmd::run_finalize(args, cli.json),
             JournalAction::Show(args) => commands::journal_cmd::run_show(args, cli.json),

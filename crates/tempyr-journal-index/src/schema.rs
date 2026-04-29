@@ -184,6 +184,10 @@ pub fn apply(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS entries_session ON entries(session_id);
         CREATE INDEX IF NOT EXISTS entries_kind_ts ON entries(kind, ts DESC);
+        -- Range queries (`tempyr journal range A..B`) filter by HEAD-at-
+        -- write-time falling inside `git rev-list A..B`. Without this
+        -- index, the IN-list scan is O(N) over the whole entries table.
+        CREATE INDEX IF NOT EXISTS entries_head ON entries(head) WHERE head IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS entry_tags (
             entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,

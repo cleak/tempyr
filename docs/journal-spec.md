@@ -385,7 +385,7 @@ Tracked but not committed. Listed roughly in expected priority order:
 <!-- Cross-encoder reranking implemented post-Phase 4; folded into the
      canonical Slice 3b retrieval pipeline above. -->
 
-- **Range queries** — `tempyr journal range A..B` filters to entries between two commit SHAs.
+- ~~**Range queries**~~ — *implemented post-Phase 4.* `tempyr journal range A..B` and the `journal_range` MCP tool expand the range expression via `git rev-list` and return entries whose HEAD-at-write-time fell inside it. Output shape mirrors `journal search` (same `SearchHit` struct, same token-budget pass) so consumers can render either uniformly.
 - **Path-scoped queries** — `tempyr journal blame <file>` surfaces decisions/dead-ends touching a path.
 - **PR description block** — `tempyr journal pr` generates a markdown summary suitable for paste-into-PR.
 - **Session expansion in search** — when a result is in a session with related entries, surface the session summary inline.
