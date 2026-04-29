@@ -410,16 +410,18 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
 /// fails, log once and return the input untouched. This is the
 /// "fail-soft" contract that mirrors the bi-encoder fallback path.
 fn maybe_apply_rerank(hits: Vec<SearchHit>, query: &str) -> Vec<SearchHit> {
+    // Short-circuit before touching the reranker so a zero-hit query
+    // doesn't trigger the ~280 MB model download. Cheap path: empty
+    // hits → empty out, no model load, no log line.
+    let n = hits.len().min(RERANK_CANDIDATE_COUNT);
+    if n == 0 {
+        return hits;
+    }
     let Some(reranker) = crate::try_shared_reranker() else {
         // Warn-once already emitted by `try_shared_reranker` if the
         // model couldn't load; nothing more to do.
         return hits;
     };
-
-    let n = hits.len().min(RERANK_CANDIDATE_COUNT);
-    if n == 0 {
-        return hits;
-    }
 
     // Build the query/document pairs over the top-N candidates only.
     // Document text is `summary + "\n\n" + detail` to mirror the
