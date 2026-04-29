@@ -324,14 +324,25 @@ mod tests {
     use rusqlite::params;
     use std::path::PathBuf;
     use tempyr_journal::writer::append_validated;
-    use tempyr_journal::{Entry, EntryDraft, Kind, Session, write_entry};
+    use tempyr_journal::{Entry, Kind, Session};
 
-    /// Build an Entry with an explicit `ts` and append it to the
-    /// session's JSONL via `append_validated` (bypassing the
-    /// `for_session` ts=now hardcode that `write_entry` would impose).
-    /// Used for recency/since tests where the entry timestamp itself
-    /// is the variable under test.
-    fn write_entry_at_ts(
+    /// Construct an `Entry` with an explicit `ts`, populated with the
+    /// per-kind required fields for tests, and append it to the
+    /// session's JSONL via `append_validated`.
+    ///
+    /// This bypasses `write_entry` deliberately. The production write
+    /// path goes through `Entry::for_session` which hardcodes
+    /// `ts = Utc::now()`; for recency / since-days tests we need the
+    /// entry's own `ts` field to vary, not just the session id. For
+    /// other tests (kind boost, dedup, token budget) the `ts` value
+    /// doesn't matter — they pass `Utc::now()` and the helper picks
+    /// up the production-equivalent timestamp.
+    ///
+    /// Per-kind fields (decision: chosen/rationale/reversible + 50+
+    /// char detail; dead_end: approach/failure_mode + 50+ char detail;
+    /// assumption: polarity) are filled from a small fixture so
+    /// callers don't repeat them.
+    fn write_test_entry(
         common: &std::path::Path,
         repo: &std::path::Path,
         ts: DateTime<Utc>,
@@ -345,6 +356,15 @@ mod tests {
         if let Some(d) = detail {
             entry.detail = Some(d.to_string());
         }
+        apply_test_per_kind_fields(&mut entry, kind);
+        append_validated(&session.jsonl_path(), &entry).unwrap();
+    }
+
+    /// Fill in the structured fields each kind requires at validate
+    /// time. Detail strings are auto-padded to ≥50 chars where
+    /// `validate_entry` requires it (decision, dead_end), so callers
+    /// don't have to remember the threshold.
+    fn apply_test_per_kind_fields(entry: &mut Entry, kind: Kind) {
         match kind {
             Kind::Decision => {
                 entry
@@ -366,7 +386,6 @@ mod tests {
             }
             _ => {}
         }
-        append_validated(&session.jsonl_path(), &entry).unwrap();
     }
 
     fn fresh_repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -388,47 +407,9 @@ mod tests {
         (outer, repo, common)
     }
 
-    fn write_entry_with_ts(
-        common: &std::path::Path,
-        repo: &std::path::Path,
-        ts: DateTime<Utc>,
-        kind: Kind,
-        summary: &str,
-        detail: Option<&str>,
-    ) {
-        let session = Session::open_at(common, repo, "claude", ts).unwrap();
-        let mut draft = EntryDraft::new(kind, summary);
-        if matches!(kind, Kind::Decision | Kind::DeadEnd) {
-            // Both kinds require detail >= 50 chars + per-kind fields.
-            draft.detail =
-                Some(detail.unwrap_or(
-                    "the long-form rationale that satisfies the per-kind 50-char detail requirement",
-                ).to_string());
-        } else {
-            draft.detail = detail.map(|s| s.to_string());
-        }
-        match kind {
-            Kind::Decision => {
-                draft.chosen = Some("option-a".to_string());
-                draft.rationale = Some("a is more reversible than b".to_string());
-                draft.reversible = Some(true);
-            }
-            Kind::DeadEnd => {
-                draft.approach = Some("tried approach a".to_string());
-                draft.failure_mode = Some("hit issue x".to_string());
-            }
-            Kind::Assumption => {
-                draft.polarity = Some(tempyr_journal::Polarity::Positive);
-            }
-            _ => {}
-        }
-        draft.cwd = Some(repo.to_path_buf());
-        write_entry(&session, repo, draft).unwrap();
-    }
-
     fn seed_and_open(ts: DateTime<Utc>) -> (tempfile::TempDir, PathBuf, PathBuf, Connection) {
         let (outer, repo, common) = fresh_repo();
-        write_entry_with_ts(
+        write_test_entry(
             &common,
             &repo,
             ts,
@@ -436,7 +417,7 @@ mod tests {
             "auth middleware token leak that needs investigation",
             None,
         );
-        write_entry_with_ts(
+        write_test_entry(
             &common,
             &repo,
             ts,
@@ -496,13 +477,13 @@ mod tests {
     #[test]
     fn recency_boost_ranks_recent_higher() {
         // Two same-content entries, one fresh and one 90 days old —
-        // the fresh one ranks first. We use `write_entry_at_ts` so
+        // the fresh one ranks first. We use `write_test_entry` so
         // each Entry's `ts` field reflects the intended date; the
         // standard `write_entry` path hardcodes ts = Utc::now().
         let (outer, repo, common) = fresh_repo();
         let fresh = Utc::now();
         let old = fresh - chrono::Duration::days(90);
-        write_entry_at_ts(
+        write_test_entry(
             &common,
             &repo,
             old,
@@ -510,7 +491,7 @@ mod tests {
             "investigation into authentication middleware behavior",
             None,
         );
-        write_entry_at_ts(
+        write_test_entry(
             &common,
             &repo,
             fresh,
@@ -540,7 +521,7 @@ mod tests {
         // the dead_end should rank first.
         let (outer, repo, common) = fresh_repo();
         let now = Utc::now();
-        write_entry_with_ts(
+        write_test_entry(
             &common,
             &repo,
             now,
@@ -550,7 +531,7 @@ mod tests {
         );
         // Slightly later so they don't collide on session id.
         let later = now + chrono::Duration::seconds(2);
-        write_entry_with_ts(
+        write_test_entry(
             &common,
             &repo,
             later,
@@ -578,7 +559,7 @@ mod tests {
         let (outer, repo, common) = fresh_repo();
         let now = Utc::now();
         let later = now + chrono::Duration::seconds(2);
-        write_entry_with_ts(
+        write_test_entry(
             &common,
             &repo,
             now,
@@ -586,7 +567,7 @@ mod tests {
             "duplicate-prone summary string that appears twice",
             None,
         );
-        write_entry_with_ts(
+        write_test_entry(
             &common,
             &repo,
             later,
@@ -632,7 +613,7 @@ mod tests {
         let (outer, repo, common) = fresh_repo();
         let now = Utc::now();
         let big = "x".repeat(5000);
-        write_entry_with_ts(
+        write_test_entry(
             &common,
             &repo,
             now,
@@ -665,7 +646,7 @@ mod tests {
         let (outer, repo, common) = fresh_repo();
         let now = Utc::now();
         let old = now - chrono::Duration::days(30);
-        write_entry_at_ts(
+        write_test_entry(
             &common,
             &repo,
             old,
@@ -694,7 +675,7 @@ mod tests {
         // immediately finds it — proving the AFTER INSERT trigger
         // fires and FTS5 sees the new content.
         let (outer, repo, common) = fresh_repo();
-        write_entry_with_ts(
+        write_test_entry(
             &common,
             &repo,
             Utc::now(),
@@ -814,7 +795,7 @@ mod tests {
         // Big entry with detail far exceeding the budget. Use a
         // common search term ("budget") in both summaries so both
         // match the same query.
-        write_entry_with_ts(
+        write_test_entry(
             &common,
             &repo,
             now,
@@ -829,7 +810,7 @@ mod tests {
         // pass the writer's per-kind validator, so we pad the "tiny"
         // sibling with filler that still fits a 12-token budget
         // (≈ 48 chars).
-        write_entry_with_ts(
+        write_test_entry(
             &common,
             &repo,
             now + chrono::Duration::seconds(1),
