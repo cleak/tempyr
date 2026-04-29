@@ -32,7 +32,10 @@ use tempyr_interview::session::{
 };
 
 use tempyr_journal::path as jpath;
-use tempyr_journal::{Confidence, EntryDraft, Kind, Polarity, Session, Severity, write_entry};
+use tempyr_journal::{
+    Confidence, EntryDraft, Kind, Polarity, Session, Severity, TaskTransition,
+    auto_emit_task_transition, write_entry,
+};
 use tempyr_linear::client::LinearClient;
 use tempyr_linear::config::LinearConfig;
 use tempyr_linear::mapping::StatusMapper;
@@ -1078,7 +1081,7 @@ impl TempyrServer {
     ) -> Result<String, String> {
         let (graph_dir, gf_dir, schema) = self.find_project()?;
         let resolved = ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
-        let path = ops::update_node(
+        let outcome = ops::update_node(
             &graph_dir,
             &resolved,
             p.body.as_deref(),
@@ -1106,12 +1109,57 @@ impl TempyrServer {
         let mut response = format!(
             "Updated node '{resolved}' ({}) at {}",
             changed.join(", "),
-            path.display()
+            outcome.path.display()
         );
         if let Some(warning) = index_refresh_warning(&graph_dir, &gf_dir, &schema) {
             response.push_str(&format!("\nWarning: {}", warning));
         }
+
+        // Phase 4a: best-effort journal entry on task status transitions.
+        // Failures are reported as a trailing warning line, never as a
+        // tool error — the status change has already committed.
+        if let Some(new_status) = p.status.as_deref()
+            && let Some(warning) =
+                self.emit_journal_for_transition(&graph_dir, &resolved, new_status, &outcome)
+        {
+            response.push_str(&format!("\nWarning: {}", warning));
+        }
+
         Ok(response)
+    }
+
+    /// Best-effort journal auto-emit for `graph_update_node`. Returns
+    /// `Some(warning_line)` on failure (so the caller can append to the
+    /// tool response), `None` on success or when no transition rule
+    /// matched. Never propagates a hard error — the underlying status
+    /// change has already been applied to disk.
+    ///
+    /// Anchors path resolution on the resolved project (`graph_dir`'s
+    /// parent), matching `journal_log` in this same file. The server's
+    /// `current_dir()` can point anywhere — particularly when an MCP
+    /// client launches `tempyr` from a different workspace — so using
+    /// it as the journal anchor would write to the wrong repo's refs.
+    fn emit_journal_for_transition(
+        &self,
+        graph_dir: &Path,
+        node_id: &str,
+        new_status: &str,
+        outcome: &ops::UpdateOutcome,
+    ) -> Option<String> {
+        let project_root = graph_dir.parent()?;
+        let common_dir = jpath::git_common_dir(project_root).ok()?;
+        let worktree_top = jpath::repo_toplevel(project_root).ok()?;
+        let transition = TaskTransition {
+            node_id,
+            node_type: &outcome.node_type,
+            title: &outcome.title,
+            prior_status: outcome.prior_status.as_deref(),
+            new_status,
+        };
+        match auto_emit_task_transition(&common_dir, &worktree_top, &self.agent_id, &transition) {
+            Ok(_) => None,
+            Err(e) => Some(format!("journal auto-emit for {node_id} failed: {e}")),
+        }
     }
 
     #[tool(

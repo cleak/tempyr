@@ -120,7 +120,7 @@ pub async fn pull(
                 let current_status = read_current_status(graph_dir, &entry.node_id);
                 if current_status.as_deref() != Some(new_status.as_str()) {
                     match ops::update_status(graph_dir, &entry.node_id, &new_status, schema) {
-                        Ok(()) => {
+                        Ok(_) => {
                             result.status_changed.push(StatusChange {
                                 node_id: entry.node_id.clone(),
                                 old_status: current_status.unwrap_or_default(),

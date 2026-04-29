@@ -398,13 +398,28 @@ pub fn rename_node(graph_dir: &Path, old_id: &str, new_id: &str) -> Result<Vec<P
     Ok(modified_files)
 }
 
-/// Update a node's status.
+/// Outcome of [`update_status`] / [`update_node`]. Carries enough of
+/// the pre-update state for callers to drive downstream side effects
+/// (notably the journal auto-emit hook in Phase 4) without re-reading
+/// the node file. `prior_status` is `None` if the node had no status
+/// set on disk before the update.
+#[derive(Debug, Clone)]
+pub struct UpdateOutcome {
+    pub path: PathBuf,
+    pub node_type: String,
+    pub title: String,
+    pub prior_status: Option<String>,
+}
+
+/// Update a node's status. Returns the path plus pre-update metadata
+/// (node type, title, prior status) so callers can run downstream
+/// hooks — currently the journal auto-emit — without a second read.
 pub fn update_status(
     graph_dir: &Path,
     node_id: &str,
     new_status: &str,
     schema: &Schema,
-) -> Result<()> {
+) -> Result<UpdateOutcome> {
     let path = find_node_file(graph_dir, node_id)?;
     let content = std::fs::read_to_string(&path)?;
     let mut node = parse_node(&content, path.clone())?;
@@ -412,15 +427,25 @@ pub fn update_status(
     // Validate new status against schema
     schema.validate_status(node.node_type(), new_status)?;
 
+    let outcome = UpdateOutcome {
+        path: path.clone(),
+        node_type: node.node_type().to_string(),
+        title: node.title().to_string(),
+        prior_status: node.frontmatter.status.clone(),
+    };
+
     node.frontmatter.status = Some(new_status.to_string());
     node.frontmatter.updated = Some(Utc::now());
 
     atomic_write(&path, &serialize_node(&node)?)?;
-    Ok(())
+    Ok(outcome)
 }
 
 /// Update an existing node's body, status, owner, and/or tags.
-/// Only provided (Some) fields are updated; None fields are left unchanged.
+/// Only provided (Some) fields are updated; None fields are left
+/// unchanged. Returns the path plus pre-update metadata so callers
+/// can run downstream hooks (journal auto-emit on status change in
+/// Phase 4) without a second read of the file.
 pub fn update_node(
     graph_dir: &Path,
     node_id: &str,
@@ -429,10 +454,17 @@ pub fn update_node(
     owner: Option<&str>,
     tags: Option<&[String]>,
     schema: &Schema,
-) -> Result<PathBuf> {
+) -> Result<UpdateOutcome> {
     let path = find_node_file(graph_dir, node_id)?;
     let content = std::fs::read_to_string(&path)?;
     let mut node = parse_node(&content, path.clone())?;
+
+    let outcome = UpdateOutcome {
+        path: path.clone(),
+        node_type: node.node_type().to_string(),
+        title: node.title().to_string(),
+        prior_status: node.frontmatter.status.clone(),
+    };
 
     if let Some(new_status) = status {
         schema.validate_status(node.node_type(), new_status)?;
@@ -454,7 +486,7 @@ pub fn update_node(
 
     node.frontmatter.updated = Some(Utc::now());
     atomic_write(&path, &serialize_node(&node)?)?;
-    Ok(path)
+    Ok(outcome)
 }
 
 /// Sort edges alphabetically by target (per spec: minimizes merge conflicts).

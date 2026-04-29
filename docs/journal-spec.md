@@ -365,10 +365,11 @@ The journal becomes useful when agents can find old reasoning. Phase 3 builds a 
 
 Once search lands, the journal is useful when agents query it. Phase 4 closes the loop by making sure entries get *written* without an agent having to call `journal_log` explicitly, and tightens the surface around the existing tool set.
 
-- Auto-emit on task status transitions (CLI `tempyr update --status` and MCP `graph_update_node`):
+- Auto-emit on task status transitions (CLI `tempyr status` and MCP `graph_update_node`) — **implemented in slice 4a**:
   - `backlog → in_progress` → emit `plan` (provisional)
   - `in_progress → done` → emit `outcome` with `passed = true` and `final = true`
   - `in_progress → blocked` → emit `risk` with `severity = blocker`
+  - Implementation lives in [`tempyr_journal::auto_emit`](../crates/tempyr-journal/src/auto_emit.rs); both call sites treat write failures as soft warnings, never aborting the underlying status change.
 - Auto-emit on interview lifecycle: start, answer, adjust, phase, commit, rollback. All provisional until session commit.
 - `.claude/settings.json.example` template with `SessionStart`/`SessionEnd` hooks invoking `tempyr journal bootstrap` and `tempyr journal finalize`.
 - MCP annotations (`read_only`/`destructive`/`idempotent`/`open_world`) across all existing tempyr tools (orthogonal but worth bundling).
