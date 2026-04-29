@@ -34,7 +34,7 @@ impl Embedder {
             InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false),
         )
         .map_err(|e| {
-            IndexError::InvalidEntry(format!(
+            IndexError::Embed(format!(
                 "failed to load fastembed model {}: {e}",
                 schema::EMBED_MODEL_NAME
             ))
@@ -66,14 +66,14 @@ impl Embedder {
         let mut model = self
             .inner
             .lock()
-            .map_err(|_| IndexError::InvalidEntry("embedder mutex poisoned".to_string()))?;
+            .map_err(|_| IndexError::Embed("embedder mutex poisoned".to_string()))?;
         let vecs = model
             .embed(owned, None)
-            .map_err(|e| IndexError::InvalidEntry(format!("fastembed inference failed: {e}")))?;
+            .map_err(|e| IndexError::Embed(format!("fastembed inference failed: {e}")))?;
         // Sanity: every vector should match our expected dim.
         for v in &vecs {
             if v.len() != self.dim {
-                return Err(IndexError::InvalidEntry(format!(
+                return Err(IndexError::Embed(format!(
                     "embedding dimension mismatch: model returned {} but schema expects {}",
                     v.len(),
                     self.dim
@@ -89,7 +89,7 @@ impl Embedder {
     pub fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
         let mut vecs = self.embed(&[text])?;
         vecs.pop()
-            .ok_or_else(|| IndexError::InvalidEntry("embedder returned empty result".to_string()))
+            .ok_or_else(|| IndexError::Embed("embedder returned empty result".to_string()))
     }
 }
 
@@ -135,7 +135,7 @@ pub fn vec_to_bytes(v: &[f32]) -> Vec<u8> {
 /// multiple of 4.
 pub fn bytes_to_vec(bytes: &[u8]) -> Result<Vec<f32>> {
     if !bytes.len().is_multiple_of(4) {
-        return Err(IndexError::InvalidEntry(format!(
+        return Err(IndexError::Embed(format!(
             "embedding blob length {} is not a multiple of 4",
             bytes.len()
         )));
@@ -149,12 +149,30 @@ pub fn bytes_to_vec(bytes: &[u8]) -> Result<Vec<f32>> {
 
 #[cfg(test)]
 mod tests {
+    //! ## Test taxonomy
+    //!
+    //! Tests in this module split into two groups:
+    //!
+    //! - **Pure data-shape** (`vec_bytes_roundtrip`,
+    //!   `bytes_to_vec_rejects_misaligned_input`): no fastembed
+    //!   dependency, run on every `cargo test`.
+    //! - **Model-backed** (`embedder_returns_correct_dim`,
+    //!   `embed_batch_roundtrips`, `embed_one_returns_single_vec`,
+    //!   `empty_input_yields_empty_output`): construct an `Embedder`
+    //!   which downloads the BGE-small ONNX weights (~80 MB) on the
+    //!   first machine encounter and loads the runtime. **These
+    //!   tests are `#[ignore]` by default** — the standard `cargo
+    //!   test --workspace` stays hermetic and offline. Run them
+    //!   explicitly with `cargo test -- --ignored` (or scope to
+    //!   this module: `cargo test -p tempyr-journal-index embed::
+    //!   -- --ignored`) when validating embedding-related changes.
+    //!
+    //! The model-backed tests in `search` use the same convention.
     use super::*;
 
-    /// Hold the embedder static-shared across tests in this module
-    /// so we only download + warm up the model once per `cargo test`
-    /// run. Loading the model is the dominant cost; tests measure
-    /// behavior, not load time.
+    /// Lazy-init shared embedder for the model-backed tests in this
+    /// module. Only invoked from `#[ignore]`-marked tests so the
+    /// default test run never triggers the model download/load.
     fn shared_embedder() -> &'static Embedder {
         use std::sync::OnceLock;
         static EMB: OnceLock<Embedder> = OnceLock::new();
@@ -162,6 +180,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
     fn embedder_returns_correct_dim() {
         let e = shared_embedder();
         assert_eq!(e.dim(), 384);
@@ -169,6 +188,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
     fn embed_batch_roundtrips() {
         let e = shared_embedder();
         let texts = vec!["the quick brown fox", "another sentence here"];
@@ -181,6 +201,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
     fn embed_one_returns_single_vec() {
         let e = shared_embedder();
         let v = e.embed_one("a single query").unwrap();
@@ -188,7 +209,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
     fn empty_input_yields_empty_output() {
+        // Even though `embed(&[])` short-circuits before invoking
+        // the model, `shared_embedder()` still triggers the load —
+        // hence #[ignore]. (Once the model is cached from a prior
+        // run, this becomes a fast in-memory check.)
         let e = shared_embedder();
         let texts: Vec<&str> = Vec::new();
         let vecs = e.embed(&texts).unwrap();

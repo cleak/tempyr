@@ -321,8 +321,6 @@ fn embed_pending(
     embedder: &crate::Embedder,
     report: &mut IndexerReport,
 ) -> Result<()> {
-    use rusqlite::params;
-
     // Open the embedding cache (separate db). We hold this for the
     // duration of the embed pass; per-row cache lookups + writes go
     // through it.
@@ -405,9 +403,13 @@ fn embed_pending(
         let tx = conn.transaction()?;
         for ((rowid, body_hash, _), vec) in to_embed.iter().zip(vecs.iter()) {
             let bytes = crate::embed::vec_to_bytes(vec);
+            // Both `params!` and `embed_cache::put` accept a slice;
+            // borrow `bytes` for both call sites instead of cloning
+            // it for the SQL bind. `&Vec<u8>` derefs to `&[u8]` which
+            // implements `ToSql`, so the bind path is identical.
             tx.execute(
                 "INSERT OR IGNORE INTO entry_embeddings(rowid, embedding) VALUES (?1, ?2)",
-                params![rowid, bytes.clone()],
+                params![rowid, &bytes],
             )?;
             crate::embed_cache::put(
                 &cache,

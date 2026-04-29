@@ -230,10 +230,20 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
             });
     }
 
+    // Internal carrier so we can sort with stable tie-breakers (the
+    // public `SearchHit` only exposes the entry + score, but the
+    // sort needs ranks + rowid for determinism).
+    struct ScoredCandidate {
+        hit: SearchHit,
+        rowid: i64,
+        bm25_rank: Option<usize>,
+        vec_rank: Option<usize>,
+    }
+
     // Score each candidate.
     let now = Utc::now();
-    let mut scored: Vec<SearchHit> = Vec::new();
-    for (_rowid, cand) in by_rowid {
+    let mut scored: Vec<ScoredCandidate> = Vec::new();
+    for (rowid, cand) in by_rowid {
         let entry: Entry = serde_json::from_str(&cand.body_json)?;
         let kind = entry.kind;
         let recency = recency_boost(&cand.ts, now);
@@ -270,20 +280,49 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
             total,
         });
 
-        scored.push(SearchHit {
-            entry,
-            score: total,
-            explain,
+        scored.push(ScoredCandidate {
+            hit: SearchHit {
+                entry,
+                score: total,
+                explain,
+            },
+            rowid,
+            bm25_rank: cand.bm25_rank,
+            vec_rank: cand.vec_rank,
         });
     }
 
-    // Sort descending. NaN shouldn't appear (all components are
-    // finite), but treat any oddity as "lowest" via partial_cmp.
+    // Sort descending by total, with stable tie-breakers so two
+    // candidates that score equal (rare but possible — e.g. two
+    // dead-ends with identical recency, both same-source rank) don't
+    // shuffle between runs. Tie-break order:
+    //   1. score desc (the actual signal)
+    //   2. bm25_rank asc — better BM25 wins
+    //   3. vec_rank asc  — better vector wins
+    //   4. rowid asc     — final fallback, stable across HashMap order
     scored.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+        b.hit
+            .score
+            .partial_cmp(&a.hit.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.bm25_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&b.bm25_rank.unwrap_or(usize::MAX))
+            })
+            .then_with(|| {
+                a.vec_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&b.vec_rank.unwrap_or(usize::MAX))
+            })
+            .then_with(|| a.rowid.cmp(&b.rowid))
     });
+
+    // Unwrap the sort carrier; downstream stages operate on
+    // SearchHit only.
+    let mut scored: Vec<SearchHit> = scored.into_iter().map(|s| s.hit).collect();
+    // Suppress unused-mut warning if the next stage doesn't mutate.
+    let _ = &mut scored;
 
     // Dedup by (summary normalized, kind).
     let mut seen: HashSet<(blake3::Hash, Kind)> = HashSet::new();
@@ -350,10 +389,18 @@ fn run_bm25_query(
 /// vector is bound as a little-endian f32 BLOB. Returns rows ordered
 /// best→worst (smaller distance = better).
 ///
-/// Note on filtering: sqlite-vec's `MATCH` clause restricts the
-/// candidate set to `embedding MATCH ?` and the engine returns the
-/// nearest neighbors directly. To apply the kind/since filters
-/// post-hoc we wrap the vec0 query in a CTE and join to entries.
+/// **Filters push down into vec0** via a `rowid IN (subquery)`
+/// constraint. Without that, vec0's KNN returns the top-K nearest
+/// neighbors over *all* embedded entries; a post-hoc filter could
+/// drop them all and leave us with no hits when filtered-set
+/// matches exist further down the distance ranking. The
+/// `rowid IN (SELECT rowid FROM entries WHERE …)` shape lets
+/// sqlite-vec consider only allowed rows during the KNN scan.
+///
+/// vec0 also requires `LIMIT N` (or `k = ?`) in the same query
+/// block as `MATCH`; it errors with "A LIMIT or 'k = ?' constraint
+/// is required on vec0 knn queries" if we tried to wrap the MATCH
+/// in a CTE and apply LIMIT outside.
 fn run_vector_query(
     conn: &Connection,
     opts: &SearchOptions,
@@ -361,28 +408,41 @@ fn run_vector_query(
     pull: i64,
 ) -> Result<Vec<RawHit>> {
     let qbytes = crate::embed::vec_to_bytes(query_vector);
+    // Bind layout:
+    //   ?1                        → query vec blob
+    //   ?2                        → vec0 explicit `k` value
+    //   ?3..                      → filter binds (kinds + since_days)
+    //                                inside the rowid-IN subquery
+    let mut bind: Vec<Value> = vec![Value::Blob(qbytes), Value::Integer(pull)];
+
+    // vec0 wants `MATCH` + LIMIT/k *in the same query block*; once
+    // we wrap it in a CTE or join with WHERE clauses on other
+    // columns, the SQLite planner stops pushing the LIMIT down and
+    // vec0 errors with "A LIMIT or 'k = ?' constraint is required".
+    // Using vec0's explicit `k = ?` predicate keeps the constraint
+    // visible regardless of how the rest of the query is shaped.
+    //
+    // Filters push into vec0 via `rowid IN (subquery)` so KNN
+    // considers only allowed rows up front — without that, vec0's
+    // top-K ignores filters and we'd lose hits when the user
+    // narrows by kind / since.
     let mut sql = String::from(
         r#"
-        WITH v AS (
-            SELECT rowid, distance
-            FROM entry_embeddings
-            WHERE embedding MATCH ?1
-            ORDER BY distance
-            LIMIT ?2
-        )
         SELECT
-            e.rowid,
+            entry_embeddings.rowid,
             e.body_json,
-            v.distance AS distance,
-            e.ts AS ts
-        FROM v
-        JOIN entries e ON e.rowid = v.rowid
-        WHERE 1 = 1
+            entry_embeddings.distance,
+            e.ts
+        FROM entry_embeddings
+        JOIN entries e ON e.rowid = entry_embeddings.rowid
+        WHERE entry_embeddings.embedding MATCH ?1
+          AND k = ?2
+          AND entry_embeddings.rowid IN (
+              SELECT e.rowid FROM entries e WHERE 1 = 1
         "#,
     );
-    let mut bind: Vec<Value> = vec![Value::Blob(qbytes), Value::Integer(pull)];
     push_filters(&mut sql, &mut bind, opts)?;
-    sql.push_str(" ORDER BY distance");
+    sql.push_str(") ORDER BY entry_embeddings.distance");
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |r| {
@@ -1115,6 +1175,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
     fn vector_path_finds_semantically_related_entry() {
         // BM25 alone misses this: the query mentions "credentials"
         // but the seeded entry says "auth tokens" — keyword overlap
@@ -1171,6 +1232,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
     fn explain_includes_vector_and_rrf_in_hybrid_mode() {
         let (outer, repo, common) = fresh_repo();
         let embedder = shared_embedder_for_search();
@@ -1228,6 +1290,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
     fn embed_pending_filters_low_value_kinds() {
         // Plans, questions, risks, and assumptions should NOT get
         // embeddings — they're filtered out by `is_embeddable_kind`.
@@ -1267,6 +1330,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
     fn embedding_cache_survives_index_rebuild() {
         // Slice 3b2's separate `embeddings.db` should mean a
         // structural rebuild of `index.db` does NOT trigger

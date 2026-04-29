@@ -56,6 +56,15 @@ pub enum IndexError {
 
     #[error("invalid entry: {0}")]
     InvalidEntry(String),
+
+    /// Failure in the embedding subsystem — model load (network /
+    /// ONNX runtime / disk), inference (OOM / shape mismatch),
+    /// or vector serialization. Distinct from [`InvalidEntry`]
+    /// (which is data-validation) so callers can branch on
+    /// "embeddings are unavailable" vs "this entry's content is
+    /// malformed".
+    #[error("embedding error: {0}")]
+    Embed(String),
 }
 
 pub type Result<T> = std::result::Result<T, IndexError>;

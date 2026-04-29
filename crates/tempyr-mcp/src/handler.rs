@@ -1929,12 +1929,23 @@ impl TempyrServer {
             }
         }
 
-        // Embed the query string for the vector side. None on
-        // embedder unavailability or per-call embedding error —
-        // search falls back to BM25-only ranking, identical to
-        // slice 3b1 behavior.
+        // Embed the query string for the vector side. On embedder
+        // unavailability OR per-call embedding error, fall back to
+        // BM25-only ranking (identical to slice 3b1 behavior). The
+        // per-call error path logs to stderr so a transient ONNX
+        // hiccup doesn't silently drop semantic search for the
+        // session — the agent (and the human running with
+        // `tempyr --mcp`) can see why hybrid mode isn't kicking in.
         let query_vector = match embedder {
-            Some(emb) => emb.embed_one(&p.query).ok(),
+            Some(emb) => match emb.embed_one(&p.query) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!(
+                        "warning: journal_search query embedding failed, falling back to BM25 only: {e}"
+                    );
+                    None
+                }
+            },
             None => None,
         };
 
