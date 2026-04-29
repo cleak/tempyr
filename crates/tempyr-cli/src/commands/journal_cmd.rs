@@ -620,7 +620,7 @@ pub fn run_index(args: IndexArgs, json_output: bool) -> Result<()> {
                 "already_indexed": report.already_indexed,
                 "corrupt_lines": report.corrupt_lines,
                 "embedded": report.embedded,
-                "embed_filtered": report.embed_filtered,
+                "embed_pending_total": report.embed_pending_total,
                 "open_files": report.open_files,
                 "archive_refs": report.archive_refs,
                 "rebuilt": args.rebuild,
@@ -651,12 +651,17 @@ pub fn run_index(args: IndexArgs, json_output: bool) -> Result<()> {
             report.already_indexed,
             report.corrupt_lines,
         );
-        if report.embedded > 0 || report.embed_filtered > 0 {
+        if report.embedded > 0 || report.embed_pending_total > 0 {
             println!(
-                "embedded {} entr{}, filtered {} (low-info kind)",
+                "embedded {} entr{} ({} low-info entr{} in index, not vector-searchable)",
                 report.embedded,
                 if report.embedded == 1 { "y" } else { "ies" },
-                report.embed_filtered,
+                report.embed_pending_total,
+                if report.embed_pending_total == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
             );
         }
     }

@@ -32,8 +32,10 @@ use tempyr_journal::{Entry, path as jpath};
 
 use crate::{IndexError, Result, schema};
 
-/// One refresh run's outcome. All counters are over the *current run*,
-/// not cumulative across the lifetime of the index.
+/// One refresh run's outcome. Most counters are over the *current run*,
+/// not cumulative across the lifetime of the index. The single
+/// exception is [`Self::embed_pending_total`] — a backlog snapshot
+/// (see its doc).
 #[derive(Debug, Default, Clone)]
 pub struct IndexerReport {
     /// Total JSONL lines visited across all sources.
@@ -52,11 +54,15 @@ pub struct IndexerReport {
     /// embeddings and cache hits — i.e., how many `entry_embeddings`
     /// rows the indexer populated this pass.
     pub embedded: u64,
-    /// Entries skipped from embedding because their kind is
-    /// low-information for vector search (plan, question, risk,
-    /// assumption). Stored for diagnostics; agents can `journal index`
-    /// to see how many entries were filtered out.
-    pub embed_filtered: u64,
+    /// **Backlog metric** (not a per-run counter): total number of
+    /// entries currently in the index whose kind is low-information
+    /// for vector search (plan / question / risk / assumption) and
+    /// that therefore have no `entry_embeddings` row. Reported each
+    /// run so `tempyr journal index` can show "X% of your journal is
+    /// not vector-searchable", but the value is a snapshot of the
+    /// whole index, not a delta. Counted by
+    /// [`count_embed_pending_total`] before the embed pass runs.
+    pub embed_pending_total: u64,
 }
 
 /// Refresh the index at `<common_dir>/tempyr/journals/index.db` from
@@ -80,13 +86,17 @@ pub fn refresh_index(common_dir: &Path, repo_root: &Path) -> Result<IndexerRepor
 }
 
 /// Same as [`refresh_index`] but also embeds pending high-value
-/// entries via the supplied [`crate::Embedder`]. Embedding failures
-/// are non-fatal: structural refresh always succeeds first; embed
-/// pass is best-effort, with each failed row logged on the report
-/// (`embed_filtered` does NOT include embed errors — those still
-/// count as "attempted, failed silently"). The intent is that
-/// callers get vector search "for free" on the next query without
-/// needing a separate `embed` step.
+/// entries via the supplied [`crate::Embedder`].
+///
+/// **Embed-pass failure semantics**: structural refresh runs first
+/// and any error there propagates. The embed pass that follows is
+/// best-effort — an [`IndexError::Embed`] (model load, ONNX
+/// inference, vec dim mismatch) is logged to stderr and swallowed,
+/// so callers still get a successful report describing the
+/// structural work that committed. Any other error during the
+/// embed pass (SQLite, IO on the cache db) is treated as a real
+/// failure and propagated — those represent broken state, not a
+/// transient embedder hiccup.
 pub fn refresh_index_with_embedder(
     common_dir: &Path,
     repo_root: &Path,
@@ -98,7 +108,16 @@ pub fn refresh_index_with_embedder(
 
     refresh_open(&mut conn, common_dir, &mut report)?;
     refresh_archive(&mut conn, repo_root, &mut report)?;
-    embed_pending(&mut conn, common_dir, embedder, &mut report)?;
+    if let Err(e) = embed_pending(&mut conn, common_dir, embedder, &mut report) {
+        match e {
+            IndexError::Embed(msg) => {
+                eprintln!(
+                    "warning: embed pass failed, structural index is still up-to-date: {msg}"
+                );
+            }
+            other => return Err(other),
+        }
+    }
 
     Ok(report)
 }
@@ -106,30 +125,18 @@ pub fn refresh_index_with_embedder(
 /// Refresh the index, preferring the embedder path so vector
 /// search sees freshly-indexed entries.
 ///
-/// **Fallback semantics**: if the embedder is loaded
-/// ([`crate::try_shared_embedder`] returns `Some`) and
-/// [`refresh_index_with_embedder`] succeeds, we're done. If it
-/// fails (transient ONNX runtime error, embedding shape mismatch,
-/// vec0 hiccup), this function logs the embedder error and retries
-/// with structural-only [`refresh_index`] — the structural data
-/// has already committed at that point, so the second call is
-/// effectively idempotent and just gets us a usable report. If
-/// the embedder isn't loaded, we go straight to structural-only.
-///
-/// Returns the report from whichever path succeeded; only a hard
-/// failure on the structural-only retry surfaces as an error.
+/// If [`crate::try_shared_embedder`] returns `Some`, we delegate to
+/// [`refresh_index_with_embedder`], which already treats embedder
+/// failures as non-fatal (logging + continuing with the structural
+/// report). If the embedder isn't loaded, we go straight to
+/// [`refresh_index`]. Either way, structural errors propagate
+/// untouched — there is no error-swallowing fallback layer here.
 pub fn refresh_index_preferring_embeddings(
     common_dir: &Path,
     repo_root: &Path,
 ) -> Result<IndexerReport> {
     match crate::try_shared_embedder() {
-        Some(emb) => match refresh_index_with_embedder(common_dir, repo_root, emb) {
-            Ok(report) => Ok(report),
-            Err(e) => {
-                eprintln!("warning: refresh with embedder failed, falling back to BM25-only: {e}");
-                refresh_index(common_dir, repo_root)
-            }
-        },
+        Some(emb) => refresh_index_with_embedder(common_dir, repo_root, emb),
         None => refresh_index(common_dir, repo_root),
     }
 }
@@ -338,7 +345,7 @@ fn ingest_archive_ref(
 // they're often too short or hypothetical to score well on vector
 // queries. The authoritative list lives in `EMBEDDABLE_KINDS`; both
 // the SELECT in `embed_pending` and the COUNT in
-// `count_pending_non_embeddable` build their `IN (...)` fragment from
+// `count_embed_pending_total` build their `IN (...)` fragment from
 // it via `embeddable_in_clause()`, so adding or removing a kind is a
 // single-site change.
 
@@ -375,12 +382,14 @@ fn embed_pending(
     let cache_path = crate::embed_cache::cache_db_path(common_dir);
     let cache = crate::embed_cache::open(&cache_path)?;
 
-    // Pre-pull the count of pending non-embeddable entries so we
-    // can populate `report.embed_filtered` without bringing those
-    // rows back from SQL. Filtering in Rust would re-scan permanent
-    // low-info rows on every refresh — push the kind predicate into
-    // the SELECT below and run a separate COUNT for the metric.
-    report.embed_filtered = count_pending_non_embeddable(conn)?;
+    // Pre-pull the backlog count of low-info-kind entries that have
+    // no embedding row, so we can populate `embed_pending_total`
+    // without bringing those rows back from SQL. This is a snapshot
+    // of the whole index, not a per-run delta — see the field doc.
+    // Filtering in Rust would re-scan permanent low-info rows on
+    // every refresh; pushing the kind predicate into the SELECT and
+    // running a separate COUNT for the metric avoids that.
+    report.embed_pending_total = count_embed_pending_total(conn)?;
 
     // Find pending rows whose kind is in the embeddable allow-list.
     // The LEFT JOIN ensures we only see entries whose embedding
@@ -486,12 +495,14 @@ fn embed_pending(
     Ok(())
 }
 
-/// How many pending entries (no embedding row yet) carry a
-/// non-embeddable kind. Used to populate
-/// `IndexerReport::embed_filtered` without bringing those rows
-/// back from SQL — a single COUNT(*) is much cheaper than the
-/// full SELECT + Rust filter that earlier versions ran.
-fn count_pending_non_embeddable(conn: &Connection) -> Result<u64> {
+/// Backlog count: how many entries currently in the index carry a
+/// low-info-for-vector-search kind (and so will never get an
+/// `entry_embeddings` row). Used to populate
+/// [`IndexerReport::embed_pending_total`] without dragging the rows
+/// themselves back from SQL — a single COUNT(*) is much cheaper
+/// than the full SELECT + Rust filter that earlier versions ran.
+/// This is a snapshot total, not a per-run delta.
+fn count_embed_pending_total(conn: &Connection) -> Result<u64> {
     let sql = format!(
         r#"
         SELECT COUNT(*)

@@ -1328,9 +1328,10 @@ mod tests {
             None,
         );
         let report = crate::indexer::refresh_index_with_embedder(&common, &repo, embedder).unwrap();
-        // 1 entry embedded (the decision), 1 filtered (the plan).
+        // 1 entry embedded (the decision), 1 pending in the
+        // low-info backlog (the plan).
         assert_eq!(report.embedded, 1);
-        assert_eq!(report.embed_filtered, 1);
+        assert_eq!(report.embed_pending_total, 1);
 
         // Direct check: the entry_embeddings vec0 table has one row.
         let conn = schema::open(&crate::index_db_path(&common)).unwrap();
