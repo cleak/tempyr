@@ -6,14 +6,20 @@ use tempyr_journal::{TaskTransition, auto_emit_task_transition, path as jpath};
 const DEFAULT_JOURNAL_AGENT: &str = "claude";
 
 pub fn run(ctx: &ProjectContext, id: &str, new_status: &str) -> anyhow::Result<()> {
-    let outcome = ops::update_status(&ctx.graph_dir, id, new_status, &ctx.schema)?;
-    println!("Updated {id} status to '{new_status}'");
+    // Resolve up front so the user-printed message, the file lookup
+    // inside `update_status`, and the journal entry all reference the
+    // canonical full id. Tempyr accepts the 6-char suffix as a short
+    // form for any node — `find_node_file` (called by `update_status`)
+    // only does exact-filename matching, so we must resolve here.
+    let resolved_id = ops::resolve_node_id(&ctx.graph_dir, id)?;
+    let outcome = ops::update_status(&ctx.graph_dir, &resolved_id, new_status, &ctx.schema)?;
+    println!("Updated {resolved_id} status to '{new_status}'");
     super::warn_if_index_refresh_fails(ctx);
 
     // Phase 4a: best-effort journal entry on task status transitions.
     // A failure to find a git repo, open a session, or write the entry
     // must not roll back or report-fail the status change — we only log.
-    emit_journal_for_transition(&ctx.root, id, new_status, &outcome);
+    emit_journal_for_transition(&ctx.root, &resolved_id, new_status, &outcome);
 
     Ok(())
 }

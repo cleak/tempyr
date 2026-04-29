@@ -964,7 +964,9 @@ fn test_status_update() {
 
 /// Phase 4a: `tempyr status <task> in_progress` should auto-emit a
 /// `plan` entry to the journal when the node is a task. Verifies the
-/// CLI is wired into `tempyr_journal::auto_emit_task_transition`.
+/// CLI is wired into `tempyr_journal::auto_emit_task_transition`,
+/// and that short-id (6-char suffix) inputs resolve to the canonical
+/// full id in both the file lookup and the emitted journal entry.
 #[test]
 fn test_status_auto_emits_journal_entry_on_task_transition() {
     let tmp = TempDir::new().unwrap();
@@ -977,18 +979,24 @@ fn test_status_auto_emits_journal_entry_on_task_transition() {
         "task-implement-thing-aaaaaa",
         "---\nid: task-implement-thing-aaaaaa\ntype: task\nstatus: backlog\n---\n# Implement thing\n",
     );
+    write_node(
+        &tmp,
+        "tasks",
+        "task-other-thing-bbbbbb",
+        "---\nid: task-other-thing-bbbbbb\ntype: task\nstatus: backlog\n---\n# Other thing\n",
+    );
 
+    let open_dir = tmp.path().join(".git/tempyr/journals/open");
+
+    // Full-id form: classic happy path.
     tempyr()
         .current_dir(tmp.path())
         .args(["status", "task-implement-thing-aaaaaa", "in_progress"])
         .assert()
         .success();
 
-    // The journal lives under `<git-common-dir>/tempyr/journals/open/`.
-    // For a non-worktree repo that's `<repo>/.git/tempyr/journals/open`.
-    let open_dir = tmp.path().join(".git/tempyr/journals/open");
     let entries = read_journal_entries(&open_dir);
-    assert_eq!(entries.len(), 1, "expected exactly one auto-emitted entry");
+    assert_eq!(entries.len(), 1, "expected one entry after first status");
     let e = &entries[0];
     assert_eq!(e["kind"], "plan");
     assert_eq!(e["provisional"], true);
@@ -1000,10 +1008,40 @@ fn test_status_auto_emits_journal_entry_on_task_transition() {
         "summary should reference the task id, got: {}",
         e["summary"]
     );
-    // The `references` array should carry the task id so future
-    // searches can pivot from journal entry → task node.
     let refs = e["references"].as_array().unwrap();
     assert!(refs.iter().any(|v| v == "task-implement-thing-aaaaaa"));
+
+    // Short-id form: the CLI must resolve the 6-char suffix to the
+    // canonical full id BEFORE calling update_status (which only
+    // accepts exact filenames) and BEFORE building the journal entry
+    // (so `references` carries the canonical id, not "bbbbbb").
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["status", "bbbbbb", "in_progress"])
+        .assert()
+        .success();
+
+    let entries = read_journal_entries(&open_dir);
+    assert_eq!(
+        entries.len(),
+        2,
+        "expected a second entry from the short-id status call"
+    );
+    let short = entries
+        .iter()
+        .find(|e| {
+            e["references"]
+                .as_array()
+                .map(|a| a.iter().any(|v| v == "task-other-thing-bbbbbb"))
+                .unwrap_or(false)
+        })
+        .expect("entry with canonical id from short-form should exist");
+    assert_eq!(short["kind"], "plan");
+    let short_refs = short["references"].as_array().unwrap();
+    assert!(
+        short_refs.iter().all(|v| v != "bbbbbb"),
+        "references must carry canonical id, not the suffix: {short_refs:?}"
+    );
 }
 
 /// Status changes on non-task nodes must NOT spawn a journal entry —
