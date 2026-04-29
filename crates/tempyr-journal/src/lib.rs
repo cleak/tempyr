@@ -21,7 +21,9 @@ pub mod session;
 pub mod state;
 pub mod writer;
 
-pub use auto_emit::{TaskTransition, auto_emit_task_transition};
+pub use auto_emit::{
+    InterviewEvent, TaskTransition, auto_emit_interview_event, auto_emit_task_transition,
+};
 pub use config::JournalConfig;
 pub use entry::{Confidence, Entry, Polarity, SCHEMA_VERSION, Severity};
 pub use kind::{Kind, validate_entry};

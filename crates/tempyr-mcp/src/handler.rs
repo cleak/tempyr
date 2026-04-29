@@ -33,8 +33,8 @@ use tempyr_interview::session::{
 
 use tempyr_journal::path as jpath;
 use tempyr_journal::{
-    Confidence, EntryDraft, Kind, Polarity, Session, Severity, TaskTransition,
-    auto_emit_task_transition, write_entry,
+    Confidence, EntryDraft, InterviewEvent, Kind, Polarity, Session, Severity, TaskTransition,
+    auto_emit_interview_event, auto_emit_task_transition, write_entry,
 };
 use tempyr_linear::client::LinearClient;
 use tempyr_linear::config::LinearConfig;
@@ -1162,6 +1162,24 @@ impl TempyrServer {
         }
     }
 
+    /// Best-effort journal auto-emit for interview lifecycle events
+    /// (Phase 4b). Mirrors [`Self::emit_journal_for_transition`] for
+    /// the interview side: anchors on `graph_dir.parent()` (NOT the
+    /// server's cwd), swallows missing-git-repo errors silently, and
+    /// returns `Some(warning_line)` on real failure so the caller can
+    /// append it to the tool response. The interview operation has
+    /// already mutated session state on disk by the time we get here,
+    /// so a write failure must not bubble up as a tool error.
+    fn emit_interview_event(&self, graph_dir: &Path, event: &InterviewEvent<'_>) -> Option<String> {
+        let project_root = graph_dir.parent()?;
+        let common_dir = jpath::git_common_dir(project_root).ok()?;
+        let worktree_top = jpath::repo_toplevel(project_root).ok()?;
+        match auto_emit_interview_event(&common_dir, &worktree_top, &self.agent_id, event) {
+            Ok(_) => None,
+            Err(e) => Some(format!("journal auto-emit for interview event failed: {e}")),
+        }
+    }
+
     #[tool(
         name = "graph_add_edge",
         description = "Add a directed edge between two existing nodes. The reverse edge is written automatically."
@@ -1298,6 +1316,19 @@ impl TempyrServer {
 
         result.session.save(&sessions).map_err(|e| e.to_string())?;
 
+        // Phase 4b: best-effort journal entry on interview start.
+        if let Some(w) = self.emit_interview_event(
+            &graph_dir,
+            &InterviewEvent::Started {
+                session_id: &result.session.id,
+                root_node_id: &result.session.root_node.id,
+                root_type: &result.session.root_type,
+                phase: result.session.phase.display_name(),
+            },
+        ) {
+            eprintln!("warning: {w}");
+        }
+
         let state = session_state_json(&result.session, &schema);
         serde_json::to_string_pretty(&state).map_err(|e| e.to_string())
     }
@@ -1317,6 +1348,7 @@ impl TempyrServer {
         let mut session =
             InterviewSession::load_by_id(&sessions, &p.session_id).map_err(|e| e.to_string())?;
 
+        let prior_phase = session.phase;
         let question_context: String = next_questions(&session, 3)
             .iter()
             .map(|g| g.suggested_question.as_str())
@@ -1327,6 +1359,32 @@ impl TempyrServer {
         let update = proposer::reanalyze_with_graph(&mut session, &schema, graph.as_ref());
 
         session.save(&sessions).map_err(|e| e.to_string())?;
+
+        // Phase 4b: emit AnswerRecorded; if phase advanced, also emit
+        // PhaseAdvanced. Both best-effort.
+        if let Some(w) = self.emit_interview_event(
+            &graph_dir,
+            &InterviewEvent::AnswerRecorded {
+                session_id: &session.id,
+                answer: &p.answer,
+                phase: session.phase.display_name(),
+                filled_gap_count: update.filled_gaps.len(),
+            },
+        ) {
+            eprintln!("warning: {w}");
+        }
+        if update.phase_changed
+            && let Some(w) = self.emit_interview_event(
+                &graph_dir,
+                &InterviewEvent::PhaseAdvanced {
+                    session_id: &session.id,
+                    from: prior_phase.display_name(),
+                    to: session.phase.display_name(),
+                },
+            )
+        {
+            eprintln!("warning: {w}");
+        }
 
         serde_json::to_string_pretty(&json!({
             "session_id": session.id,
@@ -1392,6 +1450,22 @@ impl TempyrServer {
             all_warnings.push(warning);
         }
 
+        // Phase 4b: emit Committed (final outcome) so the journal
+        // session gets finalized and picked up by the publisher. The
+        // commit response already has a `warnings` array, so a journal
+        // failure is surfaced there rather than only on stderr.
+        if let Some(w) = self.emit_interview_event(
+            &graph_dir,
+            &InterviewEvent::Committed {
+                session_id: &p.session_id,
+                node_count: result.node_count,
+                edge_count: result.edge_count,
+                files_created: result.created_files.len(),
+            },
+        ) {
+            all_warnings.push(w);
+        }
+
         serde_json::to_string_pretty(&json!({
             "files_created": result.created_files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "files_modified": result.modified_files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
@@ -1410,11 +1484,12 @@ impl TempyrServer {
         &self,
         Parameters(p): Parameters<InterviewAdjustParams>,
     ) -> Result<String, String> {
-        let (_, gf_dir, schema) = self.find_project()?;
+        let (graph_dir, gf_dir, schema) = self.find_project()?;
         let sessions = sessions_dir(&gf_dir);
         let mut session =
             InterviewSession::load_by_id(&sessions, &p.session_id).map_err(|e| e.to_string())?;
 
+        let prior_phase = session.phase;
         let patch = NodePatch {
             id: p.new_id.clone(),
             body: p.body,
@@ -1437,8 +1512,34 @@ impl TempyrServer {
             }
         }
 
-        let _update = proposer::reanalyze(&mut session, &schema);
+        let update = proposer::reanalyze(&mut session, &schema);
         session.save(&sessions).map_err(|e| e.to_string())?;
+
+        // Phase 4b: emit Adjusted; if reanalysis advanced the phase,
+        // also emit PhaseAdvanced. Both best-effort.
+        let target = p.new_id.as_deref().unwrap_or(&p.node_id);
+        if let Some(w) = self.emit_interview_event(
+            &graph_dir,
+            &InterviewEvent::Adjusted {
+                session_id: &session.id,
+                operation: "adjust",
+                target,
+            },
+        ) {
+            eprintln!("warning: {w}");
+        }
+        if update.phase_changed
+            && let Some(w) = self.emit_interview_event(
+                &graph_dir,
+                &InterviewEvent::PhaseAdvanced {
+                    session_id: &session.id,
+                    from: prior_phase.display_name(),
+                    to: session.phase.display_name(),
+                },
+            )
+        {
+            eprintln!("warning: {w}");
+        }
 
         let state = session_state_json(&session, &schema);
         serde_json::to_string_pretty(&state).map_err(|e| e.to_string())

@@ -1,41 +1,35 @@
-//! Auto-emit journal entries on task status transitions.
+//! Auto-emit on task status transitions (§9 Phase 4a).
 //!
-//! Phase 4a hooks the CLI `tempyr status` and the MCP `graph_update_node`
-//! tool into the journal. When a node of type `task` moves between statuses
-//! the indexer would care about, we synthesize one entry that captures the
-//! transition. Per the spec (`docs/journal-spec.md` §9 Phase 4):
+//! When a node of type `task` moves between statuses the indexer
+//! cares about, we synthesize one entry capturing the transition:
 //!
-//! | From → To                | Kind     | Notes                                  |
-//! |--------------------------|----------|----------------------------------------|
-//! | `backlog` → `in_progress`| `plan`   | provisional                            |
-//! | `in_progress` → `done`   | `outcome`| `passed = true`, `final = true`        |
-//! | `in_progress` → `blocked`| `risk`   | `severity = blocker`                   |
+//! | From → To                | Kind     | Notes                              |
+//! |--------------------------|----------|------------------------------------|
+//! | `backlog` → `in_progress`| `plan`   | provisional                        |
+//! | `in_progress` → `done`   | `outcome`| `passed = true`, `final = true`    |
+//! | `in_progress` → `blocked`| `risk`   | `severity = blocker`               |
 //!
-//! Anything else (e.g. status changes on non-task nodes, or transitions
-//! outside the table) is a no-op — the function returns `Ok(None)`.
-//!
-//! **Best-effort only**: callers wrap errors as warnings rather than
-//! failing the underlying status change. That's the contract: a journal
-//! hiccup must never block a graph mutation.
+//! Anything else (non-task nodes, transitions outside the table) is
+//! a no-op — the function returns `Ok(None)`.
 
 use std::path::Path;
 
+use super::summary::clamp_summary;
 use crate::kind::Kind;
 use crate::session::Session;
 use crate::writer::{EntryDraft, WriteOutcome, write_entry};
 use crate::{Result, Severity};
 
-/// Snapshot of a graph-node status change captured by the caller before
-/// and after [`tempyr_core::ops::update_status`] / `update_node` runs.
-/// Borrowed strings keep this allocation-free for the common case
-/// (the caller already owns these as `String`s on the parsed `Node`).
+/// Snapshot of a graph-node status change captured by the caller
+/// before and after [`tempyr_core::ops::update_status`] /
+/// `update_node` runs. Borrowed strings keep this allocation-free
+/// for the common case (the caller already owns these as `String`s
+/// on the parsed `Node`).
 #[derive(Debug, Clone, Copy)]
 pub struct TaskTransition<'a> {
     pub node_id: &'a str,
     pub node_type: &'a str,
     /// First H1 in the node body or the id (matches `Node::title`).
-    /// Used in the journal entry summary so the line reads as "starting
-    /// task <title>" instead of a bare slug.
     pub title: &'a str,
     /// Status the node had on disk before the update. `None` if the
     /// node had no status set previously — those transitions still
@@ -46,12 +40,7 @@ pub struct TaskTransition<'a> {
 
 /// Map a status transition on a task node to a journal entry and write
 /// it. Returns `Ok(None)` for any input that doesn't match one of the
-/// three spec'd rules — including non-task nodes, no-op transitions
-/// (`prior == new`), and any transition outside the rule table.
-///
-/// Errors propagate to the caller, which is responsible for downgrading
-/// them to non-fatal warnings (the auto-emit must never fail the
-/// surrounding status-change operation).
+/// three spec'd rules.
 pub fn auto_emit_task_transition(
     common_dir: &Path,
     worktree_top: &Path,
@@ -104,36 +93,11 @@ fn build_draft(t: &TaskTransition<'_>) -> Option<EntryDraft> {
     Some(d)
 }
 
-/// Largest summary length the journal validator will accept (matches
-/// the upper bound enforced by `kind::validate_entry`). Synthesized
-/// summaries reuse the user-supplied node title verbatim, so a long
-/// H1 — or a future schema with relaxed title bounds — could blow the
-/// limit. Truncate at this many *Unicode scalars* so we never split a
-/// multi-byte char, and append a marker so the truncation is visible
-/// in the journal.
-const MAX_SUMMARY_CHARS: usize = 200;
-
-/// Truncation marker appended when a summary is shortened. Six chars
-/// is enough for `…` plus a `[cut]` tag — picked so the marker fits
-/// inside the budget and reads clearly in a CLI listing.
-const TRUNCATION_MARKER: &str = " […cut]";
-
-fn clamp_summary(s: String) -> String {
-    let len = s.chars().count();
-    if len <= MAX_SUMMARY_CHARS {
-        return s;
-    }
-    let marker_chars = TRUNCATION_MARKER.chars().count();
-    let keep = MAX_SUMMARY_CHARS.saturating_sub(marker_chars);
-    let mut out: String = s.chars().take(keep).collect();
-    out.push_str(TRUNCATION_MARKER);
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Kind;
+    use crate::auto_emit::summary::{MAX_SUMMARY_CHARS, TRUNCATION_MARKER};
 
     fn t<'a>(node_type: &'a str, prior: Option<&'a str>, new: &'a str) -> TaskTransition<'a> {
         TaskTransition {
@@ -204,9 +168,6 @@ mod tests {
 
     #[test]
     fn long_title_is_truncated_below_summary_limit() {
-        // Construct a title pushing the formatted summary well past the
-        // 200-char ceiling. Without truncation this would fail the
-        // writer's `validate_entry` length check at runtime.
         let long_title = "x".repeat(500);
         let transition = TaskTransition {
             node_id: "task-overflow-aaaaaa",
@@ -216,20 +177,12 @@ mod tests {
             new_status: "in_progress",
         };
         let draft = build_draft(&transition).unwrap();
-        assert!(
-            draft.summary.chars().count() <= MAX_SUMMARY_CHARS,
-            "summary still over limit: {} chars",
-            draft.summary.chars().count()
-        );
+        assert!(draft.summary.chars().count() <= MAX_SUMMARY_CHARS);
         assert!(draft.summary.ends_with(TRUNCATION_MARKER));
     }
 
     #[test]
     fn truncation_does_not_split_multibyte_characters() {
-        // Padding from the front with a 4-byte emoji ensures the
-        // boundary cuts inside what would be a multi-byte sequence
-        // for a byte-oriented truncation. Char-aware truncation must
-        // produce a valid UTF-8 string regardless.
         let title: String = "🦀".repeat(300);
         let transition = TaskTransition {
             node_id: "task-utf8-aaaaaa",
@@ -239,8 +192,6 @@ mod tests {
             new_status: "in_progress",
         };
         let draft = build_draft(&transition).unwrap();
-        // Round-trip through validation surrogate: every char boundary
-        // is intact (this would have panicked on a byte-split slice).
         assert!(draft.summary.chars().count() <= MAX_SUMMARY_CHARS);
         let reparsed: String = draft.summary.chars().collect();
         assert_eq!(reparsed, draft.summary);

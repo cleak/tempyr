@@ -1,13 +1,16 @@
 use crate::config::ProjectContext;
+use std::path::Path;
 use tempyr_core::graph::Graph;
 use tempyr_interview::phases;
 use tempyr_interview::proposer;
 use tempyr_interview::session::InterviewSession;
+use tempyr_journal::{InterviewEvent, auto_emit_interview_event, path as jpath};
 
 pub fn run_start(
     ctx: &ProjectContext,
     brain_dump: &str,
     root_type: &str,
+    agent: &str,
     json: bool,
 ) -> anyhow::Result<()> {
     let sessions_dir = ctx.tempyr_dir.join("sessions");
@@ -27,6 +30,18 @@ pub fn run_start(
 
     let session = result.session;
     session.save(&sessions_dir)?;
+
+    // Phase 4b: best-effort journal entry on interview lifecycle.
+    emit_interview_event(
+        &ctx.root,
+        agent,
+        &InterviewEvent::Started {
+            session_id: &session.id,
+            root_node_id: &session.root_node.id,
+            root_type: &session.root_type,
+            phase: session.phase.display_name(),
+        },
+    );
 
     if json {
         println!(
@@ -66,11 +81,13 @@ pub fn run_answer(
     ctx: &ProjectContext,
     session_id: &str,
     answer: &str,
+    agent: &str,
     json: bool,
 ) -> anyhow::Result<()> {
     let sessions_dir = ctx.tempyr_dir.join("sessions");
     let mut session = InterviewSession::load_by_id(&sessions_dir, session_id)?;
 
+    let prior_phase = session.phase;
     let question = session
         .remaining_gaps
         .first()
@@ -80,6 +97,30 @@ pub fn run_answer(
     let result = proposer::record_answer(&mut session, &question, answer, vec![], &ctx.schema);
 
     session.save(&sessions_dir)?;
+
+    // Phase 4b: emit AnswerRecorded; if the reanalysis advanced the
+    // phase, also emit PhaseAdvanced. Both best-effort.
+    emit_interview_event(
+        &ctx.root,
+        agent,
+        &InterviewEvent::AnswerRecorded {
+            session_id: &session.id,
+            answer,
+            phase: session.phase.display_name(),
+            filled_gap_count: result.filled_gaps.len(),
+        },
+    );
+    if result.phase_changed {
+        emit_interview_event(
+            &ctx.root,
+            agent,
+            &InterviewEvent::PhaseAdvanced {
+                session_id: &session.id,
+                from: prior_phase.display_name(),
+                to: session.phase.display_name(),
+            },
+        );
+    }
 
     if json {
         println!(
@@ -179,7 +220,7 @@ pub fn run_show(ctx: &ProjectContext, session_id: &str, json: bool) -> anyhow::R
     Ok(())
 }
 
-pub fn run_commit(ctx: &ProjectContext, session_id: &str) -> anyhow::Result<()> {
+pub fn run_commit(ctx: &ProjectContext, session_id: &str, agent: &str) -> anyhow::Result<()> {
     let sessions_dir = ctx.tempyr_dir.join("sessions");
     let session = InterviewSession::load_by_id(&sessions_dir, session_id)?;
 
@@ -197,6 +238,19 @@ pub fn run_commit(ctx: &ProjectContext, session_id: &str) -> anyhow::Result<()> 
         }
     }
     super::warn_if_index_refresh_fails(ctx);
+
+    // Phase 4b: emit Committed (final outcome) so the journal session
+    // gets finalized and picked up by the publisher.
+    emit_interview_event(
+        &ctx.root,
+        agent,
+        &InterviewEvent::Committed {
+            session_id: &session.id,
+            node_count: result.node_count,
+            edge_count: result.edge_count,
+            files_created: result.created_files.len(),
+        },
+    );
 
     Ok(())
 }
@@ -229,4 +283,24 @@ pub fn run_list(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Best-effort wrapper around [`auto_emit_interview_event`]. Anchors
+/// on the resolved project root (NOT shell cwd, which can point at a
+/// different repo when `--graph-dir` is passed) and silently skips
+/// when the project isn't inside a git repository. Failures are
+/// reported on stderr but never propagate — the underlying interview
+/// operation has already mutated state on disk.
+fn emit_interview_event(project_root: &Path, agent: &str, event: &InterviewEvent<'_>) {
+    let common_dir = match jpath::git_common_dir(project_root) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let worktree_top = match jpath::repo_toplevel(project_root) {
+        Ok(w) => w,
+        Err(_) => return,
+    };
+    if let Err(e) = auto_emit_interview_event(&common_dir, &worktree_top, agent, event) {
+        eprintln!("warning: journal auto-emit for interview event failed: {e}");
+    }
 }

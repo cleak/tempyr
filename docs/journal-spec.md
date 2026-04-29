@@ -370,7 +370,7 @@ Once search lands, the journal is useful when agents query it. Phase 4 closes th
   - `in_progress → done` → emit `outcome` with `passed = true` and `final = true`
   - `in_progress → blocked` → emit `risk` with `severity = blocker`
   - Implementation lives in [`tempyr_journal::auto_emit`](../crates/tempyr-journal/src/auto_emit.rs); both call sites treat write failures as soft warnings, never aborting the underlying status change.
-- Auto-emit on interview lifecycle: start, answer, adjust, phase, commit, rollback. All provisional until session commit.
+- Auto-emit on interview lifecycle: start, answer, adjust, phase, commit, rollback. All provisional until session commit. **Implemented in slice 4b** for the five operations that exist today (start / answer / phase / adjust / commit); rollback is deferred until the interview engine grows a corresponding operation. Implementation lives in [`tempyr_journal::auto_emit::interview`](../crates/tempyr-journal/src/auto_emit/interview.rs); both call sites treat write failures as soft warnings, never aborting the underlying interview operation.
 - `.claude/settings.json.example` template with `SessionStart`/`SessionEnd` hooks invoking `tempyr journal bootstrap` and `tempyr journal finalize`.
 - MCP annotations (`read_only`/`destructive`/`idempotent`/`open_world`) across all existing tempyr tools (orthogonal but worth bundling).
 - README "Session journal" section + mirror to `CLAUDE.md` and `AGENTS.md`.
