@@ -334,13 +334,30 @@ fn ingest_archive_ref(
 
 // --- Embedding pass --------------------------------------------------------
 //
-// The list of kinds we embed (`decision`, `finding`, `dead_end`,
-// `outcome`) appears literally in two SQL statements: the SELECT in
-// `embed_pending` and the COUNT in `count_pending_non_embeddable`.
-// They MUST stay in sync — if you add or remove a kind from one, do
-// it to both. Per the spec, plans/questions/risks/assumptions are
-// skipped because they're often too short or hypothetical to score
-// well on vector queries.
+// Per the spec, plans/questions/risks/assumptions are skipped because
+// they're often too short or hypothetical to score well on vector
+// queries. The authoritative list lives in `EMBEDDABLE_KINDS`; both
+// the SELECT in `embed_pending` and the COUNT in
+// `count_pending_non_embeddable` build their `IN (...)` fragment from
+// it via `embeddable_in_clause()`, so adding or removing a kind is a
+// single-site change.
+
+/// Entry kinds that participate in the vector index. All other kinds
+/// (`plan`, `question`, `risk`, `assumption`) are deliberately
+/// excluded — see the section comment above.
+const EMBEDDABLE_KINDS: &[&str] = &["decision", "finding", "dead_end", "outcome"];
+
+/// Render `EMBEDDABLE_KINDS` as the body of a SQL `IN (...)` list, e.g.
+/// `'decision', 'finding', 'dead_end', 'outcome'`. Safe to interpolate
+/// directly because the inputs are compile-time literals with no
+/// quotes or special characters.
+fn embeddable_in_clause() -> String {
+    EMBEDDABLE_KINDS
+        .iter()
+        .map(|k| format!("'{k}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Embed every pending high-value entry: rows whose kind is in the
 /// allow-list AND that don't yet have a row in `entry_embeddings`.
@@ -369,15 +386,17 @@ fn embed_pending(
     // The LEFT JOIN ensures we only see entries whose embedding
     // row is missing; the AND e.kind IN (...) keeps low-info rows
     // out entirely so they're not re-scanned each refresh.
-    let mut stmt = conn.prepare(
+    let sql = format!(
         r#"
         SELECT e.rowid, e.summary, e.detail
         FROM entries e
         LEFT JOIN entry_embeddings ee ON ee.rowid = e.rowid
         WHERE ee.rowid IS NULL
-          AND e.kind IN ('decision', 'finding', 'dead_end', 'outcome')
+          AND e.kind IN ({})
         "#,
-    )?;
+        embeddable_in_clause()
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, i64>(0)?,
@@ -473,17 +492,17 @@ fn embed_pending(
 /// back from SQL — a single COUNT(*) is much cheaper than the
 /// full SELECT + Rust filter that earlier versions ran.
 fn count_pending_non_embeddable(conn: &Connection) -> Result<u64> {
-    let n: i64 = conn.query_row(
+    let sql = format!(
         r#"
         SELECT COUNT(*)
         FROM entries e
         LEFT JOIN entry_embeddings ee ON ee.rowid = e.rowid
         WHERE ee.rowid IS NULL
-          AND e.kind NOT IN ('decision', 'finding', 'dead_end', 'outcome')
+          AND e.kind NOT IN ({})
         "#,
-        [],
-        |r| r.get(0),
-    )?;
+        embeddable_in_clause()
+    );
+    let n: i64 = conn.query_row(&sql, [], |r| r.get(0))?;
     Ok(n as u64)
 }
 
