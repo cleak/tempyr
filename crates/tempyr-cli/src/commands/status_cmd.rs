@@ -1,7 +1,7 @@
 use crate::config::ProjectContext;
 use std::path::Path;
 use tempyr_core::ops;
-use tempyr_journal::{TaskTransition, auto_emit_task_transition, path as jpath};
+use tempyr_journal::{JournalError, TaskTransition, auto_emit_task_transition, path as jpath};
 
 pub fn run(ctx: &ProjectContext, id: &str, new_status: &str, agent: &str) -> anyhow::Result<()> {
     // Resolve up front so the user-printed message, the file lookup
@@ -34,15 +34,26 @@ fn emit_journal_for_transition(
     // can sit in a totally different repo — a cwd-based lookup would
     // either skip the journal write or, worse, target the wrong repo's
     // refs entirely.
+    //
+    // Error policy: silently swallow `NotAGitRepo` (tempyr supports
+    // operating outside a git repo, so "no journal" is the expected
+    // fallthrough). Surface any other error (IO, git binary missing,
+    // etc.) on stderr so real bugs aren't invisible.
     let common_dir = match jpath::git_common_dir(project_root) {
         Ok(c) => c,
-        // Project is not inside a git repo. Tempyr supports that mode
-        // (no journals, no publisher) — silently skip the auto-emit.
-        Err(_) => return,
+        Err(JournalError::NotAGitRepo(_)) => return,
+        Err(e) => {
+            eprintln!("warning: journal auto-emit skipped, git_common_dir failed: {e}");
+            return;
+        }
     };
     let worktree_top = match jpath::repo_toplevel(project_root) {
         Ok(w) => w,
-        Err(_) => return,
+        Err(JournalError::NotAGitRepo(_)) => return,
+        Err(e) => {
+            eprintln!("warning: journal auto-emit skipped, repo_toplevel failed: {e}");
+            return;
+        }
     };
 
     let transition = TaskTransition {

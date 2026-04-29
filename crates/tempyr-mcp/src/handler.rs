@@ -499,6 +499,19 @@ fn sessions_dir(gf_dir: &Path) -> PathBuf {
     gf_dir.join("sessions")
 }
 
+/// Insert a `warnings` array into a session-state JSON object built
+/// by [`session_state_json`]. Used by `interview_start` and
+/// `interview_adjust` to surface soft-failure messages from the
+/// journal auto-emit through the response — same channel
+/// `interview_commit` already uses, so MCP clients see the warning
+/// instead of just stderr. Empty input is still attached as `[]` so
+/// the field is always present (clients can rely on it).
+fn attach_warnings(state: &mut Value, warnings: Vec<String>) {
+    if let Value::Object(map) = state {
+        map.insert("warnings".to_string(), json!(warnings));
+    }
+}
+
 fn session_state_json(session: &InterviewSession, _schema: &Schema) -> Value {
     let questions = next_questions(session, 3);
     let progress = proposer::compute_progress(session);
@@ -1317,6 +1330,10 @@ impl TempyrServer {
         result.session.save(&sessions).map_err(|e| e.to_string())?;
 
         // Phase 4b: best-effort journal entry on interview start.
+        // Failures get surfaced via the response's `warnings` field
+        // — same channel `interview_commit` uses — so MCP clients
+        // see them, not just the server's stderr.
+        let mut warnings: Vec<String> = Vec::new();
         if let Some(w) = self.emit_interview_event(
             &graph_dir,
             &InterviewEvent::Started {
@@ -1326,10 +1343,11 @@ impl TempyrServer {
                 phase: result.session.phase.display_name(),
             },
         ) {
-            eprintln!("warning: {w}");
+            warnings.push(w);
         }
 
-        let state = session_state_json(&result.session, &schema);
+        let mut state = session_state_json(&result.session, &schema);
+        attach_warnings(&mut state, warnings);
         serde_json::to_string_pretty(&state).map_err(|e| e.to_string())
     }
 
@@ -1361,7 +1379,9 @@ impl TempyrServer {
         session.save(&sessions).map_err(|e| e.to_string())?;
 
         // Phase 4b: emit AnswerRecorded; if phase advanced, also emit
-        // PhaseAdvanced. Both best-effort.
+        // PhaseAdvanced. Failures collected into the response's
+        // `warnings` field so MCP clients can surface them.
+        let mut warnings: Vec<String> = Vec::new();
         if let Some(w) = self.emit_interview_event(
             &graph_dir,
             &InterviewEvent::AnswerRecorded {
@@ -1371,7 +1391,7 @@ impl TempyrServer {
                 filled_gap_count: update.filled_gaps.len(),
             },
         ) {
-            eprintln!("warning: {w}");
+            warnings.push(w);
         }
         if update.phase_changed
             && let Some(w) = self.emit_interview_event(
@@ -1383,7 +1403,7 @@ impl TempyrServer {
                 },
             )
         {
-            eprintln!("warning: {w}");
+            warnings.push(w);
         }
 
         serde_json::to_string_pretty(&json!({
@@ -1399,6 +1419,7 @@ impl TempyrServer {
             },
             "tentative_nodes_count": session.tentative_nodes.len() + 1,
             "tentative_edges_count": session.tentative_edges.len(),
+            "warnings": warnings,
         }))
         .map_err(|e| e.to_string())
     }
@@ -1516,7 +1537,9 @@ impl TempyrServer {
         session.save(&sessions).map_err(|e| e.to_string())?;
 
         // Phase 4b: emit Adjusted; if reanalysis advanced the phase,
-        // also emit PhaseAdvanced. Both best-effort.
+        // also emit PhaseAdvanced. Failures collected into the
+        // response's `warnings` field so clients see them.
+        let mut warnings: Vec<String> = Vec::new();
         let target = p.new_id.as_deref().unwrap_or(&p.node_id);
         if let Some(w) = self.emit_interview_event(
             &graph_dir,
@@ -1526,7 +1549,7 @@ impl TempyrServer {
                 target,
             },
         ) {
-            eprintln!("warning: {w}");
+            warnings.push(w);
         }
         if update.phase_changed
             && let Some(w) = self.emit_interview_event(
@@ -1538,10 +1561,11 @@ impl TempyrServer {
                 },
             )
         {
-            eprintln!("warning: {w}");
+            warnings.push(w);
         }
 
-        let state = session_state_json(&session, &schema);
+        let mut state = session_state_json(&session, &schema);
+        attach_warnings(&mut state, warnings);
         serde_json::to_string_pretty(&state).map_err(|e| e.to_string())
     }
 

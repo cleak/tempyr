@@ -4,7 +4,7 @@ use tempyr_core::graph::Graph;
 use tempyr_interview::phases;
 use tempyr_interview::proposer;
 use tempyr_interview::session::InterviewSession;
-use tempyr_journal::{InterviewEvent, auto_emit_interview_event, path as jpath};
+use tempyr_journal::{InterviewEvent, JournalError, auto_emit_interview_event, path as jpath};
 
 pub fn run_start(
     ctx: &ProjectContext,
@@ -287,18 +287,33 @@ pub fn run_list(ctx: &ProjectContext, json: bool) -> anyhow::Result<()> {
 
 /// Best-effort wrapper around [`auto_emit_interview_event`]. Anchors
 /// on the resolved project root (NOT shell cwd, which can point at a
-/// different repo when `--graph-dir` is passed) and silently skips
-/// when the project isn't inside a git repository. Failures are
+/// different repo when `--graph-dir` is passed). Failures are
 /// reported on stderr but never propagate — the underlying interview
 /// operation has already mutated state on disk.
+///
+/// Error policy:
+/// - [`JournalError::NotAGitRepo`] is swallowed silently. Tempyr
+///   supports operating outside a git repo; "no journal" is the
+///   expected fallthrough, not an error worth logging.
+/// - Anything else (IO, git binary missing, redaction block, lock
+///   contention, etc.) is logged to stderr with context so a real
+///   bug isn't invisible.
 fn emit_interview_event(project_root: &Path, agent: &str, event: &InterviewEvent<'_>) {
     let common_dir = match jpath::git_common_dir(project_root) {
         Ok(c) => c,
-        Err(_) => return,
+        Err(JournalError::NotAGitRepo(_)) => return,
+        Err(e) => {
+            eprintln!("warning: journal auto-emit skipped, git_common_dir failed: {e}");
+            return;
+        }
     };
     let worktree_top = match jpath::repo_toplevel(project_root) {
         Ok(w) => w,
-        Err(_) => return,
+        Err(JournalError::NotAGitRepo(_)) => return,
+        Err(e) => {
+            eprintln!("warning: journal auto-emit skipped, repo_toplevel failed: {e}");
+            return;
+        }
     };
     if let Err(e) = auto_emit_interview_event(&common_dir, &worktree_top, agent, event) {
         eprintln!("warning: journal auto-emit for interview event failed: {e}");
