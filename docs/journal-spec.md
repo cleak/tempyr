@@ -381,7 +381,7 @@ Once search lands, the journal is useful when agents query it. Phase 4 closes th
 Tracked but not committed. Listed roughly in expected priority order:
 
 - **HTML viewer** — `tempyr journal serve` opens a local axum SPA for browsing sessions.
-- **Cross-encoder reranking** — top-k from RRF rerun through a small reranker for higher precision on close calls.
+- ~~**Cross-encoder reranking**~~ — *implemented post-Phase 4.* Opt-in `--rerank` flag on `tempyr journal search` / `journal_search` MCP tool runs the BGE-Reranker-base cross-encoder over the top 50 RRF candidates and re-sorts. Bigger model (~280 MB) and ~200 ms inference cost, so it's not on by default. Falls back to RRF order on model-load or inference failure.
 - **Range queries** — `tempyr journal range A..B` filters to entries between two commit SHAs.
 - **Path-scoped queries** — `tempyr journal blame <file>` surfaces decisions/dead-ends touching a path.
 - **PR description block** — `tempyr journal pr` generates a markdown summary suitable for paste-into-PR.

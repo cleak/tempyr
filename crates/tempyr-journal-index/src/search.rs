@@ -53,6 +53,14 @@ const RRF_K: f64 = 60.0;
 /// drowning out recency/kind tie-breakers.
 const RRF_SCALE: f64 = 30.0;
 
+/// Number of top-of-list candidates the reranker scores when
+/// [`SearchOptions::rerank`] is set. Wider than `limit` so the
+/// cross-encoder can promote relevant entries the cheap RRF signal
+/// ranked outside the top-N. 50 is the standard cross-encoder budget
+/// — large enough to capture lexically-distant-but-relevant hits,
+/// small enough to keep inference under ~200 ms on CPU.
+pub const RERANK_CANDIDATE_COUNT: usize = 50;
+
 /// Caller-supplied knobs for one search.
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
@@ -76,6 +84,16 @@ pub struct SearchOptions {
     pub token_budget: usize,
     /// Per-hit score breakdown in the response.
     pub explain: bool,
+    /// Run cross-encoder reranking over the top
+    /// [`RERANK_CANDIDATE_COUNT`] RRF candidates. The reranker scores
+    /// `(query, summary+detail)` pairs and replaces the sort key —
+    /// recency and kind boosts are still computed (and shown in
+    /// `--explain`) but no longer drive ordering. Opt-in because the
+    /// reranker model is ~280 MB on first download and adds ~200 ms
+    /// of inference time per query. When the reranker fails to load
+    /// or infer, the search falls back transparently to the unreranked
+    /// RRF order.
+    pub rerank: bool,
 }
 
 impl Default for SearchOptions {
@@ -88,6 +106,7 @@ impl Default for SearchOptions {
             since_days: None,
             token_budget: DEFAULT_TOKEN_BUDGET,
             explain: false,
+            rerank: false,
         }
     }
 }
@@ -124,6 +143,13 @@ pub struct ScoreBreakdown {
     pub rrf: f64,
     pub recency: f64,
     pub kind: f64,
+    /// Cross-encoder score (raw f32 from the reranker, widened).
+    /// 0 unless [`SearchOptions::rerank`] was set AND the reranker
+    /// successfully scored this candidate. When non-zero, this is
+    /// what drives the result's `total` (the bm25 / vector / rrf /
+    /// recency / kind columns are still populated for inspection
+    /// but don't influence ordering).
+    pub rerank: f64,
     pub total: f64,
 }
 
@@ -277,6 +303,8 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
             rrf: rrf_score,
             recency,
             kind: kindb,
+            // Filled in by the rerank pass below if it runs.
+            rerank: 0.0,
             total,
         });
 
@@ -337,12 +365,110 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
         }
     }
 
+    // Cross-encoder reranking (opt-in via `SearchOptions::rerank`).
+    // Score the top RERANK_CANDIDATE_COUNT against the query and
+    // re-sort by the cross-encoder's relevance signal. Failure to
+    // load or run the reranker is non-fatal — we keep the existing
+    // RRF order and continue. Recency and kind boosts stay in the
+    // breakdown for inspection but don't drive the new ordering.
+    let deduped = if opts.rerank {
+        maybe_apply_rerank(deduped, &opts.query)
+    } else {
+        deduped
+    };
+
     // Token-budget greedy fill: truncate detail to fit, drop hits
     // that can't fit even their summary.
     let truncated = apply_token_budget(deduped, opts.token_budget);
 
     // Hard limit.
     Ok(truncated.into_iter().take(opts.limit).collect())
+}
+
+/// Run the cross-encoder over the top `RERANK_CANDIDATE_COUNT` hits
+/// in `hits`, replacing each candidate's `score` with the reranker
+/// output and re-sorting. Hits past that cap are appended in their
+/// original order so the limit + token-budget stages downstream
+/// still see them as fallbacks.
+///
+/// Failure handling: if the reranker isn't available or inference
+/// fails, log once and return the input untouched. This is the
+/// "fail-soft" contract that mirrors the bi-encoder fallback path.
+fn maybe_apply_rerank(hits: Vec<SearchHit>, query: &str) -> Vec<SearchHit> {
+    let Some(reranker) = crate::try_shared_reranker() else {
+        // Warn-once already emitted by `try_shared_reranker` if the
+        // model couldn't load; nothing more to do.
+        return hits;
+    };
+
+    let n = hits.len().min(RERANK_CANDIDATE_COUNT);
+    if n == 0 {
+        return hits;
+    }
+
+    // Build the query/document pairs over the top-N candidates only.
+    // Document text is `summary + "\n\n" + detail` to mirror the
+    // embedding source — keeps the reranker scoring against the
+    // same content the bi-encoder embedded.
+    let docs: Vec<String> = hits
+        .iter()
+        .take(n)
+        .map(|h| match h.entry.detail.as_deref() {
+            Some(d) if !d.is_empty() => format!("{}\n\n{}", h.entry.summary, d),
+            _ => h.entry.summary.clone(),
+        })
+        .collect();
+    let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+
+    let scores = match reranker.rerank(query, &doc_refs) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::warn_query_rerank_failure_once(&e);
+            return hits;
+        }
+    };
+
+    apply_rerank_scores(hits, n, &scores)
+}
+
+/// Pure helper: given a hit list, the count `n` to rerank, and the
+/// reranker's scores aligned 1:1 with `hits[..n]`, splice the new
+/// scores in, sort the head by reranker score descending, and append
+/// the unchanged tail. Extracted from [`maybe_apply_rerank`] so the
+/// sort/splice logic is unit-testable without invoking the model.
+fn apply_rerank_scores(mut head: Vec<SearchHit>, n: usize, scores: &[f32]) -> Vec<SearchHit> {
+    debug_assert_eq!(scores.len(), n.min(head.len()));
+    let tail: Vec<SearchHit> = head.split_off(n.min(head.len()));
+
+    for (i, hit) in head.iter_mut().enumerate() {
+        let score = f64::from(scores[i]);
+        hit.score = score;
+        if let Some(b) = hit.explain.as_mut() {
+            b.rerank = score;
+            b.total = score;
+        }
+    }
+
+    // Stable sort on f64 needs explicit handling of NaN — force any
+    // non-finite score to NEG_INFINITY so a failed row sinks to the
+    // bottom of the reranked head instead of corrupting the
+    // ordering.
+    head.sort_by(|a, b| {
+        let sa = if a.score.is_finite() {
+            a.score
+        } else {
+            f64::NEG_INFINITY
+        };
+        let sb = if b.score.is_finite() {
+            b.score
+        } else {
+            f64::NEG_INFINITY
+        };
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    head.extend(tail);
+    head
 }
 
 /// Run the BM25 side of the hybrid pipeline. Returns rows ordered
@@ -698,6 +824,130 @@ mod tests {
         refresh_index(&common, &repo).unwrap();
         let conn = schema::open(&crate::index_db_path(&common)).unwrap();
         (outer, repo, common, conn)
+    }
+
+    /// Build a stub `SearchHit` with the bare minimum the rerank-
+    /// sort logic touches: id, summary, kind, score. Other Entry
+    /// fields are filled with placeholders.
+    fn stub_hit(id: &str, summary: &str, score: f64) -> SearchHit {
+        let mut entry = Entry {
+            schema_version: 1,
+            id: id.to_string(),
+            ts: Utc::now(),
+            agent: "test".into(),
+            kind: Kind::Finding,
+            summary: summary.to_string(),
+            detail: None,
+            tags: vec![],
+            files: vec![],
+            references: vec![],
+            session_id: "test-session".into(),
+            worktree_hash: "abcd1234".into(),
+            branch: None,
+            head: None,
+            cwd: None,
+            provisional: false,
+            confidence: None,
+            severity: None,
+            alternatives: vec![],
+            chosen: None,
+            rationale: None,
+            reversible: None,
+            approach: None,
+            failure_mode: None,
+            next_to_try: None,
+            polarity: None,
+            passed: None,
+            build_ok: None,
+            commit_sha: None,
+            is_final: false,
+        };
+        // Suppress unused-mut warning if Entry struct stops needing
+        // late binding in some future schema bump.
+        let _ = &mut entry;
+        SearchHit {
+            entry,
+            score,
+            explain: None,
+        }
+    }
+
+    #[test]
+    fn apply_rerank_scores_sorts_head_by_score_desc() {
+        // Original RRF order is [a, b, c, d] but the cross-encoder
+        // says b > d > a > c. After rerank, top-of-list should
+        // reflect the cross-encoder's ranking.
+        let hits = vec![
+            stub_hit("a", "first by RRF", 1.0),
+            stub_hit("b", "second by RRF", 0.9),
+            stub_hit("c", "third by RRF", 0.8),
+            stub_hit("d", "fourth by RRF", 0.7),
+        ];
+        let scores = [0.3_f32, 0.95, 0.1, 0.6];
+        let out = apply_rerank_scores(hits, 4, &scores);
+        let ids: Vec<&str> = out.iter().map(|h| h.entry.id.as_str()).collect();
+        assert_eq!(ids, vec!["b", "d", "a", "c"]);
+        // Score field replaced by reranker output, widened to f64.
+        assert!((out[0].score - 0.95_f32 as f64).abs() < 1e-6);
+    }
+
+    #[test]
+    fn apply_rerank_scores_preserves_tail_unchanged() {
+        // Only the first two hits should be reranked; the rest stay
+        // in their original order at the bottom.
+        let hits = vec![
+            stub_hit("a", "first", 1.0),
+            stub_hit("b", "second", 0.9),
+            stub_hit("c", "third", 0.8),
+            stub_hit("d", "fourth", 0.7),
+        ];
+        let scores = [0.1_f32, 0.9];
+        let out = apply_rerank_scores(hits, 2, &scores);
+        let ids: Vec<&str> = out.iter().map(|h| h.entry.id.as_str()).collect();
+        // b > a in the head; c, d unchanged in the tail.
+        assert_eq!(ids, vec!["b", "a", "c", "d"]);
+        // Tail scores untouched.
+        assert!((out[2].score - 0.8).abs() < 1e-9);
+        assert!((out[3].score - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_rerank_scores_demotes_non_finite_to_bottom() {
+        // A NaN or infinity from the reranker (shouldn't happen in
+        // practice but defends against model corner cases) must NOT
+        // sort to the top via float-comparison nondeterminism.
+        let hits = vec![
+            stub_hit("a", "first", 1.0),
+            stub_hit("b", "second", 0.9),
+            stub_hit("c", "third", 0.8),
+        ];
+        let scores = [f32::NAN, 0.5, 0.7];
+        let out = apply_rerank_scores(hits, 3, &scores);
+        let ids: Vec<&str> = out.iter().map(|h| h.entry.id.as_str()).collect();
+        // c (0.7) > b (0.5) > a (NaN -> NEG_INFINITY) at the bottom.
+        assert_eq!(ids, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn apply_rerank_scores_writes_explain_breakdown() {
+        let mut hit = stub_hit("a", "summary", 1.0);
+        hit.explain = Some(ScoreBreakdown {
+            bm25: 0.1,
+            vector: 0.2,
+            rrf: 0.3,
+            recency: 0.4,
+            kind: 0.5,
+            rerank: 0.0,
+            total: 1.5,
+        });
+        let out = apply_rerank_scores(vec![hit], 1, &[0.77]);
+        let breakdown = out[0].explain.as_ref().unwrap();
+        assert!((breakdown.rerank - 0.77_f32 as f64).abs() < 1e-6);
+        assert!((breakdown.total - 0.77_f32 as f64).abs() < 1e-6);
+        // The pre-rerank components stay populated for inspection,
+        // they just don't drive ordering.
+        assert!((breakdown.bm25 - 0.1).abs() < 1e-9);
+        assert!((breakdown.recency - 0.4).abs() < 1e-9);
     }
 
     #[test]
