@@ -283,13 +283,30 @@ pub enum InterviewAction {
         /// Root node type (default: feature)
         #[arg(long, default_value = "feature")]
         root_type: String,
+        /// Agent name recorded on the auto-emitted journal entry.
+        /// Mirrors the `--agent` flag on `tempyr journal log` /
+        /// `tempyr status`; set this when running from a non-Claude
+        /// agent so journal attribution is correct.
+        #[arg(long, default_value = "claude")]
+        agent: String,
     },
     /// Process an answer in an active interview
-    Answer { session_id: String, answer: String },
+    Answer {
+        session_id: String,
+        answer: String,
+        /// See `interview start --agent`.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+    },
     /// Show tentative graph state
     Show { session_id: String },
     /// Commit tentative nodes to disk
-    Commit { session_id: String },
+    Commit {
+        session_id: String,
+        /// See `interview start --agent`.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+    },
     /// Resume an interrupted session
     Resume { session_id: String },
     /// List active sessions
@@ -681,15 +698,30 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 InterviewAction::Start {
                     brain_dump,
                     root_type,
-                } => commands::interview_cmd::run_start(&ctx, &brain_dump, &root_type, cli.json),
-                InterviewAction::Answer { session_id, answer } => {
-                    commands::interview_cmd::run_answer(&ctx, &session_id, &answer, cli.json)
-                }
+                    agent,
+                } => commands::interview_cmd::run_start(
+                    &ctx,
+                    &brain_dump,
+                    &root_type,
+                    &agent,
+                    cli.json,
+                ),
+                InterviewAction::Answer {
+                    session_id,
+                    answer,
+                    agent,
+                } => commands::interview_cmd::run_answer(
+                    &ctx,
+                    &session_id,
+                    &answer,
+                    &agent,
+                    cli.json,
+                ),
                 InterviewAction::Show { session_id } => {
                     commands::interview_cmd::run_show(&ctx, &session_id, cli.json)
                 }
-                InterviewAction::Commit { session_id } => {
-                    commands::interview_cmd::run_commit(&ctx, &session_id)
+                InterviewAction::Commit { session_id, agent } => {
+                    commands::interview_cmd::run_commit(&ctx, &session_id, &agent)
                 }
                 InterviewAction::Resume { session_id } => {
                     commands::interview_cmd::run_show(&ctx, &session_id, cli.json)

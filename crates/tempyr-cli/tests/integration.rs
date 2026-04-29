@@ -1737,6 +1737,104 @@ fn test_interview_full_flow() {
         .success();
 }
 
+/// Phase 4b: `tempyr interview start/answer/commit` should each
+/// auto-emit a journal entry. Drive the full flow and assert the
+/// journal landed:
+/// - one `plan` (provisional) entry on start
+/// - one `finding` (provisional) entry per answer
+/// - one final `outcome` on commit, which finalizes the session
+#[test]
+fn test_interview_lifecycle_auto_emits_journal_entries() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    let open_dir = tmp.path().join(".git/tempyr/journals/open");
+
+    // Start
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "--json",
+            "interview",
+            "start",
+            "We need a session replay feature for debugging",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let started: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let session_id = started["session_id"].as_str().unwrap().to_string();
+    let root_id = started["root_id"].as_str().unwrap().to_string();
+
+    let entries = read_journal_entries(&open_dir);
+    assert_eq!(entries.len(), 1, "start should emit one entry");
+    assert_eq!(entries[0]["kind"], "plan");
+    assert_eq!(entries[0]["provisional"], true);
+    assert!(entries[0]["summary"].as_str().unwrap().contains(&root_id));
+
+    // Answer
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "interview",
+            "answer",
+            &session_id,
+            "Platform engineers are the target users",
+        ])
+        .assert()
+        .success();
+    let entries = read_journal_entries(&open_dir);
+    assert!(
+        entries.len() >= 2,
+        "answer should emit at least one entry, got {}",
+        entries.len()
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["kind"] == "finding" && e["provisional"] == true),
+        "answer should emit a provisional finding"
+    );
+
+    // Commit
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["interview", "commit", &session_id])
+        .assert()
+        .success();
+    let entries = read_journal_entries(&open_dir);
+    let outcome = entries
+        .iter()
+        .find(|e| e["kind"] == "outcome")
+        .expect("commit should emit an outcome entry");
+    assert_eq!(outcome["passed"], true);
+    assert_eq!(outcome["final"], true);
+    assert!(
+        outcome["summary"]
+            .as_str()
+            .unwrap()
+            .contains("interview committed"),
+        "outcome summary should mark the commit, got: {}",
+        outcome["summary"]
+    );
+
+    // The `final = true` outcome should have triggered finalization.
+    // The publisher's `.ready` marker is named after the JOURNAL
+    // session id, not the interview session id, so just scan the dir
+    // for any `.ready` file rather than constructing the name.
+    let any_ready = std::fs::read_dir(&open_dir)
+        .unwrap()
+        .flatten()
+        .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("ready"));
+    assert!(
+        any_ready,
+        "commit's final=true outcome should have written a .ready marker"
+    );
+}
+
 #[test]
 fn test_doctor_text_output_lists_paths_and_provider() {
     let tmp = TempDir::new().unwrap();
