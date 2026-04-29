@@ -356,10 +356,11 @@ The journal becomes useful when agents can find old reasoning. Phase 3 builds a 
   - RRF fusion (k=60) blends the two ranked lists
   - Recency boost: exponential decay with 14d half-life, additive in fused-rank space
   - Kind boost: `decision`/`dead_end` weighted higher than `plan`/`finding`/`question`
+  - **Optional cross-encoder rerank** (opt-in via `--rerank` / `rerank: true`): the top 50 RRF candidates are re-scored by the BGE-Reranker-base cross-encoder and re-sorted; the rerank score replaces the sort key while the other components stay populated for `--explain` inspection. Off by default because the model is ~280 MB and adds ~200 ms inference per query. Falls back transparently to the unreranked RRF order on model-load or inference failure.
   - Deduplication by `(summary, kind)` hash
   - Token-budget greedy fill: order by combined score, truncate `detail` to fit
-- New MCP tools: `journal_search(query, ...)` with `--explain` score breakdown.
-- New CLIs: `tempyr journal search`, `show <id>`, `sessions`, `tail`.
+- New MCP tools: `journal_search(query, ...)` with `--explain` score breakdown and a `rerank: bool` parameter.
+- New CLIs: `tempyr journal search` (with `--rerank`), `show <id>`, `sessions`, `tail`.
 
 ### Phase 4: Auto-Emit, Hooks, and Polish
 
@@ -381,7 +382,9 @@ Once search lands, the journal is useful when agents query it. Phase 4 closes th
 Tracked but not committed. Listed roughly in expected priority order:
 
 - **HTML viewer** — `tempyr journal serve` opens a local axum SPA for browsing sessions.
-- ~~**Cross-encoder reranking**~~ — *implemented post-Phase 4.* Opt-in `--rerank` flag on `tempyr journal search` / `journal_search` MCP tool runs the BGE-Reranker-base cross-encoder over the top 50 RRF candidates and re-sorts. Bigger model (~280 MB) and ~200 ms inference cost, so it's not on by default. Falls back to RRF order on model-load or inference failure.
+<!-- Cross-encoder reranking implemented post-Phase 4; folded into the
+     canonical Slice 3b retrieval pipeline above. -->
+
 - **Range queries** — `tempyr journal range A..B` filters to entries between two commit SHAs.
 - **Path-scoped queries** — `tempyr journal blame <file>` surfaces decisions/dead-ends touching a path.
 - **PR description block** — `tempyr journal pr` generates a markdown summary suitable for paste-into-PR.

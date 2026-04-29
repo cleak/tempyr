@@ -107,21 +107,43 @@ impl Reranker {
 /// "RRF-only mode" until restart. The "warning" stderr line is gated
 /// on a one-shot flag so a hard "no model" environment doesn't spam.
 ///
+/// **Cold-start serialization**: under concurrent first calls (two
+/// MCP `journal_search` requests racing for the first reranker), the
+/// `OnceLock` alone would let both threads kick off independent
+/// `Reranker::new()` invocations — each pulling ~280 MB and warming
+/// its own ONNX runtime, of which only one's value would actually be
+/// stored via `OnceLock::set`. We gate the load behind a separate
+/// `Mutex` and re-check `RR.get()` after acquiring it (double-checked
+/// locking) so at most one model load is in flight at a time. Once
+/// the slot is populated, subsequent calls take the fast path before
+/// touching the lock.
+///
 /// First successful call costs the model download + warmup; all
 /// subsequent successful calls are O(1).
 pub fn try_shared_reranker() -> Option<&'static Reranker> {
-    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, OnceLock};
     static RR: OnceLock<Reranker> = OnceLock::new();
+    static INIT: Mutex<()> = Mutex::new(());
     static WARNED: AtomicBool = AtomicBool::new(false);
 
     if let Some(r) = RR.get() {
         return Some(r);
     }
+    // Serialize the cold-start path so racing callers don't each kick
+    // off their own ~280 MB download + warmup. A poisoned mutex from
+    // a panicked prior loader is recovered by destructuring the guard
+    // — we only use the lock as a barrier, not to protect data.
+    let _guard = INIT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(r) = RR.get() {
+        return Some(r);
+    }
     match Reranker::new() {
         Ok(r) => {
-            // `set` returns Err if another thread won the race; either
-            // way `RR.get()` succeeds afterward.
+            // `set` only returns Err if another thread snuck a value
+            // in past us, which the INIT lock makes impossible — but
+            // ignore the error result anyway so future contributors
+            // don't have to reason about it.
             let _ = RR.set(r);
             RR.get()
         }

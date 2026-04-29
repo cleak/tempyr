@@ -107,23 +107,44 @@ impl Embedder {
 /// next call retries. The "warning" stderr line is gated on a
 /// separate one-shot flag so we don't spam.
 ///
+/// **Cold-start serialization**: under concurrent first calls (two
+/// MCP `journal_search` requests racing for the first embedder), the
+/// `OnceLock` alone would let both threads kick off independent
+/// `Embedder::new()` invocations — each pulling ~80 MB and warming
+/// its own ONNX runtime, of which only one's value would actually be
+/// stored via `OnceLock::set`. We gate the load behind a separate
+/// `Mutex` and re-check `EMB.get()` after acquiring it (double-checked
+/// locking) so at most one model load is in flight at a time. Once
+/// the slot is populated, subsequent calls take the fast path before
+/// touching the lock.
+///
 /// The cost of the first `Some(_)` is the model download (~80 MB
 /// on first machine encounter) + ONNX runtime warmup (~1-2s). All
 /// subsequent successful calls are O(1).
 pub fn try_shared_embedder() -> Option<&'static Embedder> {
-    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Mutex, OnceLock};
     static EMB: OnceLock<Embedder> = OnceLock::new();
+    static INIT: Mutex<()> = Mutex::new(());
     static WARNED: AtomicBool = AtomicBool::new(false);
 
     if let Some(e) = EMB.get() {
         return Some(e);
     }
+    // Serialize the cold-start path so racing callers don't each kick
+    // off their own ~80 MB download + warmup. A poisoned mutex from a
+    // panicked prior loader is recovered by destructuring the guard —
+    // the lock only acts as a barrier, it doesn't protect data.
+    let _guard = INIT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = EMB.get() {
+        return Some(e);
+    }
     match Embedder::new() {
         Ok(e) => {
-            // `set` returns Err if another thread won the race; in
-            // that case the slot already holds a value we can fetch
-            // unchanged. Either way `EMB.get()` succeeds afterward.
+            // `set` only returns Err if another thread snuck a value
+            // in past us, which the INIT lock makes impossible — but
+            // ignore the error result anyway so future contributors
+            // don't have to reason about it.
             let _ = EMB.set(e);
             EMB.get()
         }

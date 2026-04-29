@@ -789,11 +789,21 @@ pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
                 // Vector and rrf are 0 in BM25-only mode; we still
                 // print them so the line shape is stable across
                 // modes and the agent can tell which mode is active
-                // from the values.
-                println!(
-                    "     score: {:.3} (bm25={:.3}, vector={:.3}, rrf={:.3}, recency={:.3}, kind={:.3})",
-                    b.total, b.bm25, b.vector, b.rrf, b.recency, b.kind
-                );
+                // from the values. When rerank ran, `total` is the
+                // cross-encoder score directly (the other
+                // components are still printed for inspection but
+                // don't sum to total).
+                if args.rerank {
+                    println!(
+                        "     score: {:.3} = rerank (bm25={:.3}, vector={:.3}, rrf={:.3}, recency={:.3}, kind={:.3} — informational only)",
+                        b.total, b.bm25, b.vector, b.rrf, b.recency, b.kind
+                    );
+                } else {
+                    println!(
+                        "     score: {:.3} (bm25={:.3}, vector={:.3}, rrf={:.3}, recency={:.3}, kind={:.3})",
+                        b.total, b.bm25, b.vector, b.rrf, b.recency, b.kind
+                    );
+                }
             }
         }
     }
