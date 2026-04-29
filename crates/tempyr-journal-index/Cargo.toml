@@ -9,6 +9,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
+sqlite-vec = { workspace = true }
+fastembed = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
 

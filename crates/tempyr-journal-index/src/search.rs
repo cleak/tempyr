@@ -42,12 +42,30 @@ const CHARS_PER_TOKEN: usize = 4;
 const RECENCY_WEIGHT: f64 = 0.5;
 const RECENCY_HALF_LIFE_DAYS: f64 = 14.0;
 
+/// RRF fusion constant per the spec. `1 / (k + rank)` — with `k=60`
+/// a top-1 hit contributes `~0.0164`, top-10 contributes `~0.0143`.
+const RRF_K: f64 = 60.0;
+
+/// Multiplier that lifts RRF scores into the same scale as the
+/// recency + kind boosts (~[0, 0.5] each). Empirical: a top-1 hit
+/// in both BM25 and vector contributes `2 * (1/61) * SCALE = ~1.0`
+/// — large enough to dominate against single-source matches without
+/// drowning out recency/kind tie-breakers.
+const RRF_SCALE: f64 = 30.0;
+
 /// Caller-supplied knobs for one search.
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
     /// FTS5 query string. Passed through verbatim — supports `"phrase"`,
     /// `term1 OR term2`, `prefix*`, etc. (FTS5 syntax).
     pub query: String,
+    /// Pre-embedded query vector for hybrid retrieval. When `Some`,
+    /// the search blends BM25 and vector-cosine ranks via RRF (slice
+    /// 3b2). When `None`, behavior matches slice 3b1: pure BM25 +
+    /// recency + kind boost. The CLI/MCP layers embed the query
+    /// string at call time and populate this; tests can pass a
+    /// hand-crafted vector to drive the fusion deterministically.
+    pub query_vector: Option<Vec<f32>>,
     /// Optional kind filter (matches any of). Empty = no filter.
     pub kinds: Vec<Kind>,
     /// Hard limit on returned hits.
@@ -64,6 +82,7 @@ impl Default for SearchOptions {
     fn default() -> Self {
         Self {
             query: String::new(),
+            query_vector: None,
             kinds: Vec::new(),
             limit: 10,
             since_days: None,
@@ -86,154 +105,224 @@ pub struct SearchHit {
 
 /// Per-component score breakdown for `--explain` mode. All components
 /// sum to `total`; `total` matches `SearchHit::score`.
+///
+/// In **BM25-only mode** (no `query_vector`): `bm25` carries the
+/// negated FTS5 BM25 score directly; `vector` and `rrf` are 0.
+///
+/// In **hybrid mode** (`query_vector = Some(...)`): `bm25` and
+/// `vector` carry the RRF-scaled per-side contributions; `rrf` is
+/// their sum (handy summary line). `total = rrf + recency + kind`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoreBreakdown {
     pub bm25: f64,
+    /// 0 in BM25-only mode; RRF-scaled vector contribution otherwise.
+    pub vector: f64,
+    /// 0 in BM25-only mode; sum of `bm25` + `vector` after RRF
+    /// scaling otherwise. Provided as a single number for callers
+    /// that just want "how strong is the fused-rank signal" without
+    /// adding two fields.
+    pub rrf: f64,
     pub recency: f64,
     pub kind: f64,
     pub total: f64,
 }
 
-/// Run a BM25 search over `entries_fts` and return ranked hits.
+/// One row of raw query output before fusion. Carries enough to
+/// reconstruct the entry and to rank within a single side.
+struct RawHit {
+    rowid: i64,
+    body_json: String,
+    ts: String,
+    /// FTS5 returns this only on the BM25 path; `f64::NAN` when the
+    /// row came from the vector-only side.
+    bm25_raw: f64,
+}
+
+/// Run a hybrid BM25 + (optional) vector search and return ranked hits.
 ///
 /// Pipeline:
 ///
-/// 1. FTS5 MATCH against the user query, joined to `entries`,
-///    filtered by `kinds` and `since_days` if set.
-/// 2. Compute the composite score per row.
-/// 3. Sort descending by score.
-/// 4. Dedup by `(blake3(summary_normalized), kind)` — distinct
-///    `summary` text but same kind+content (rare; can happen when a
-///    session reuses a phrasing) collapses to one hit.
-/// 5. Greedy fill within `token_budget`: detail truncated to remaining
-///    budget; if even the summary doesn't fit, the hit is dropped.
-/// 6. Hard `limit` after the above.
+/// 1. **BM25**: FTS5 MATCH against `query`, filtered by `kinds` /
+///    `since_days`. Produces a ranked list with FTS5's bm25() score.
+/// 2. **Vector** (if `query_vector` is set): sqlite-vec cosine
+///    similarity against `entry_embeddings`, same filters applied.
+///    Produces a ranked list by distance.
+/// 3. **Fusion**: each candidate gets `rrf = 1/(k+rank_bm25) +
+///    1/(k+rank_vec)` with k=60. Single-source candidates get one
+///    side at 0. The RRF score is scaled to be comparable to the
+///    recency + kind boost magnitudes.
+/// 4. **Boosts**: add `recency_boost(ts)` and `kind_boost(kind)` per
+///    the existing 3b1 logic.
+/// 5. **Sort** descending by total.
+/// 6. **Dedup** by `(blake3(summary_normalized), kind)`.
+/// 7. **Token-budget greedy fill**: detail truncated to fit; hits
+///    whose summary alone won't fit are skipped (continue, not
+///    break).
+/// 8. **Limit**.
+///
+/// In BM25-only mode (`query_vector = None`) the score reduces to
+/// the slice-3b1 expression `bm25_norm + recency + kind` — same
+/// ranking, byte-for-byte for a deterministic seed. The presence
+/// of a `query_vector` switches into RRF mode; the `bm25` field of
+/// `ScoreBreakdown` then carries the RRF-scaled BM25 contribution
+/// instead of the raw bm25_norm.
 pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>> {
     let trimmed = opts.query.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Build the SQL with optional kind / since filters. Parameter
-    // count is variadic (one per kind) so we use a Vec<Box<dyn ToSql>>.
-    let mut sql = String::from(
-        r#"
-        SELECT
-            e.body_json,
-            bm25(entries_fts) AS bm25,
-            e.ts AS ts,
-            e.kind AS kind
-        FROM entries_fts
-        JOIN entries e ON e.rowid = entries_fts.rowid
-        WHERE entries_fts MATCH ?1
-        "#,
-    );
-
-    let mut bind: Vec<Value> = Vec::new();
-    bind.push(Value::Text(trimmed.to_string()));
-
-    // Kind filter — varies arity, so build the placeholders.
-    if !opts.kinds.is_empty() {
-        sql.push_str(" AND e.kind IN (");
-        for (i, k) in opts.kinds.iter().enumerate() {
-            if i > 0 {
-                sql.push(',');
-            }
-            // 1-based positional placeholders. bind index = current
-            // bind.len() + 1.
-            sql.push_str(&format!("?{}", bind.len() + 1));
-            bind.push(Value::Text(k.as_str().to_string()));
-        }
-        sql.push(')');
-    }
-
-    // Recency filter as a SQL string (chrono's now-days-ago). We
-    // don't try to do this in SQL with date/time funcs because the
-    // ts column is RFC3339 text — a string compare against a cutoff
-    // is enough.
-    if let Some(days) = opts.since_days {
-        // `Duration::days` is soft-deprecated in chrono 0.4.32+ —
-        // it panics on overflow. `try_days` returns Option and lets
-        // us reject pathological inputs cleanly. `days` is u32 so it
-        // always fits in i64 and (well under chrono's ~9.2e15-day
-        // ceiling) always succeeds, but using the non-panicking API
-        // pins the contract: a malicious / misconfigured caller
-        // can't crash the server with a giant `since_days`.
-        let duration = chrono::Duration::try_days(i64::from(days)).ok_or_else(|| {
-            crate::IndexError::InvalidEntry(format!(
-                "since_days {days} too large to express as a Duration"
-            ))
-        })?;
-        let cutoff = Utc::now() - duration;
-        sql.push_str(&format!(" AND e.ts >= ?{}", bind.len() + 1));
-        bind.push(Value::Text(cutoff.to_rfc3339()));
-    }
-
-    sql.push_str(" ORDER BY bm25 ASC LIMIT ?");
-    sql.push_str(&format!("{}", bind.len() + 1));
-    // Pull more than `limit` so dedup + token-budget truncation has
-    // headroom. 4× cap is empirical — small enough to not blow up
-    // for a wide query, large enough to cover most dedup churn.
-    //
-    // `saturating_mul` and the `i64::try_from` fallback keep us
-    // robust against pathological `limit` inputs from external
-    // callers (the MCP API exposes `limit: Option<usize>`):
-    // `usize::MAX * 4` would otherwise panic in debug or wrap to
-    // garbage in release.
+    // Pull headroom for dedup + token-budget truncation. 4× cap is
+    // empirical (matches 3b1). saturating_mul + try_from keep us
+    // robust against pathological `limit` from external callers.
     let pull_usize = opts.limit.max(1).saturating_mul(4).max(40);
     let pull_i64 = i64::try_from(pull_usize).unwrap_or(i64::MAX);
-    bind.push(Value::Integer(pull_i64));
 
+    // BM25 side — always runs.
+    let bm25_hits = run_bm25_query(conn, opts, trimmed, pull_i64)?;
+    // Vector side — only when caller passed a query vector.
+    let vec_hits = if let Some(qv) = opts.query_vector.as_deref() {
+        run_vector_query(conn, opts, qv, pull_i64)?
+    } else {
+        Vec::new()
+    };
+    let hybrid_mode = opts.query_vector.is_some();
+
+    // Build a unified candidate map: rowid → raw entry data + ranks
+    // from each side. We keep BM25's body_json/ts copy when both
+    // sides have a row (arbitrary — they're identical).
+    use std::collections::HashMap;
+    struct Candidate {
+        body_json: String,
+        ts: String,
+        bm25_rank: Option<usize>,
+        bm25_raw: Option<f64>,
+        vec_rank: Option<usize>,
+    }
+    let mut by_rowid: HashMap<i64, Candidate> = HashMap::new();
+    for (rank0, h) in bm25_hits.into_iter().enumerate() {
+        let rank = rank0 + 1;
+        by_rowid
+            .entry(h.rowid)
+            .and_modify(|c| {
+                c.bm25_rank = Some(rank);
+                c.bm25_raw = Some(h.bm25_raw);
+            })
+            .or_insert(Candidate {
+                body_json: h.body_json,
+                ts: h.ts,
+                bm25_rank: Some(rank),
+                bm25_raw: Some(h.bm25_raw),
+                vec_rank: None,
+            });
+    }
+    for (rank0, h) in vec_hits.into_iter().enumerate() {
+        let rank = rank0 + 1;
+        by_rowid
+            .entry(h.rowid)
+            .and_modify(|c| c.vec_rank = Some(rank))
+            .or_insert(Candidate {
+                body_json: h.body_json,
+                ts: h.ts,
+                bm25_rank: None,
+                bm25_raw: None,
+                vec_rank: Some(rank),
+            });
+    }
+
+    // Internal carrier so we can sort with stable tie-breakers (the
+    // public `SearchHit` only exposes the entry + score, but the
+    // sort needs ranks + rowid for determinism).
+    struct ScoredCandidate {
+        hit: SearchHit,
+        rowid: i64,
+        bm25_rank: Option<usize>,
+        vec_rank: Option<usize>,
+    }
+
+    // Score each candidate.
     let now = Utc::now();
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |r| {
-        let body_json: String = r.get(0)?;
-        let bm25: f64 = r.get(1)?;
-        let ts: String = r.get(2)?;
-        let kind_s: String = r.get(3)?;
-        Ok((body_json, bm25, ts, kind_s))
-    })?;
-
-    let mut scored: Vec<SearchHit> = Vec::new();
-    for row in rows {
-        let (body_json, bm25, ts_s, kind_s) = row?;
-        let entry: Entry = serde_json::from_str(&body_json)?;
+    let mut scored: Vec<ScoredCandidate> = Vec::new();
+    for (rowid, cand) in by_rowid {
+        let entry: Entry = serde_json::from_str(&cand.body_json)?;
         let kind = entry.kind;
-
-        // FTS5 bm25() returns a negative number; smaller (more
-        // negative) = better match. Negate so the additive ranking
-        // puts higher = better.
-        let bm25_norm = -bm25;
-
-        let recency = recency_boost(&ts_s, now);
+        let recency = recency_boost(&cand.ts, now);
         let kindb = kind_boost(kind);
-        // `kind_s` is the snake_case form pulled from SQL just to
-        // double-check round-trip; assert it matches what we got out
-        // of the body_json (cheap sanity).
-        debug_assert_eq!(kind.as_str(), kind_s);
-        let total = bm25_norm + recency + kindb;
+
+        let (bm25_score, vector_score, rrf_score, total) = if hybrid_mode {
+            // RRF: `1 / (k + rank)` per side, scaled.
+            let rrf_bm25 = cand
+                .bm25_rank
+                .map(|r| RRF_SCALE / (RRF_K + r as f64))
+                .unwrap_or(0.0);
+            let rrf_vec = cand
+                .vec_rank
+                .map(|r| RRF_SCALE / (RRF_K + r as f64))
+                .unwrap_or(0.0);
+            let rrf = rrf_bm25 + rrf_vec;
+            let total = rrf + recency + kindb;
+            (rrf_bm25, rrf_vec, rrf, total)
+        } else {
+            // BM25-only: preserve the 3b1 score expression
+            // exactly. bm25_norm = -bm25(...). vector and rrf
+            // remain 0 in the breakdown.
+            let bm25_norm = -cand.bm25_raw.unwrap_or(0.0);
+            let total = bm25_norm + recency + kindb;
+            (bm25_norm, 0.0, 0.0, total)
+        };
 
         let explain = opts.explain.then_some(ScoreBreakdown {
-            bm25: bm25_norm,
+            bm25: bm25_score,
+            vector: vector_score,
+            rrf: rrf_score,
             recency,
             kind: kindb,
             total,
         });
 
-        scored.push(SearchHit {
-            entry,
-            score: total,
-            explain,
+        scored.push(ScoredCandidate {
+            hit: SearchHit {
+                entry,
+                score: total,
+                explain,
+            },
+            rowid,
+            bm25_rank: cand.bm25_rank,
+            vec_rank: cand.vec_rank,
         });
     }
 
-    // Sort descending. NaN shouldn't appear (all components are
-    // finite), but treat any oddity as "lowest" via partial_cmp.
+    // Sort descending by total, with stable tie-breakers so two
+    // candidates that score equal (rare but possible — e.g. two
+    // dead-ends with identical recency, both same-source rank) don't
+    // shuffle between runs. Tie-break order:
+    //   1. score desc (the actual signal)
+    //   2. bm25_rank asc — better BM25 wins
+    //   3. vec_rank asc  — better vector wins
+    //   4. rowid asc     — final fallback, stable across HashMap order
     scored.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
+        b.hit
+            .score
+            .partial_cmp(&a.hit.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.bm25_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&b.bm25_rank.unwrap_or(usize::MAX))
+            })
+            .then_with(|| {
+                a.vec_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&b.vec_rank.unwrap_or(usize::MAX))
+            })
+            .then_with(|| a.rowid.cmp(&b.rowid))
     });
+
+    // Unwrap the sort carrier; downstream stages operate on
+    // SearchHit only.
+    let mut scored: Vec<SearchHit> = scored.into_iter().map(|s| s.hit).collect();
+    // Suppress unused-mut warning if the next stage doesn't mutate.
+    let _ = &mut scored;
 
     // Dedup by (summary normalized, kind).
     let mut seen: HashSet<(blake3::Hash, Kind)> = HashSet::new();
@@ -254,6 +343,162 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
 
     // Hard limit.
     Ok(truncated.into_iter().take(opts.limit).collect())
+}
+
+/// Run the BM25 side of the hybrid pipeline. Returns rows ordered
+/// best→worst (smaller bm25 score = better), so the caller can use
+/// position as the rank for RRF fusion.
+fn run_bm25_query(
+    conn: &Connection,
+    opts: &SearchOptions,
+    query: &str,
+    pull: i64,
+) -> Result<Vec<RawHit>> {
+    let mut sql = String::from(
+        r#"
+        SELECT
+            e.rowid,
+            e.body_json,
+            bm25(entries_fts) AS bm25,
+            e.ts AS ts
+        FROM entries_fts
+        JOIN entries e ON e.rowid = entries_fts.rowid
+        WHERE entries_fts MATCH ?1
+        "#,
+    );
+    let mut bind: Vec<Value> = vec![Value::Text(query.to_string())];
+    push_filters(&mut sql, &mut bind, opts)?;
+    sql.push_str(" ORDER BY bm25 ASC LIMIT ?");
+    sql.push_str(&format!("{}", bind.len() + 1));
+    bind.push(Value::Integer(pull));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |r| {
+        Ok(RawHit {
+            rowid: r.get(0)?,
+            body_json: r.get(1)?,
+            bm25_raw: r.get(2)?,
+            ts: r.get(3)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+/// Run the vector side via sqlite-vec cosine distance. The query
+/// vector is bound as a little-endian f32 BLOB. Returns rows ordered
+/// best→worst (smaller distance = better).
+///
+/// **Filters push down into vec0** via a `rowid IN (subquery)`
+/// constraint. Without that, vec0's KNN returns the top-K nearest
+/// neighbors over *all* embedded entries; a post-hoc filter could
+/// drop them all and leave us with no hits when filtered-set
+/// matches exist further down the distance ranking. The
+/// `rowid IN (SELECT rowid FROM entries WHERE …)` shape lets
+/// sqlite-vec consider only allowed rows during the KNN scan.
+///
+/// vec0 also requires `LIMIT N` (or `k = ?`) in the same query
+/// block as `MATCH`; it errors with "A LIMIT or 'k = ?' constraint
+/// is required on vec0 knn queries" if we tried to wrap the MATCH
+/// in a CTE and apply LIMIT outside.
+fn run_vector_query(
+    conn: &Connection,
+    opts: &SearchOptions,
+    query_vector: &[f32],
+    pull: i64,
+) -> Result<Vec<RawHit>> {
+    // Front-load the contract check: the index's vec0 table is
+    // fixed at `EMBED_DIM` floats, and binding a wrong-length blob
+    // produces an opaque sqlite-vec error like "expected dim N got
+    // M" buried in a SqliteFailure. Catch it here so callers see a
+    // clear `IndexError::Embed` instead.
+    if query_vector.len() != crate::schema::EMBED_DIM {
+        return Err(crate::IndexError::Embed(format!(
+            "invalid query vector length: expected {}, got {}",
+            crate::schema::EMBED_DIM,
+            query_vector.len()
+        )));
+    }
+    let qbytes = crate::embed::vec_to_bytes(query_vector);
+    // Bind layout:
+    //   ?1                        → query vec blob
+    //   ?2                        → vec0 explicit `k` value
+    //   ?3..                      → filter binds (kinds + since_days)
+    //                                inside the rowid-IN subquery
+    let mut bind: Vec<Value> = vec![Value::Blob(qbytes), Value::Integer(pull)];
+
+    // vec0 wants `MATCH` + LIMIT/k *in the same query block*; once
+    // we wrap it in a CTE or join with WHERE clauses on other
+    // columns, the SQLite planner stops pushing the LIMIT down and
+    // vec0 errors with "A LIMIT or 'k = ?' constraint is required".
+    // Using vec0's explicit `k = ?` predicate keeps the constraint
+    // visible regardless of how the rest of the query is shaped.
+    //
+    // Filters push into vec0 via `rowid IN (subquery)` so KNN
+    // considers only allowed rows up front — without that, vec0's
+    // top-K ignores filters and we'd lose hits when the user
+    // narrows by kind / since.
+    let mut sql = String::from(
+        r#"
+        SELECT
+            entry_embeddings.rowid,
+            e.body_json,
+            entry_embeddings.distance,
+            e.ts
+        FROM entry_embeddings
+        JOIN entries e ON e.rowid = entry_embeddings.rowid
+        WHERE entry_embeddings.embedding MATCH ?1
+          AND k = ?2
+          AND entry_embeddings.rowid IN (
+              SELECT e.rowid FROM entries e WHERE 1 = 1
+        "#,
+    );
+    push_filters(&mut sql, &mut bind, opts)?;
+    sql.push_str(") ORDER BY entry_embeddings.distance");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |r| {
+        // RawHit shape repurposed for the vector side: bm25_raw
+        // becomes distance. The caller doesn't read bm25_raw on
+        // the vector side except in BM25-only mode (where vec_hits
+        // is empty), so the field reuse is harmless.
+        Ok(RawHit {
+            rowid: r.get(0)?,
+            body_json: r.get(1)?,
+            bm25_raw: r.get::<_, f64>(2)?,
+            ts: r.get(3)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+/// Append `kinds` and `since_days` filters to a SQL fragment, binding
+/// values into `bind`. Shared between BM25 and vector queries so
+/// filtering semantics stay consistent.
+fn push_filters(sql: &mut String, bind: &mut Vec<Value>, opts: &SearchOptions) -> Result<()> {
+    if !opts.kinds.is_empty() {
+        sql.push_str(" AND e.kind IN (");
+        for (i, k) in opts.kinds.iter().enumerate() {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push_str(&format!("?{}", bind.len() + 1));
+            bind.push(Value::Text(k.as_str().to_string()));
+        }
+        sql.push(')');
+    }
+    if let Some(days) = opts.since_days {
+        let duration = chrono::Duration::try_days(i64::from(days)).ok_or_else(|| {
+            crate::IndexError::InvalidEntry(format!(
+                "since_days {days} too large to express as a Duration"
+            ))
+        })?;
+        let cutoff = Utc::now() - duration;
+        sql.push_str(&format!(" AND e.ts >= ?{}", bind.len() + 1));
+        bind.push(Value::Text(cutoff.to_rfc3339()));
+    }
+    Ok(())
 }
 
 /// Map of `kind -> additive boost`. Decisions and dead-ends are the
@@ -925,6 +1170,277 @@ mod tests {
             hits[0].entry.detail.is_none(),
             "detail should be None when no budget remains, not '\u{2026}'"
         );
+        drop(outer);
+    }
+
+    // --- Slice 3b2: vector + RRF tests ----------------------------
+
+    /// Shared embedder for hybrid-mode tests. Same OnceLock pattern
+    /// as `embed::tests::shared_embedder` — the model load is the
+    /// dominant cost so we share across all tests in this run.
+    fn shared_embedder_for_search() -> &'static crate::Embedder {
+        use std::sync::OnceLock;
+        static EMB: OnceLock<crate::Embedder> = OnceLock::new();
+        EMB.get_or_init(|| {
+            crate::Embedder::new().expect("fastembed model should load for search tests")
+        })
+    }
+
+    #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
+    fn vector_path_finds_semantically_related_entry() {
+        // BM25 alone misses this: the query mentions "credentials"
+        // but the seeded entry says "auth tokens" — keyword overlap
+        // is zero (since 'token' isn't 'credentials'). Vector
+        // semantics should still surface it.
+        let (outer, repo, common) = fresh_repo();
+        let embedder = shared_embedder_for_search();
+
+        write_test_entry(
+            &common,
+            &repo,
+            Utc::now(),
+            Kind::DeadEnd,
+            "auth tokens leaked through middleware logger output",
+            Some(
+                "the middleware was passing the bearer header straight into a structured log call which got captured by the agent's redaction layer way too late",
+            ),
+        );
+        crate::indexer::refresh_index_with_embedder(&common, &repo, embedder).unwrap();
+        let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+
+        // BM25-only with a different vocabulary: should miss.
+        let bm25_only = search(
+            &conn,
+            &SearchOptions {
+                query: "credentials".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            bm25_only.is_empty(),
+            "BM25 alone shouldn't match a query without keyword overlap"
+        );
+
+        // Hybrid mode: same query string, but with the vector. Should
+        // surface the semantically-related entry via the vector side.
+        let qv = embedder.embed_one("credentials handling").unwrap();
+        let hybrid = search(
+            &conn,
+            &SearchOptions {
+                query: "credentials handling".to_string(),
+                query_vector: Some(qv),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !hybrid.is_empty(),
+            "vector semantics should find the related entry"
+        );
+        assert_eq!(hybrid[0].entry.kind, Kind::DeadEnd);
+        drop(outer);
+    }
+
+    #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
+    fn explain_includes_vector_and_rrf_in_hybrid_mode() {
+        let (outer, repo, common) = fresh_repo();
+        let embedder = shared_embedder_for_search();
+        write_test_entry(
+            &common,
+            &repo,
+            Utc::now(),
+            Kind::Decision,
+            "use postgres for primary storage of user accounts and sessions",
+            Some(
+                "weighed sqlite vs postgres; postgres wins on concurrent writes and we already operate one in production so the ops cost is zero",
+            ),
+        );
+        crate::indexer::refresh_index_with_embedder(&common, &repo, embedder).unwrap();
+        let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+
+        let qv = embedder.embed_one("primary database choice").unwrap();
+        let hits = search(
+            &conn,
+            &SearchOptions {
+                query: "postgres".to_string(),
+                query_vector: Some(qv),
+                explain: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        let b = hits[0].explain.as_ref().expect("explain populated");
+        // bm25 and vector should both be > 0 since the entry hits
+        // both sides; rrf is their sum.
+        assert!(b.bm25 > 0.0, "bm25 RRF contribution should be > 0");
+        assert!(b.vector > 0.0, "vector RRF contribution should be > 0");
+        assert!((b.bm25 + b.vector - b.rrf).abs() < 1e-9);
+        assert!((b.rrf + b.recency + b.kind - b.total).abs() < 1e-9);
+        drop(outer);
+    }
+
+    #[test]
+    fn explain_zero_for_vector_components_in_bm25_only_mode() {
+        // In BM25-only mode (no query_vector), the breakdown's
+        // `vector` and `rrf` fields should be exactly 0 — preserving
+        // the slice-3b1 contract for callers that don't supply a
+        // vector.
+        let (_o, _r, _c, conn) = seed_and_open(Utc::now());
+        let opts = SearchOptions {
+            query: "auth".to_string(),
+            explain: true,
+            ..Default::default()
+        };
+        let hits = search(&conn, &opts).unwrap();
+        let b = hits[0].explain.as_ref().expect("explain populated");
+        assert_eq!(b.vector, 0.0);
+        assert_eq!(b.rrf, 0.0);
+    }
+
+    #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
+    fn embed_pending_filters_low_value_kinds() {
+        // Plans, questions, risks, and assumptions should NOT get
+        // embeddings — they're filtered out by `is_embeddable_kind`.
+        // Decisions, dead-ends, findings, and outcomes should.
+        let (outer, repo, common) = fresh_repo();
+        let embedder = shared_embedder_for_search();
+        let now = Utc::now();
+
+        write_test_entry(
+            &common,
+            &repo,
+            now,
+            Kind::Plan,
+            "plan: investigate caching strategy for the API responses",
+            None,
+        );
+        write_test_entry(
+            &common,
+            &repo,
+            now + chrono::Duration::seconds(1),
+            Kind::Decision,
+            "decision: use redis for response caching with a 5m TTL",
+            None,
+        );
+        let report = crate::indexer::refresh_index_with_embedder(&common, &repo, embedder).unwrap();
+        // 1 entry embedded (the decision), 1 pending in the
+        // low-info backlog (the plan).
+        assert_eq!(report.embedded, 1);
+        assert_eq!(report.embed_pending_total, 1);
+
+        // Direct check: the entry_embeddings vec0 table has one row.
+        let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+        let n_emb: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entry_embeddings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n_emb, 1);
+        drop(outer);
+    }
+
+    #[test]
+    #[ignore = "downloads/loads the BGE-small ONNX model; run with --ignored"]
+    fn embedding_cache_survives_index_rebuild() {
+        // Slice 3b2's separate `embeddings.db` should mean a
+        // structural rebuild of `index.db` does NOT trigger
+        // re-embedding of cached content. We verify by:
+        // 1. Refreshing once with the embedder (writes cache + vec0).
+        // 2. Truncating the index db (clears entry_embeddings + entries).
+        // 3. Refreshing again with the embedder.
+        // 4. The second refresh should report 1 `embedded` (cache hit
+        //    copies the bytes back into vec0) but NOT call fastembed
+        //    a second time. Indirectly we verify by expecting the
+        //    fastembed model lookup latency... actually we just
+        //    check that step 3 succeeds and entry_embeddings has
+        //    the row again (which only works if the cache hit path
+        //    fires — without the cache the embedder would still be
+        //    invoked, also producing a row, so this test is a bit
+        //    weak as a behavior check). Stronger: verify the cache
+        //    db has the row, which is the contract the user cares
+        //    about ("don't re-embed on rebuild").
+        let (outer, repo, common) = fresh_repo();
+        let embedder = shared_embedder_for_search();
+        write_test_entry(
+            &common,
+            &repo,
+            Utc::now(),
+            Kind::DeadEnd,
+            "tried adding sqlite-vec via static link but build flags leaked",
+            Some(
+                "the build script's CFLAGS exported into downstream crates and broke the windows MSVC compile of an unrelated dependency",
+            ),
+        );
+        crate::indexer::refresh_index_with_embedder(&common, &repo, embedder).unwrap();
+
+        // Cache should now have a row for our content.
+        let cache_path = crate::embed_cache::cache_db_path(&common);
+        let cache = crate::embed_cache::open(&cache_path).unwrap();
+        let n_cache: i64 = cache
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n_cache, 1, "embedding cache should have one row");
+
+        // Truncate the index db and refresh again. Cache rows
+        // remain (separate db); the second refresh should
+        // re-populate entry_embeddings from the cache.
+        let mut conn = schema::open(&crate::index_db_path(&common)).unwrap();
+        schema::truncate(&mut conn).unwrap();
+        drop(conn);
+
+        let r2 = crate::indexer::refresh_index_with_embedder(&common, &repo, embedder).unwrap();
+        assert_eq!(r2.embedded, 1, "cache hit should still count as embedded");
+
+        // Cache row count unchanged.
+        let n_cache_2: i64 = cache
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n_cache_2, 1);
+        drop(outer);
+    }
+
+    #[test]
+    fn vector_query_rejects_wrong_dim_query_vector() {
+        // Regression: callers passing a query_vector of the wrong
+        // length used to fail with an opaque sqlite-vec error
+        // ("dimension mismatch") buried in a SqliteFailure. The
+        // pre-bind guard now returns IndexError::Embed with a clear
+        // message. Doesn't require fastembed (we hand-craft the
+        // bad vector) so this test stays in the default suite.
+        let (outer, repo, common) = fresh_repo();
+        // Seed at least one entry so the index db is set up; we
+        // never run the vector query against a real model here.
+        write_test_entry(
+            &common,
+            &repo,
+            Utc::now(),
+            Kind::Decision,
+            "decision summary that is sufficiently long to satisfy the validator",
+            None,
+        );
+        refresh_index(&common, &repo).unwrap();
+        let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+
+        // 100 floats — wrong length for the 384-d schema.
+        let bad_vec = vec![0.1_f32; 100];
+        let opts = SearchOptions {
+            query: "decision".to_string(),
+            query_vector: Some(bad_vec),
+            ..Default::default()
+        };
+        let err = search(&conn, &opts).unwrap_err();
+        match err {
+            crate::IndexError::Embed(msg) => {
+                assert!(
+                    msg.contains("expected 384") && msg.contains("got 100"),
+                    "error should name expected + actual dim: {msg}"
+                );
+            }
+            other => panic!("expected IndexError::Embed, got {other:?}"),
+        }
         drop(outer);
     }
 }

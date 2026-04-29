@@ -8,9 +8,42 @@
 //! and safe to call on every open. The schema version sits in a tiny
 //! `schema_meta` table; future migrations check it and bump.
 
+use std::sync::Once;
+
 use rusqlite::{Connection, TransactionBehavior, params};
 
 use crate::Result;
+
+/// Embedding model + dimension for slice 3b2. Locked here so the
+/// schema, indexer, and search modules all agree. If we swap
+/// models later, bump `SCHEMA_VERSION` and add a migration that
+/// invalidates the embedding cache (or filters by model).
+pub const EMBED_MODEL_NAME: &str = "all-MiniLM-L6-v2";
+pub const EMBED_DIM: usize = 384;
+
+/// Register the sqlite-vec extension as a SQLite auto-extension so
+/// every `Connection::open` afterward has `vec_version()`, `vec_f32()`,
+/// and `vec0` virtual tables available. Once-only registration keeps
+/// us from race-loading the extension across multiple opens.
+fn register_sqlite_vec_once() {
+    static REGISTER: Once = Once::new();
+    REGISTER.call_once(|| {
+        // SAFETY: sqlite_vec::sqlite3_vec_init is the standard
+        // SQLite extension entry point. `sqlite3_auto_extension`
+        // registers it globally for all subsequent connections in
+        // this process.
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                unsafe extern "C" fn(),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut std::ffi::c_char,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> std::ffi::c_int,
+            >(sqlite_vec::sqlite3_vec_init)));
+        }
+    });
+}
 
 /// Bump when the schema changes in a way that needs a migration.
 ///
@@ -21,7 +54,11 @@ use crate::Result;
 ///   and `AFTER INSERT/DELETE` triggers on `entries`. Open of an
 ///   older db rebuilds the FTS5 contents from `entries` so
 ///   existing 3a installs upgrade seamlessly.
-pub const SCHEMA_VERSION: u32 = 2;
+/// - **3** (slice 3b2): added `entry_embeddings` (sqlite-vec
+///   virtual table) for semantic search. Embeddings are populated
+///   incrementally by the indexer, filtered to high-value kinds
+///   (decision/finding/dead_end/outcome).
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Open the index db at `path`, creating its parent directory and
 /// applying the schema if needed. Pragmas are set for durability +
@@ -36,6 +73,10 @@ pub fn open(path: &std::path::Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // Register sqlite-vec as an auto-extension before opening any
+    // connection. Idempotent — only the first call actually does the
+    // work.
+    register_sqlite_vec_once();
     let mut conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -106,6 +147,15 @@ fn rebuild_fts_if_needed(conn: &mut Connection) -> Result<()> {
 /// Apply (idempotently) the current schema. Records the schema version
 /// in `schema_meta` for future migrations.
 pub fn apply(conn: &Connection) -> Result<()> {
+    // sqlite-vec needs the embedding dimension baked into the
+    // CREATE VIRTUAL TABLE — `vec0(embedding float[N])`. We format
+    // the SQL with the constant so the schema can't drift from
+    // EMBED_DIM.
+    let entry_embeddings_sql = format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS entry_embeddings USING vec0(\n\
+         embedding float[{EMBED_DIM}]\n\
+         );"
+    );
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS schema_meta (
@@ -208,6 +258,10 @@ pub fn apply(conn: &Connection) -> Result<()> {
         END;
         "#,
     )?;
+    // sqlite-vec virtual table for semantic search. Lives alongside
+    // entries; rows are inserted by the indexer's embed-on-refresh
+    // path and joined back to entries via rowid.
+    conn.execute_batch(&entry_embeddings_sql)?;
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?1)",
         params![SCHEMA_VERSION.to_string()],
@@ -225,13 +279,16 @@ pub fn truncate(conn: &mut Connection) -> Result<()> {
     // Order matters only because of FK cascades; with foreign_keys=ON
     // deleting `entries` cascades to junction tables, and the AFTER
     // DELETE trigger on entries cascades into entries_fts. We still
-    // explicit-truncate `indexer_state` and `sessions` since they're
-    // not FK-linked to entries.
+    // explicit-truncate `indexer_state`, `sessions`, and
+    // `entry_embeddings` since they're not FK-linked to entries.
+    // (vec0 virtual tables don't participate in standard cascade
+    // semantics, so we drop their contents directly.)
     tx.execute_batch(
         r#"
         DELETE FROM entries;
         DELETE FROM sessions;
         DELETE FROM indexer_state;
+        DELETE FROM entry_embeddings;
         "#,
     )?;
     tx.commit()?;

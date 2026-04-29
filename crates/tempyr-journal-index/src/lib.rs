@@ -16,6 +16,8 @@
 //!
 //! See `docs/journal-spec.md` §9 for the full Phase 3 design.
 
+pub mod embed;
+pub mod embed_cache;
 pub mod indexer;
 pub mod lookup;
 pub mod schema;
@@ -25,7 +27,10 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-pub use indexer::{IndexerReport, refresh_index};
+pub use embed::{Embedder, try_shared_embedder, warn_query_embed_failure_once};
+pub use indexer::{
+    IndexerReport, refresh_index, refresh_index_preferring_embeddings, refresh_index_with_embedder,
+};
 pub use lookup::{count_entries, get_entry};
 pub use search::{ScoreBreakdown, SearchHit, SearchOptions, search};
 
@@ -53,6 +58,15 @@ pub enum IndexError {
 
     #[error("invalid entry: {0}")]
     InvalidEntry(String),
+
+    /// Failure in the embedding subsystem — model load (network /
+    /// ONNX runtime / disk), inference (OOM / shape mismatch),
+    /// or vector serialization. Distinct from [`InvalidEntry`]
+    /// (which is data-validation) so callers can branch on
+    /// "embeddings are unavailable" vs "this entry's content is
+    /// malformed".
+    #[error("embedding error: {0}")]
+    Embed(String),
 }
 
 pub type Result<T> = std::result::Result<T, IndexError>;

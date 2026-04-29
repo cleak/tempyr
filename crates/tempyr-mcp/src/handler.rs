@@ -1902,13 +1902,15 @@ impl TempyrServer {
         let db_path = tempyr_journal_index::index_db_path(&common_dir);
 
         // Refresh once before searching so an agent can find entries
-        // they just wrote via `journal_log`. Same rationale as
-        // `journal_get`: incremental refresh is cheap when the only
-        // new content is what just landed in `<journals>/open/`.
-        // Failure here surfaces — silently returning stale results
-        // would hide real problems.
-        tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+        // they just wrote via `journal_log`. The shared
+        // `refresh_index_preferring_embeddings` helper handles the
+        // embedder-failure → structural-only fallback so a transient
+        // ONNX runtime / sqlite-vec hiccup mid-embed doesn't fail
+        // the whole search; only a hard structural-refresh failure
+        // surfaces here.
+        tempyr_journal_index::refresh_index_preferring_embeddings(&common_dir, &repo_root)
             .map_err(|e| format!("journal index refresh failed: {e}"))?;
+        let embedder = tempyr_journal_index::try_shared_embedder();
 
         // Translate kind strings to the typed Kind enum.
         let mut kinds: Vec<Kind> = Vec::new();
@@ -1918,8 +1920,28 @@ impl TempyrServer {
             }
         }
 
+        // Embed the query string for the vector side. On embedder
+        // unavailability OR per-call embedding error, fall back to
+        // BM25-only ranking (identical to slice 3b1 behavior).
+        // The shared `warn_query_embed_failure_once` helper emits
+        // exactly one stderr warning per process across both the
+        // CLI and the MCP path — a long-running MCP server doesn't
+        // log per-search noise when embedding is consistently
+        // unavailable.
+        let query_vector = match embedder {
+            Some(emb) => match emb.embed_one(&p.query) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tempyr_journal_index::warn_query_embed_failure_once(&e);
+                    None
+                }
+            },
+            None => None,
+        };
+
         let opts = tempyr_journal_index::SearchOptions {
             query: p.query,
+            query_vector,
             kinds,
             limit: p.limit.unwrap_or(10),
             since_days: p.since_days,
