@@ -8,6 +8,7 @@
 //!
 //! Survives worktree abandonment because Git refs are shared across worktrees.
 
+pub mod auto_emit;
 pub mod config;
 pub mod entry;
 pub mod git;
@@ -20,6 +21,7 @@ pub mod session;
 pub mod state;
 pub mod writer;
 
+pub use auto_emit::{TaskTransition, auto_emit_task_transition};
 pub use config::JournalConfig;
 pub use entry::{Confidence, Entry, Polarity, SCHEMA_VERSION, Severity};
 pub use kind::{Kind, validate_entry};

@@ -962,6 +962,111 @@ fn test_status_update() {
         ));
 }
 
+/// Phase 4a: `tempyr status <task> in_progress` should auto-emit a
+/// `plan` entry to the journal when the node is a task. Verifies the
+/// CLI is wired into `tempyr_journal::auto_emit_task_transition`.
+#[test]
+fn test_status_auto_emits_journal_entry_on_task_transition() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    write_node(
+        &tmp,
+        "tasks",
+        "task-implement-thing-aaaaaa",
+        "---\nid: task-implement-thing-aaaaaa\ntype: task\nstatus: backlog\n---\n# Implement thing\n",
+    );
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["status", "task-implement-thing-aaaaaa", "in_progress"])
+        .assert()
+        .success();
+
+    // The journal lives under `<git-common-dir>/tempyr/journals/open/`.
+    // For a non-worktree repo that's `<repo>/.git/tempyr/journals/open`.
+    let open_dir = tmp.path().join(".git/tempyr/journals/open");
+    let entries = read_journal_entries(&open_dir);
+    assert_eq!(entries.len(), 1, "expected exactly one auto-emitted entry");
+    let e = &entries[0];
+    assert_eq!(e["kind"], "plan");
+    assert_eq!(e["provisional"], true);
+    assert!(
+        e["summary"]
+            .as_str()
+            .unwrap()
+            .contains("task-implement-thing-aaaaaa"),
+        "summary should reference the task id, got: {}",
+        e["summary"]
+    );
+    // The `references` array should carry the task id so future
+    // searches can pivot from journal entry → task node.
+    let refs = e["references"].as_array().unwrap();
+    assert!(refs.iter().any(|v| v == "task-implement-thing-aaaaaa"));
+}
+
+/// Status changes on non-task nodes must NOT spawn a journal entry —
+/// auto-emit is scoped to the task lifecycle.
+#[test]
+fn test_status_does_not_emit_for_non_task_nodes() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    write_node(
+        &tmp,
+        "features",
+        "feat-a",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+    );
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["status", "feat-a", "active"])
+        .assert()
+        .success();
+
+    let open_dir = tmp.path().join(".git/tempyr/journals/open");
+    let entries = read_journal_entries(&open_dir);
+    assert!(
+        entries.is_empty(),
+        "no entries expected for non-task transitions, got {entries:?}"
+    );
+}
+
+fn init_git_repo(dir: &Path) {
+    ProcessCommand::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .current_dir(dir)
+        .status()
+        .expect("git init should succeed");
+}
+
+fn read_journal_entries(open_dir: &Path) -> Vec<serde_json::Value> {
+    let read_dir = match fs::read_dir(open_dir) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for entry in read_dir.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let bytes = fs::read(&p).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        for line in text.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            out.push(serde_json::from_str(line).unwrap());
+        }
+    }
+    out
+}
+
 #[test]
 fn test_traverse() {
     let tmp = TempDir::new().unwrap();
