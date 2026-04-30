@@ -1404,6 +1404,148 @@ fn test_journal_blame_finds_entries_referencing_path() {
     assert_eq!(json["count"].as_u64().unwrap(), 0);
 }
 
+/// `tempyr journal lint` flags every task with `status = in_progress`
+/// that has zero journal entries referencing it. The auto-emit on
+/// `backlog → in_progress` writes a `plan` entry so a task that
+/// went through `tempyr status` always passes; the lint catches the
+/// "agent edited frontmatter directly" failure mode.
+#[test]
+fn test_journal_lint_flags_in_progress_task_without_entries() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    // Two tasks: one in_progress, one backlog. Only the
+    // in_progress one should show up in lint output. Neither has a
+    // journal entry referencing it (we wrote them with raw fs::write,
+    // not via `tempyr status`).
+    write_node(
+        &tmp,
+        "tasks",
+        "task-stale-thing-aaaaaa",
+        "---\nid: task-stale-thing-aaaaaa\ntype: task\nstatus: in_progress\n---\n# Stale thing\n",
+    );
+    write_node(
+        &tmp,
+        "tasks",
+        "task-fresh-thing-bbbbbb",
+        "---\nid: task-fresh-thing-bbbbbb\ntype: task\nstatus: backlog\n---\n# Fresh thing\n",
+    );
+
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "lint"])
+        .assert()
+        .success() // warn-only by default — never blocks a commit.
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["skipped"], false);
+    let warnings = json["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["kind"], "in_progress_task_without_journal");
+    assert_eq!(warnings[0]["task_id"], "task-stale-thing-aaaaaa");
+}
+
+/// `tempyr journal lint` should NOT flag a task that went through
+/// `tempyr status` — the auto-emitted `plan` entry references it,
+/// so the lint sees journal coverage.
+#[test]
+fn test_journal_lint_clears_after_status_transition() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    write_node(
+        &tmp,
+        "tasks",
+        "task-clean-thing-cccccc",
+        "---\nid: task-clean-thing-cccccc\ntype: task\nstatus: backlog\n---\n# Clean thing\n",
+    );
+
+    // Drive the proper status transition so the auto-emit fires.
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["status", "task-clean-thing-cccccc", "in_progress"])
+        .assert()
+        .success();
+
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "lint"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["warnings"].as_array().unwrap().len(), 0);
+}
+
+/// `tempyr journal lint --strict` should exit non-zero when there
+/// are warnings, for CI use. The pre-commit hook deliberately omits
+/// `--strict` so a lint failure never blocks a commit.
+#[test]
+fn test_journal_lint_strict_exits_nonzero_on_warnings() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    write_node(
+        &tmp,
+        "tasks",
+        "task-stale-strict-dddddd",
+        "---\nid: task-stale-strict-dddddd\ntype: task\nstatus: in_progress\n---\n# Strict thing\n",
+    );
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["journal", "lint", "--strict"])
+        .assert()
+        .failure();
+}
+
+/// `tempyr journal lint` outside a git repo should exit 0 with
+/// `skipped: true` and no warnings — the pre-commit hook depends on
+/// this behavior to stay harmless in unusual setups (e.g., a
+/// freshly-extracted tarball that hasn't been `git init`'d yet).
+#[test]
+fn test_journal_lint_noop_outside_git_repo() {
+    let tmp = TempDir::new().unwrap();
+    // Deliberately NO `init_git_repo` — the dir is a plain folder.
+    init_project(&tmp);
+
+    // Even with an in_progress task that would normally trip the
+    // lint, the absence of a git repo should short-circuit to a
+    // skip rather than walk the graph or open the index.
+    write_node(
+        &tmp,
+        "tasks",
+        "task-outside-git-eeeeee",
+        "---\nid: task-outside-git-eeeeee\ntype: task\nstatus: in_progress\n---\n# Outside-git task\n",
+    );
+
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "lint"])
+        .assert()
+        .success() // Never blocks: warn-only by default.
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["skipped"], true,
+        "lint outside a git repo should report skipped=true"
+    );
+    assert_eq!(
+        json["warnings"].as_array().unwrap().len(),
+        0,
+        "no warnings should be emitted when the lint is skipped"
+    );
+}
+
 /// Outside a git repo, `bootstrap` and `finalize` should both exit 0
 /// silently — they're hook commands, and a Claude session opened in
 /// a non-tempyr directory must not blow up.

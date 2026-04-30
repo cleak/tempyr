@@ -35,7 +35,7 @@ pub use embed::{Embedder, try_shared_embedder, warn_query_embed_failure_once};
 pub use indexer::{
     IndexerReport, refresh_index, refresh_index_preferring_embeddings, refresh_index_with_embedder,
 };
-pub use lookup::{count_entries, get_entry};
+pub use lookup::{count_entries, count_entries_referencing_node, get_entry};
 pub use range::{MAX_RANGE_COMMITS, RangeOptions, range_query};
 pub use rerank::{Reranker, try_shared_reranker, warn_query_rerank_failure_once};
 pub use search::{ScoreBreakdown, SearchHit, SearchOptions, search};
