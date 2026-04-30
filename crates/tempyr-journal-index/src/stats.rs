@@ -26,6 +26,17 @@ use serde::Serialize;
 
 use crate::Result;
 
+/// Hard bounds on caller-supplied knobs. CLI uses these for clap
+/// `value_parser` ranges; MCP uses them for clamping. Centralized
+/// here so both transports enforce the same bounds and a future
+/// tweak only needs one place.
+pub const MIN_SINCE_DAYS: u32 = 0;
+pub const MAX_SINCE_DAYS: u32 = 36_500; // ~100 years; well past any real project.
+pub const MIN_TOP_LIST: u32 = 1;
+pub const MAX_TOP_LIST: u32 = 1_000;
+pub const MIN_ACTIVITY_WINDOW_DAYS: u32 = 1;
+pub const MAX_ACTIVITY_WINDOW_DAYS: u32 = 365;
+
 /// Caller-supplied knobs for one stats query.
 #[derive(Debug, Clone)]
 pub struct StatsOptions {
@@ -283,6 +294,13 @@ fn top_files(conn: &Connection, limit: usize, since: Option<&str>) -> Result<Vec
 /// days, keyed by `YYYY-MM-DD`. Days with zero entries are kept in
 /// the output (with `count = 0`) so the histogram has a stable
 /// shape — easier to render and to spot gaps.
+/// Activity histogram. Returns `window + 1` daily buckets covering
+/// the cutoff day through today (inclusive on both ends): the SQL
+/// cutoff is `now - window days` and matches `ts >=` inclusively,
+/// so the bucket loop must extend to the cutoff day too — otherwise
+/// an entry written exactly `window` days ago would land in the
+/// SQL result with no Rust bucket to receive it and silently drop
+/// from the rendered timeline.
 fn activity_per_day(conn: &Connection, window: u32, now: DateTime<Utc>) -> Result<Vec<DayCount>> {
     if window == 0 {
         return Ok(Vec::new());
@@ -303,9 +321,11 @@ fn activity_per_day(conn: &Connection, window: u32, now: DateTime<Utc>) -> Resul
         let (day, c) = row?;
         by_day.insert(day, c);
     }
-    // Fill in zeros for any missing day in the window.
-    let mut out = Vec::with_capacity(window as usize);
-    for i in 0..window {
+    // Fill in zeros for any missing day in the window. `0..=window`
+    // (inclusive) so the cutoff day gets a bucket; see the function
+    // doc for why.
+    let mut out = Vec::with_capacity(window as usize + 1);
+    for i in 0..=window {
         let day = (now - Duration::try_days(i64::from(i)).unwrap_or(Duration::zero()))
             .format("%Y-%m-%d")
             .to_string();
@@ -515,8 +535,9 @@ mod tests {
             ..Default::default()
         };
         let report = compute_stats(&conn, &opts).unwrap();
-        // 7-day window, all days present even when zero.
-        assert_eq!(report.activity_per_day.len(), 7);
+        // 7-day window emits 8 buckets (cutoff day through today,
+        // inclusive on both ends) — see activity_per_day doc.
+        assert_eq!(report.activity_per_day.len(), 8);
         // Last bucket (today, in chronological order) holds the
         // single entry we wrote.
         let total: u64 = report.activity_per_day.iter().map(|d| d.count).sum();
@@ -526,17 +547,45 @@ mod tests {
 
     #[test]
     fn since_days_filter_excludes_old_entries() {
+        // Backdate an entry's `ts` to two years ago in the index
+        // DB, then run compute_stats with a 30-day window — the
+        // entry must NOT count toward `total_entries`. Without
+        // this, the test would only verify the inclusion path
+        // (which works whether the WHERE clause runs or not).
         let (outer, repo, common) = fresh_repo();
-        write_one(&common, &repo, Kind::Finding, "an entry", vec![]);
+        write_one(&common, &repo, Kind::Finding, "an old entry", vec![]);
         refresh_index(&common, &repo).unwrap();
+
+        // Sanity-check: with no filter the entry IS counted.
+        {
+            let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+            let report = compute_stats(&conn, &StatsOptions::default()).unwrap();
+            assert_eq!(report.total_entries, 1);
+        }
+
+        // Backdate every entry to two years ago by writing the
+        // timestamp directly. Going through normal write paths
+        // would either reject the past timestamp or land it as
+        // "now", neither of which exercises this filter.
+        {
+            let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+            let two_years_ago = (Utc::now() - chrono::Duration::days(730)).to_rfc3339();
+            conn.execute("UPDATE entries SET ts = ?1", [&two_years_ago])
+                .unwrap();
+        }
+
+        // 30-day window: backdated entry excluded, so total = 0.
         let conn = schema::open(&crate::index_db_path(&common)).unwrap();
-        // since_days = 0 means cutoff = now, so an entry written
-        // right now should still match (ts >= cutoff is inclusive
-        // on the same instant). To exercise the exclusion path we
-        // need to backdate the cutoff explicitly; for the wiring
-        // test, just verify a 365-day window matches.
         let opts = StatsOptions {
-            since_days: Some(365),
+            since_days: Some(30),
+            ..Default::default()
+        };
+        let report = compute_stats(&conn, &opts).unwrap();
+        assert_eq!(report.total_entries, 0);
+        // 1000-day window: backdated entry included again, proving
+        // the cutoff math is what's gating the result.
+        let opts = StatsOptions {
+            since_days: Some(1000),
             ..Default::default()
         };
         let report = compute_stats(&conn, &opts).unwrap();

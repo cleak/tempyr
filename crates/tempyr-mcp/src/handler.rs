@@ -2449,11 +2449,26 @@ impl TempyrServer {
         tempyr_journal_index::refresh_index(&common_dir, &repo_root)
             .map_err(|e| format!("journal index refresh failed: {e}"))?;
 
+        // Clamp every user-supplied size to the bounds the library
+        // documents. Without this, a misbehaving MCP client could
+        // request top_tags = usize::MAX (huge SQL LIMIT, huge
+        // payload) or activity_window_days = 100k (unbounded
+        // bucket allocation in Rust). Same bounds the CLI's clap
+        // ranges enforce — centralized as constants in
+        // `tempyr_journal_index::stats`.
+        use tempyr_journal_index::stats::{
+            MAX_ACTIVITY_WINDOW_DAYS, MAX_SINCE_DAYS, MAX_TOP_LIST, MIN_ACTIVITY_WINDOW_DAYS,
+            MIN_TOP_LIST,
+        };
         let opts = tempyr_journal_index::StatsOptions {
-            since_days: p.since_days,
-            top_tags: p.top_tags.unwrap_or(20),
-            top_files: p.top_files.unwrap_or(20),
-            activity_window_days: p.activity_window_days.unwrap_or(30),
+            since_days: p.since_days.map(|d| d.min(MAX_SINCE_DAYS)),
+            top_tags: (p.top_tags.unwrap_or(20) as u32).clamp(MIN_TOP_LIST, MAX_TOP_LIST) as usize,
+            top_files: (p.top_files.unwrap_or(20) as u32).clamp(MIN_TOP_LIST, MAX_TOP_LIST)
+                as usize,
+            activity_window_days: p
+                .activity_window_days
+                .unwrap_or(30)
+                .clamp(MIN_ACTIVITY_WINDOW_DAYS, MAX_ACTIVITY_WINDOW_DAYS),
         };
         let db_path = tempyr_journal_index::index_db_path(&common_dir);
         let conn = tempyr_journal_index::schema::open(&db_path).map_err(|e| e.to_string())?;

@@ -1248,17 +1248,47 @@ pub struct StatsCmdArgs {
     /// Restrict aggregates to entries newer than this many days.
     /// Affects every section except the activity histogram (which
     /// has its own window). Default: no filter (all of history).
-    #[arg(long)]
+    /// Capped at 36,500 (100 years) so a typo can't trigger
+    /// pathological cutoff math; should be sufficient for any real
+    /// project.
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u32).range(
+            i64::from(tempyr_journal_index::stats::MIN_SINCE_DAYS)..=
+            i64::from(tempyr_journal_index::stats::MAX_SINCE_DAYS)
+        )
+    )]
     pub since_days: Option<u32>,
     /// Cap the top-tags list at this many rows. Default 20.
-    #[arg(long, default_value = "20")]
-    pub top_tags: usize,
+    #[arg(
+        long,
+        default_value = "20",
+        value_parser = clap::value_parser!(u32).range(
+            i64::from(tempyr_journal_index::stats::MIN_TOP_LIST)..=
+            i64::from(tempyr_journal_index::stats::MAX_TOP_LIST)
+        )
+    )]
+    pub top_tags: u32,
     /// Cap the top-files list at this many rows. Default 20.
-    #[arg(long, default_value = "20")]
-    pub top_files: usize,
+    #[arg(
+        long,
+        default_value = "20",
+        value_parser = clap::value_parser!(u32).range(
+            i64::from(tempyr_journal_index::stats::MIN_TOP_LIST)..=
+            i64::from(tempyr_journal_index::stats::MAX_TOP_LIST)
+        )
+    )]
+    pub top_files: u32,
     /// Days of activity histogram to render, counting back from
     /// today. Default 30.
-    #[arg(long, default_value = "30")]
+    #[arg(
+        long,
+        default_value = "30",
+        value_parser = clap::value_parser!(u32).range(
+            i64::from(tempyr_journal_index::stats::MIN_ACTIVITY_WINDOW_DAYS)..=
+            i64::from(tempyr_journal_index::stats::MAX_ACTIVITY_WINDOW_DAYS)
+        )
+    )]
     pub activity_window_days: u32,
 }
 
@@ -1276,8 +1306,8 @@ pub fn run_stats(args: StatsCmdArgs, json_output: bool) -> Result<()> {
 
     let opts = tempyr_journal_index::StatsOptions {
         since_days: args.since_days,
-        top_tags: args.top_tags,
-        top_files: args.top_files,
+        top_tags: args.top_tags as usize,
+        top_files: args.top_files as usize,
         activity_window_days: args.activity_window_days,
     };
     let db_path = tempyr_journal_index::index_db_path(&common_dir);
