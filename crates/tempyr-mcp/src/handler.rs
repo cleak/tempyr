@@ -237,6 +237,22 @@ pub struct LinearDryRunParams {
 
 // Schema defaults
 
+/// Translate an optional list of snake-case kind strings (as they
+/// come over the wire from `JournalSearchParams::kinds`,
+/// `JournalRangeParams::kinds`, `JournalBlameParams::kinds`) into a
+/// `Vec<Kind>` typed for the index layer. `None` and `Some([])` both
+/// produce an empty vec; any unparseable string is mapped to a
+/// `String` error so the caller can `?`-propagate it.
+fn parse_kinds(opt: &Option<Vec<String>>) -> Result<Vec<Kind>, String> {
+    let mut out = Vec::new();
+    if let Some(ks) = opt {
+        for s in ks {
+            out.push(Kind::parse_helpful(s).map_err(|e| e.to_string())?);
+        }
+    }
+    Ok(out)
+}
+
 /// Shell out to `git rev-list <expr>` and return the SHAs it emits.
 /// Used by the `journal_range` tool to expand range expressions.
 /// Errors get surfaced verbatim so the caller can correct a bad
@@ -2345,12 +2361,7 @@ impl TempyrServer {
         let embedder = tempyr_journal_index::try_shared_embedder();
 
         // Translate kind strings to the typed Kind enum.
-        let mut kinds: Vec<Kind> = Vec::new();
-        if let Some(ks) = &p.kinds {
-            for s in ks {
-                kinds.push(Kind::parse_helpful(s).map_err(|e| e.to_string())?);
-            }
-        }
+        let kinds = parse_kinds(&p.kinds)?;
 
         // Embed the query string for the vector side. On embedder
         // unavailability OR per-call embedding error, fall back to
@@ -2430,12 +2441,7 @@ impl TempyrServer {
         // reference frame for the project.
         let normalized = jpath::resolve_file_path(&p.path, &repo_root, Some(&repo_root));
 
-        let mut kinds: Vec<Kind> = Vec::new();
-        if let Some(ks) = &p.kinds {
-            for s in ks {
-                kinds.push(Kind::parse_helpful(s).map_err(|e| e.to_string())?);
-            }
-        }
+        let kinds = parse_kinds(&p.kinds)?;
 
         let opts = tempyr_journal_index::BlameOptions {
             path: normalized.clone(),
@@ -2492,12 +2498,7 @@ impl TempyrServer {
         // range expression.
         let commits = run_git_rev_list(&repo_root, &p.range)?;
 
-        let mut kinds: Vec<Kind> = Vec::new();
-        if let Some(ks) = &p.kinds {
-            for s in ks {
-                kinds.push(Kind::parse_helpful(s).map_err(|e| e.to_string())?);
-            }
-        }
+        let kinds = parse_kinds(&p.kinds)?;
 
         let opts = tempyr_journal_index::RangeOptions {
             commits,

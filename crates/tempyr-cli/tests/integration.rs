@@ -1268,15 +1268,17 @@ fn test_journal_range_filters_by_commit_range() {
 }
 
 /// `tempyr journal blame <file>` should surface every entry whose
-/// `files` field includes the given path, regardless of which
-/// commit was checked out at log time.
+/// `files` field includes the given path. Verifies path filtering,
+/// cross-commit visibility (entries written under different HEADs
+/// all surface — blame is keyed on `entry_files.path`, not on the
+/// head SHA), and unknown-path → empty behavior.
 #[test]
 fn test_journal_blame_finds_entries_referencing_path() {
     let tmp = TempDir::new().unwrap();
     init_git_repo(tmp.path());
     init_project(&tmp);
 
-    // Configure git user so any commits succeed in CI.
+    // Configure git user so commits succeed in CI.
     for args in [
         ["config", "user.name", "tempyr-test"].as_slice(),
         ["config", "user.email", "tempyr-test@example.com"].as_slice(),
@@ -1284,17 +1286,40 @@ fn test_journal_blame_finds_entries_referencing_path() {
         let out = ProcessCommand::new("git")
             .args(args)
             .current_dir(tmp.path())
-            .status()
-            .unwrap();
-        assert!(out.success());
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
-    // Real files so the writer's path normalizer treats them as
-    // worktree-rooted.
-    fs::write(tmp.path().join("auth.rs"), "fn auth() {}").unwrap();
-    fs::write(tmp.path().join("api.rs"), "fn api() {}").unwrap();
+    let make_commit = |msg: &str, file: &str| {
+        fs::write(tmp.path().join(file), msg).unwrap();
+        for args in [
+            ["add", file].as_slice(),
+            ["commit", "-q", "-m", msg].as_slice(),
+        ] {
+            let out = ProcessCommand::new("git")
+                .args(args)
+                .current_dir(tmp.path())
+                .output()
+                .expect("spawn git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    };
 
-    // One entry tagged with auth.rs, another with api.rs.
+    // Cross-commit setup: two entries about auth.rs are written
+    // under two different HEAD states (a commit shifts HEAD between
+    // them), plus one unrelated entry about api.rs. Both auth.rs
+    // entries should surface for the blame query — that's the
+    // cross-commit invariant under test.
+    make_commit("first commit", "auth.rs");
     tempyr()
         .current_dir(tmp.path())
         .args([
@@ -1302,6 +1327,26 @@ fn test_journal_blame_finds_entries_referencing_path() {
             "log",
             "finding",
             "tracked-down a token leak in the auth flow",
+            "--file",
+            "auth.rs",
+        ])
+        .assert()
+        .success();
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["journal", "finalize", "--quiet"])
+        .assert()
+        .success();
+    std::thread::sleep(Duration::from_millis(1100));
+
+    make_commit("second commit", "other.rs");
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "journal",
+            "log",
+            "finding",
+            "discovered the auth handler also needs CSRF tokens",
             "--file",
             "auth.rs",
         ])
@@ -1320,7 +1365,8 @@ fn test_journal_blame_finds_entries_referencing_path() {
         .assert()
         .success();
 
-    // Blame for auth.rs should return only the first entry.
+    // Blame for auth.rs should surface BOTH auth.rs entries (across
+    // two different HEAD states) but not the api.rs one.
     let output = tempyr()
         .current_dir(tmp.path())
         .args(["--json", "journal", "blame", "auth.rs"])
@@ -1330,10 +1376,20 @@ fn test_journal_blame_finds_entries_referencing_path() {
         .stdout
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let count = json["count"].as_u64().unwrap();
-    assert_eq!(count, 1, "expected exactly one entry referencing auth.rs");
-    let summary = json["hits"][0]["entry"]["summary"].as_str().unwrap();
-    assert!(summary.contains("token leak"));
+    assert_eq!(
+        json["count"].as_u64().unwrap(),
+        2,
+        "expected both auth.rs entries (cross-commit) to surface"
+    );
+    let summaries: Vec<&str> = json["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["entry"]["summary"].as_str().unwrap())
+        .collect();
+    assert!(summaries.iter().any(|s| s.contains("token leak")));
+    assert!(summaries.iter().any(|s| s.contains("CSRF tokens")));
+    assert!(!summaries.iter().any(|s| s.contains("api response")));
 
     // Unknown path → empty.
     let output = tempyr()

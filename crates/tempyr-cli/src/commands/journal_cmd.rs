@@ -160,6 +160,19 @@ fn parse_opt<T: FromStr<Err = tempyr_journal::JournalError>>(s: Option<&str>) ->
         .map_err(|e| anyhow!(format!("{e}")))
 }
 
+/// Translate the `--kind` flag's repeatable string values (used by
+/// `journal search`, `journal range`, and `journal blame`) into the
+/// typed `Vec<Kind>` the index layer expects. Empty input yields an
+/// empty vec; any unparseable string surfaces as an `anyhow` error
+/// the caller can `?`-propagate.
+fn parse_kinds(strs: &[String]) -> Result<Vec<Kind>> {
+    let mut out = Vec::with_capacity(strs.len());
+    for s in strs {
+        out.push(Kind::parse_helpful(s).map_err(|e| anyhow!(format!("{e}")))?);
+    }
+    Ok(out)
+}
+
 // `refresh_index_preferring_embeddings` lives in `tempyr-journal-index`
 // (re-exported from the crate root) so the CLI and the MCP server
 // share a single fallback policy: try the embedder path, log + retry
@@ -716,10 +729,7 @@ pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
         .map_err(|e| anyhow!("refresh index: {e}"))?;
     let embedder = tempyr_journal_index::try_shared_embedder();
 
-    let mut kinds: Vec<Kind> = Vec::new();
-    for s in &args.kinds {
-        kinds.push(Kind::parse_helpful(s).map_err(|e| anyhow!(format!("{e}")))?);
-    }
+    let kinds = parse_kinds(&args.kinds)?;
 
     // Embed the query string if an embedder is loaded. None →
     // BM25-only mode; identical 3b1 behavior preserved. The shared
@@ -851,10 +861,7 @@ pub fn run_range(args: RangeArgs, json_output: bool) -> Result<()> {
     // includes merges) — for journal range we want every commit.
     let commits = git_rev_list(&repo_root, &args.range)?;
 
-    let mut kinds: Vec<Kind> = Vec::new();
-    for s in &args.kinds {
-        kinds.push(Kind::parse_helpful(s).map_err(|e| anyhow!(format!("{e}")))?);
-    }
+    let kinds = parse_kinds(&args.kinds)?;
 
     let opts = tempyr_journal_index::RangeOptions {
         commits,
@@ -1011,10 +1018,7 @@ pub fn run_blame(args: BlameArgs, json_output: bool) -> Result<()> {
     // equivalently.
     let normalized = jpath::resolve_file_path(&args.path, &worktree_top, Some(&cwd));
 
-    let mut kinds: Vec<Kind> = Vec::new();
-    for s in &args.kinds {
-        kinds.push(Kind::parse_helpful(s).map_err(|e| anyhow!(format!("{e}")))?);
-    }
+    let kinds = parse_kinds(&args.kinds)?;
 
     let opts = tempyr_journal_index::BlameOptions {
         path: normalized.clone(),
