@@ -160,6 +160,19 @@ fn parse_opt<T: FromStr<Err = tempyr_journal::JournalError>>(s: Option<&str>) ->
         .map_err(|e| anyhow!(format!("{e}")))
 }
 
+/// Translate the `--kind` flag's repeatable string values (used by
+/// `journal search`, `journal range`, and `journal blame`) into the
+/// typed `Vec<Kind>` the index layer expects. Empty input yields an
+/// empty vec; any unparseable string surfaces as an `anyhow` error
+/// the caller can `?`-propagate.
+fn parse_kinds(strs: &[String]) -> Result<Vec<Kind>> {
+    let mut out = Vec::with_capacity(strs.len());
+    for s in strs {
+        out.push(Kind::parse_helpful(s).map_err(|e| anyhow!(format!("{e}")))?);
+    }
+    Ok(out)
+}
+
 // `refresh_index_preferring_embeddings` lives in `tempyr-journal-index`
 // (re-exported from the crate root) so the CLI and the MCP server
 // share a single fallback policy: try the embedder path, log + retry
@@ -716,10 +729,7 @@ pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
         .map_err(|e| anyhow!("refresh index: {e}"))?;
     let embedder = tempyr_journal_index::try_shared_embedder();
 
-    let mut kinds: Vec<Kind> = Vec::new();
-    for s in &args.kinds {
-        kinds.push(Kind::parse_helpful(s).map_err(|e| anyhow!(format!("{e}")))?);
-    }
+    let kinds = parse_kinds(&args.kinds)?;
 
     // Embed the query string if an embedder is loaded. None →
     // BM25-only mode; identical 3b1 behavior preserved. The shared
@@ -851,10 +861,7 @@ pub fn run_range(args: RangeArgs, json_output: bool) -> Result<()> {
     // includes merges) — for journal range we want every commit.
     let commits = git_rev_list(&repo_root, &args.range)?;
 
-    let mut kinds: Vec<Kind> = Vec::new();
-    for s in &args.kinds {
-        kinds.push(Kind::parse_helpful(s).map_err(|e| anyhow!(format!("{e}")))?);
-    }
+    let kinds = parse_kinds(&args.kinds)?;
 
     let opts = tempyr_journal_index::RangeOptions {
         commits,
@@ -966,6 +973,108 @@ fn git_rev_list_count(repo_root: &std::path::Path, expr: &str) -> Result<usize> 
             stdout.trim()
         )
     })
+}
+
+#[derive(Args, Debug)]
+pub struct BlameArgs {
+    /// File path. Absolute paths under the worktree are normalized
+    /// to repo-relative form; cwd-relative paths are joined against
+    /// the current directory first. Backslashes are converted to
+    /// forward-slash to match the on-disk format the indexer stores.
+    pub path: String,
+    /// Restrict to one or more kinds (repeatable). Useful filters:
+    /// `--kind dead_end --kind decision` for the highest-signal
+    /// reasoning about this file.
+    #[arg(long = "kind")]
+    pub kinds: Vec<String>,
+    /// Cap on returned hits (default 50).
+    #[arg(long, default_value = "50")]
+    pub limit: usize,
+    /// Token budget for the response. Detail bodies are truncated to fit.
+    #[arg(long)]
+    pub token_budget: Option<usize>,
+    /// Show per-hit score breakdown (recency / kind only — no
+    /// query-string signal in blame mode).
+    #[arg(long)]
+    pub explain: bool,
+}
+
+pub fn run_blame(args: BlameArgs, json_output: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("read current directory")?;
+    let common_dir =
+        jpath::git_common_dir(&cwd).map_err(|e| anyhow!("not in a git repository: {e}"))?;
+    let worktree_top =
+        jpath::repo_toplevel(&cwd).map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
+
+    // Refresh first so blame sees anything the agent just logged.
+    // Structural-only — no query string means no embedding needed.
+    tempyr_journal_index::refresh_index(&common_dir, &worktree_top)
+        .map_err(|e| anyhow!("refresh index: {e}"))?;
+
+    // Normalize the user's path the same way the writer normalized
+    // entry.files at log time (repo-relative, forward-slash). This
+    // is the canonical helper both sides share, so pass-by-value
+    // accepts absolute / cwd-relative / Windows-style paths
+    // equivalently.
+    let normalized = jpath::resolve_file_path(&args.path, &worktree_top, Some(&cwd));
+
+    let kinds = parse_kinds(&args.kinds)?;
+
+    let opts = tempyr_journal_index::BlameOptions {
+        path: normalized.clone(),
+        kinds,
+        limit: args.limit,
+        token_budget: args
+            .token_budget
+            .unwrap_or(tempyr_journal_index::search::DEFAULT_TOKEN_BUDGET),
+        explain: args.explain,
+    };
+
+    let db_path = tempyr_journal_index::index_db_path(&common_dir);
+    let conn =
+        tempyr_journal_index::schema::open(&db_path).map_err(|e| anyhow!("open index: {e}"))?;
+    let hits =
+        tempyr_journal_index::blame_query(&conn, &opts).map_err(|e| anyhow!("blame: {e}"))?;
+
+    if json_output {
+        let payload = serde_json::json!({
+            "path": normalized,
+            "count": hits.len(),
+            "hits": hits,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+    } else if hits.is_empty() {
+        println!("no entries reference {}", normalized);
+    } else {
+        for (i, hit) in hits.iter().enumerate() {
+            let entry = &hit.entry;
+            println!(
+                "[{:>2}] {:<10} {} ({})",
+                i + 1,
+                entry.kind.as_str(),
+                entry.id,
+                entry.ts.format("%Y-%m-%d")
+            );
+            println!("     {}", entry.summary);
+            if let Some(detail) = &entry.detail
+                && !detail.is_empty()
+            {
+                println!("     {}", detail.lines().next().unwrap_or(detail));
+            }
+            if args.explain
+                && let Some(b) = &hit.explain
+            {
+                println!(
+                    "     score: {:.3} (recency={:.3}, kind={:.3})",
+                    b.total, b.recency, b.kind
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Args, Debug)]

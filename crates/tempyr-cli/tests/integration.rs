@@ -1267,6 +1267,143 @@ fn test_journal_range_filters_by_commit_range() {
     assert!(!summaries.iter().any(|s| s.contains("entry one")));
 }
 
+/// `tempyr journal blame <file>` should surface every entry whose
+/// `files` field includes the given path. Verifies path filtering,
+/// cross-commit visibility (entries written under different HEADs
+/// all surface — blame is keyed on `entry_files.path`, not on the
+/// head SHA), and unknown-path → empty behavior.
+#[test]
+fn test_journal_blame_finds_entries_referencing_path() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    // Configure git user so commits succeed in CI.
+    for args in [
+        ["config", "user.name", "tempyr-test"].as_slice(),
+        ["config", "user.email", "tempyr-test@example.com"].as_slice(),
+    ] {
+        let out = ProcessCommand::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let make_commit = |msg: &str, file: &str| {
+        fs::write(tmp.path().join(file), msg).unwrap();
+        for args in [
+            ["add", file].as_slice(),
+            ["commit", "-q", "-m", msg].as_slice(),
+        ] {
+            let out = ProcessCommand::new("git")
+                .args(args)
+                .current_dir(tmp.path())
+                .output()
+                .expect("spawn git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    };
+
+    // Cross-commit setup: two entries about auth.rs are written
+    // under two different HEAD states (a commit shifts HEAD between
+    // them), plus one unrelated entry about api.rs. Both auth.rs
+    // entries should surface for the blame query — that's the
+    // cross-commit invariant under test.
+    make_commit("first commit", "auth.rs");
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "journal",
+            "log",
+            "finding",
+            "tracked-down a token leak in the auth flow",
+            "--file",
+            "auth.rs",
+        ])
+        .assert()
+        .success();
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["journal", "finalize", "--quiet"])
+        .assert()
+        .success();
+    std::thread::sleep(Duration::from_millis(1100));
+
+    make_commit("second commit", "other.rs");
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "journal",
+            "log",
+            "finding",
+            "discovered the auth handler also needs CSRF tokens",
+            "--file",
+            "auth.rs",
+        ])
+        .assert()
+        .success();
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "journal",
+            "log",
+            "finding",
+            "noted the api response shape needs work",
+            "--file",
+            "api.rs",
+        ])
+        .assert()
+        .success();
+
+    // Blame for auth.rs should surface BOTH auth.rs entries (across
+    // two different HEAD states) but not the api.rs one.
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "blame", "auth.rs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["count"].as_u64().unwrap(),
+        2,
+        "expected both auth.rs entries (cross-commit) to surface"
+    );
+    let summaries: Vec<&str> = json["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["entry"]["summary"].as_str().unwrap())
+        .collect();
+    assert!(summaries.iter().any(|s| s.contains("token leak")));
+    assert!(summaries.iter().any(|s| s.contains("CSRF tokens")));
+    assert!(!summaries.iter().any(|s| s.contains("api response")));
+
+    // Unknown path → empty.
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "blame", "nonexistent.rs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["count"].as_u64().unwrap(), 0);
+}
+
 /// Outside a git repo, `bootstrap` and `finalize` should both exit 0
 /// silently — they're hook commands, and a Claude session opened in
 /// a non-tempyr directory must not blow up.

@@ -16,6 +16,7 @@
 //!
 //! See `docs/journal-spec.md` §9 for the full Phase 3 design.
 
+pub mod blame;
 pub mod embed;
 pub mod embed_cache;
 pub mod indexer;
@@ -29,6 +30,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+pub use blame::{BlameOptions, blame_query};
 pub use embed::{Embedder, try_shared_embedder, warn_query_embed_failure_once};
 pub use indexer::{
     IndexerReport, refresh_index, refresh_index_preferring_embeddings, refresh_index_with_embedder,

@@ -386,7 +386,7 @@ Tracked but not committed. Listed roughly in expected priority order:
      canonical Slice 3b retrieval pipeline above. -->
 
 - ~~**Range queries**~~ — *implemented post-Phase 4.* `tempyr journal range A..B` and the `journal_range` MCP tool expand the range expression via `git rev-list` and return entries whose HEAD-at-write-time fell inside it. Output shape mirrors `journal search` (same `SearchHit` struct, same token-budget pass) so consumers can render either uniformly.
-- **Path-scoped queries** — `tempyr journal blame <file>` surfaces decisions/dead-ends touching a path.
+- ~~**Path-scoped queries**~~ — *implemented post-Phase 4.* `tempyr journal blame <file>` and the `journal_blame` MCP tool surface every entry whose `files` field referenced the given path, ordered by recency with kind boost. The *why* complement of `git blame`. Reuses the existing `entry_files(entry_id, path)` table — no schema change needed.
 - **PR description block** — `tempyr journal pr` generates a markdown summary suitable for paste-into-PR.
 - **Session expansion in search** — when a result is in a session with related entries, surface the session summary inline.
 - **Stats dashboard** — `tempyr journal stats` shows kind distribution, dead-end rate, top tags by week.

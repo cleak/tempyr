@@ -223,16 +223,26 @@ mod tests {
         let outer = tempfile::tempdir().unwrap();
         let repo = outer.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        // Fail fast on any non-zero git exit so a misconfigured CI
+        // environment surfaces the real error instead of a confusing
+        // downstream panic.
         for args in [
             ["init", "--quiet", "--initial-branch=main"].as_slice(),
             ["config", "user.name", "tempyr-test"].as_slice(),
             ["config", "user.email", "tempyr-test@example.com"].as_slice(),
         ] {
-            Command::new("git")
+            let out = Command::new("git")
                 .args(args)
                 .current_dir(&repo)
                 .output()
-                .unwrap();
+                .expect("spawn git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed with status {}: stdout={:?} stderr={:?}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
         let common = repo.join(".git");
         (outer, repo, common)
