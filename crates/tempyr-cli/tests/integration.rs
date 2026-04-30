@@ -1506,6 +1506,46 @@ fn test_journal_lint_strict_exits_nonzero_on_warnings() {
         .failure();
 }
 
+/// `tempyr journal lint` outside a git repo should exit 0 with
+/// `skipped: true` and no warnings — the pre-commit hook depends on
+/// this behavior to stay harmless in unusual setups (e.g., a
+/// freshly-extracted tarball that hasn't been `git init`'d yet).
+#[test]
+fn test_journal_lint_noop_outside_git_repo() {
+    let tmp = TempDir::new().unwrap();
+    // Deliberately NO `init_git_repo` — the dir is a plain folder.
+    init_project(&tmp);
+
+    // Even with an in_progress task that would normally trip the
+    // lint, the absence of a git repo should short-circuit to a
+    // skip rather than walk the graph or open the index.
+    write_node(
+        &tmp,
+        "tasks",
+        "task-outside-git-eeeeee",
+        "---\nid: task-outside-git-eeeeee\ntype: task\nstatus: in_progress\n---\n# Outside-git task\n",
+    );
+
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "lint"])
+        .assert()
+        .success() // Never blocks: warn-only by default.
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["skipped"], true,
+        "lint outside a git repo should report skipped=true"
+    );
+    assert_eq!(
+        json["warnings"].as_array().unwrap().len(),
+        0,
+        "no warnings should be emitted when the lint is skipped"
+    );
+}
+
 /// Outside a git repo, `bootstrap` and `finalize` should both exit 0
 /// silently — they're hook commands, and a Claude session opened in
 /// a non-tempyr directory must not blow up.

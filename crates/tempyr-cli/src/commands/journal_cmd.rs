@@ -1101,48 +1101,72 @@ pub fn run_lint(
     args: LintArgs,
     json_output: bool,
 ) -> Result<()> {
-    let cwd = std::env::current_dir().context("read current directory")?;
-    let common_dir = match jpath::git_common_dir(&cwd) {
+    // Anchor on `ctx.root` (the resolved project root), NOT
+    // `current_dir()`. With `--graph-dir /elsewhere` the user's
+    // shell can sit in a different repo entirely, and the lint
+    // should follow the project. Same fix the auto-emit slices
+    // applied to status_cmd / interview_cmd.
+    let common_dir = match jpath::git_common_dir(&ctx.root) {
         Ok(c) => c,
-        Err(_) => {
-            // Outside a git repo: no journal to lint against. Same
-            // silent fallthrough as `bootstrap`/`finalize` so the
-            // pre-commit hook stays harmless in unusual setups.
-            if json_output {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "warnings": [],
-                        "skipped": true,
-                        "reason": "not in a git repository",
-                    }))
-                    .unwrap_or_default()
-                );
-            }
+        Err(tempyr_journal::JournalError::NotAGitRepo(_)) => {
+            // Outside a git repo: no journal to lint against. Silent
+            // skip so the pre-commit hook stays harmless.
+            print_lint_result(json_output, &[], true, "not in a git repository");
             return Ok(());
         }
+        Err(e) => return Err(anyhow!("git_common_dir: {e}")),
     };
-    let repo_root =
-        jpath::repo_toplevel(&cwd).map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
+    let repo_root = jpath::repo_toplevel(&ctx.root)
+        .map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
 
     // Refresh structural-only so the lint sees anything the agent
     // just logged. No query string => no embedder needed.
     tempyr_journal_index::refresh_index(&common_dir, &repo_root)
         .map_err(|e| anyhow!("refresh index: {e}"))?;
 
-    // Find every in-progress task in the graph. We tolerate a graph
-    // load failure (silent skip) because a half-broken graph
-    // shouldn't block a commit — the hook is best-effort by design.
-    let warnings = collect_lint_warnings(ctx, &common_dir).unwrap_or_default();
+    // Two-phase lookup so we can distinguish "graph is mid-edit, skip
+    // the lint and let the commit through" from "real bug — propagate".
+    let in_progress = match load_in_progress_tasks(ctx) {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            // Graph-load failure is tolerated: a half-broken graph
+            // shouldn't block a commit. Mark skipped and continue.
+            print_lint_result(json_output, &[], true, &format!("graph load failed: {e}"));
+            return Ok(());
+        }
+    };
 
+    // Index access errors past this point ARE real bugs (corrupt db,
+    // permission failure, etc.) and should propagate so `--strict`
+    // and JSON consumers see the failure rather than a misleading
+    // empty `warnings` array.
+    let warnings = count_journal_refs(&common_dir, &in_progress)?;
+
+    print_lint_result(json_output, &warnings, false, "");
+
+    if args.strict && !warnings.is_empty() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn print_lint_result(
+    json_output: bool,
+    warnings: &[LintWarning],
+    skipped: bool,
+    skip_reason: &str,
+) {
     if json_output {
+        let mut payload = serde_json::json!({
+            "warnings": warnings,
+            "skipped": skipped,
+        });
+        if skipped {
+            payload["reason"] = serde_json::Value::String(skip_reason.to_string());
+        }
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "warnings": warnings,
-                "skipped": false,
-            }))
-            .unwrap_or_default()
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
         );
     } else if warnings.is_empty() {
         // Silent on success — pre-commit hooks should be quiet on
@@ -1154,53 +1178,65 @@ pub fn run_lint(
             warnings.len(),
             if warnings.len() == 1 { "" } else { "s" }
         );
-        for w in &warnings {
+        for w in warnings {
             match w {
                 LintWarning::InProgressTaskWithoutJournal { task_id, title } => {
                     eprintln!("  task {task_id} ({title}): in_progress but has no journal entries");
+                    // The auto-emit only fires on a real status
+                    // *transition*; suggesting `tempyr status
+                    // <id> in_progress` here would be a no-op since
+                    // the task is already in_progress. Steer users
+                    // toward an action that actually adds journal
+                    // coverage.
                     eprintln!(
-                        "    fix: use `tempyr status {task_id} in_progress` (auto-emits a plan entry) or `tempyr journal log finding ...` to add context"
+                        "    fix: `tempyr journal log finding \"...\" --ref {task_id}` to add context, or transition the task through `tempyr status` from a different starting status"
                     );
                 }
             }
         }
     }
-
-    if args.strict && !warnings.is_empty() {
-        std::process::exit(1);
-    }
-    Ok(())
 }
 
-fn collect_lint_warnings(
-    ctx: &crate::config::ProjectContext,
-    common_dir: &std::path::Path,
-) -> Result<Vec<LintWarning>> {
+/// Phase 1 of the lint: load the graph and pick out tasks that are
+/// currently `in_progress`. A failure here is treated as
+/// graph-mid-edit and surfaced as a tolerated skip in the caller.
+fn load_in_progress_tasks(ctx: &crate::config::ProjectContext) -> Result<Vec<(String, String)>> {
     use tempyr_core::graph::Graph;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())
         .map_err(|e| anyhow!("load graph: {e}"))?;
 
-    let in_progress: Vec<_> = graph
+    Ok(graph
         .nodes_of_type("task")
         .into_iter()
         .filter(|n| n.status() == Some("in_progress"))
-        .collect();
+        .map(|n| (n.id().to_string(), n.title().to_string()))
+        .collect())
+}
+
+/// Phase 2 of the lint: count journal entries referencing each
+/// in-progress task. Failures here are real bugs (corrupt index,
+/// missing schema, etc.) and propagate as `Err` so `--strict` and
+/// JSON consumers see the failure instead of a silently-empty
+/// warnings array.
+fn count_journal_refs(
+    common_dir: &std::path::Path,
+    in_progress: &[(String, String)],
+) -> Result<Vec<LintWarning>> {
     if in_progress.is_empty() {
         return Ok(Vec::new());
     }
-
     let db_path = tempyr_journal_index::index_db_path(common_dir);
     let conn =
         tempyr_journal_index::schema::open(&db_path).map_err(|e| anyhow!("open index: {e}"))?;
 
     let mut warnings = Vec::new();
-    for node in in_progress {
-        let count = tempyr_journal_index::count_entries_referencing_node(&conn, node.id())
+    for (task_id, title) in in_progress {
+        let count = tempyr_journal_index::count_entries_referencing_node(&conn, task_id)
             .map_err(|e| anyhow!("count refs: {e}"))?;
         if count == 0 {
             warnings.push(LintWarning::InProgressTaskWithoutJournal {
-                task_id: node.id().to_string(),
-                title: node.title().to_string(),
+                task_id: task_id.clone(),
+                title: title.clone(),
             });
         }
     }

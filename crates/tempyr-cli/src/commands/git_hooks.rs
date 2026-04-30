@@ -8,6 +8,16 @@ use super::managed::WriteOutcome;
 const TEMPYR_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MANAGED_START: &str = "# >>> tempyr managed hook >>>";
 const MANAGED_END: &str = "# <<< tempyr managed hook <<<";
+/// Legacy marker pair. Earlier versions of this file rendered every
+/// managed hook with `tempyr managed index warmup` even when the
+/// hook didn't do index warmup; the rename to a generic "hook"
+/// marker happened when pre-commit landed (lint v2 backlog #8). We
+/// keep the legacy pair recognized here so an upgrade replaces the
+/// old block in place rather than appending a new one alongside it
+/// (which would leave the user with two managed sections in their
+/// hook). All *writes* use the current markers.
+const LEGACY_MANAGED_START: &str = "# >>> tempyr managed index warmup >>>";
+const LEGACY_MANAGED_END: &str = "# <<< tempyr managed index warmup <<<";
 const SHEBANG: &str = "#!/bin/sh\n";
 
 struct GitHookDef {
@@ -196,17 +206,30 @@ fn merge_hook_content(existing: Option<&str>, managed_block: &str) -> (String, W
 }
 
 fn managed_block_range(content: &str) -> Option<(usize, usize)> {
-    let start = content.find(MANAGED_START)?;
-    let end_marker = content[start..].find(MANAGED_END)?;
-    let end = start + end_marker + MANAGED_END.len();
-    let end = if content[end..].starts_with("\r\n") {
-        end + 2
-    } else if content[end..].starts_with('\n') {
-        end + 1
-    } else {
-        end
-    };
-    Some((start, end))
+    // Try the current markers first, then fall back to the legacy
+    // pair so an upgrade replaces the old block in place. A future
+    // marker rename can extend this list the same way.
+    for (start_marker, end_marker_str) in [
+        (MANAGED_START, MANAGED_END),
+        (LEGACY_MANAGED_START, LEGACY_MANAGED_END),
+    ] {
+        let Some(start) = content.find(start_marker) else {
+            continue;
+        };
+        let Some(end_offset) = content[start..].find(end_marker_str) else {
+            continue;
+        };
+        let end = start + end_offset + end_marker_str.len();
+        let end = if content[end..].starts_with("\r\n") {
+            end + 2
+        } else if content[end..].starts_with('\n') {
+            end + 1
+        } else {
+            end
+        };
+        return Some((start, end));
+    }
+    None
 }
 
 fn merge_existing_hook_content(content: &str, managed_block: &str) -> (String, WriteOutcome) {
@@ -303,7 +326,12 @@ impl ManagedBlockStatus {
 fn managed_block_status(content: &str, managed_block: &str) -> Option<ManagedBlockStatus> {
     let (start, end) = managed_block_range(content)?;
     let extracted = &content[start..end];
-    let has_additional_blocks = content[end..].contains(MANAGED_START);
+    // Detect *any* additional managed block — current or legacy
+    // markers — past this one. Without the legacy check, an upgrade
+    // from a hook that already has both markers would treat the
+    // first as singular and miss the second.
+    let has_additional_blocks =
+        content[end..].contains(MANAGED_START) || content[end..].contains(LEGACY_MANAGED_START);
 
     Some(ManagedBlockStatus {
         range: (start, end),
@@ -651,6 +679,28 @@ mod tests {
         assert!(managed.contains("if [ -d .tempyr ] || [ -f .tempyr-redirect ]; then"));
         assert!(!managed.contains("exit 0"));
         assert!(!managed.contains("/tmp/tempyr"));
+    }
+
+    #[test]
+    fn merge_hook_content_upgrades_legacy_marker_in_place() {
+        // Earlier versions used `tempyr managed index warmup` markers.
+        // An upgrade must REPLACE the legacy block with the current
+        // one, NOT append a second managed section alongside it.
+        let legacy_block = format!(
+            "{LEGACY_MANAGED_START}\n# tempyr version: 0.1.0\nold body line\n{LEGACY_MANAGED_END}\n"
+        );
+        let existing = format!("#!/bin/sh\n{legacy_block}echo after\n");
+        let managed = render_managed_block(&GIT_HOOKS[0]);
+
+        let (content, outcome) = merge_hook_content(Some(&existing), &managed);
+
+        assert_eq!(outcome, WriteOutcome::Updated);
+        // Exactly one managed-block start marker (the current one),
+        // and the legacy markers should be gone entirely.
+        assert_eq!(content.matches(MANAGED_START).count(), 1);
+        assert!(!content.contains(LEGACY_MANAGED_START));
+        assert!(!content.contains(LEGACY_MANAGED_END));
+        assert!(content.contains("echo after"));
     }
 
     #[test]
