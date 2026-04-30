@@ -34,7 +34,7 @@ pub use indexer::{
     IndexerReport, refresh_index, refresh_index_preferring_embeddings, refresh_index_with_embedder,
 };
 pub use lookup::{count_entries, get_entry};
-pub use range::{RangeOptions, range_query};
+pub use range::{MAX_RANGE_COMMITS, RangeOptions, range_query};
 pub use rerank::{Reranker, try_shared_reranker, warn_query_rerank_failure_once};
 pub use search::{ScoreBreakdown, SearchHit, SearchOptions, search};
 

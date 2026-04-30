@@ -242,6 +242,19 @@ pub struct LinearDryRunParams {
 /// Errors get surfaced verbatim so the caller can correct a bad
 /// range string.
 fn run_git_rev_list(repo_root: &Path, expr: &str) -> Result<Vec<String>, String> {
+    // Pre-validate the expansion size with `git rev-list --count` so
+    // a pathological range expression (e.g. `--all` on a large repo)
+    // gets rejected with a clean error before we collect tens of
+    // thousands of SHAs into memory and the library silently
+    // truncates them downstream. Cheap — git counts without writing
+    // SHAs.
+    let count = git_rev_list_count(repo_root, expr)?;
+    if count > tempyr_journal_index::MAX_RANGE_COMMITS {
+        return Err(format!(
+            "range `{expr}` expands to {count} commits, exceeds limit of {} — narrow the range (e.g. `A..B` instead of `--all`)",
+            tempyr_journal_index::MAX_RANGE_COMMITS
+        ));
+    }
     let out = std::process::Command::new("git")
         .args(["rev-list", expr])
         .current_dir(repo_root)
@@ -258,6 +271,31 @@ fn run_git_rev_list(repo_root: &Path, expr: &str) -> Result<Vec<String>, String>
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect())
+}
+
+/// Cheap pre-validator for `run_git_rev_list`. Runs `git rev-list
+/// --count <expr>` and parses the integer result.
+fn git_rev_list_count(repo_root: &Path, expr: &str) -> Result<usize, String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-list", "--count", expr])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| format!("git rev-list --count: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "git rev-list --count {expr} failed: {}",
+            stderr.trim()
+        ));
+    }
+    let stdout = String::from_utf8(out.stdout)
+        .map_err(|_| "git rev-list --count emitted non-UTF8".to_string())?;
+    stdout.trim().parse::<usize>().map_err(|e| {
+        format!(
+            "git rev-list --count returned non-integer `{}`: {e}",
+            stdout.trim()
+        )
+    })
 }
 
 fn default_2() -> u64 {

@@ -917,6 +917,18 @@ pub fn run_range(args: RangeArgs, json_output: bool) -> Result<()> {
 /// expression into a concrete list of commit SHAs. Returns the SHAs
 /// in the order git emitted them (newest first by default).
 fn git_rev_list(repo_root: &std::path::Path, expr: &str) -> Result<Vec<String>> {
+    // Pre-validate the expansion size with `git rev-list --count`.
+    // A pathological range (e.g. `--all` on a large repo) would
+    // otherwise expand into tens of thousands of SHAs that
+    // `range_query` would silently truncate to MAX_RANGE_COMMITS.
+    // Better to fail clean here with a message the user can act on.
+    let count = git_rev_list_count(repo_root, expr)?;
+    if count > tempyr_journal_index::MAX_RANGE_COMMITS {
+        return Err(anyhow!(
+            "range `{expr}` expands to {count} commits, exceeds limit of {} — narrow the range (e.g. `A..B` instead of `--all`)",
+            tempyr_journal_index::MAX_RANGE_COMMITS
+        ));
+    }
     let out = std::process::Command::new("git")
         .args(["rev-list", expr])
         .current_dir(repo_root)
@@ -932,6 +944,28 @@ fn git_rev_list(repo_root: &std::path::Path, expr: &str) -> Result<Vec<String>> 
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect())
+}
+
+fn git_rev_list_count(repo_root: &std::path::Path, expr: &str) -> Result<usize> {
+    let out = std::process::Command::new("git")
+        .args(["rev-list", "--count", expr])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| anyhow!("git rev-list --count: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(anyhow!(
+            "git rev-list --count {expr} failed: {}",
+            stderr.trim()
+        ));
+    }
+    let stdout = String::from_utf8(out.stdout).context("git rev-list --count emitted non-UTF8")?;
+    stdout.trim().parse::<usize>().map_err(|e| {
+        anyhow!(
+            "git rev-list --count returned non-integer `{}`: {e}",
+            stdout.trim()
+        )
+    })
 }
 
 #[derive(Args, Debug)]

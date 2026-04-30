@@ -24,6 +24,15 @@ use crate::search::{
     normalize_for_dedup, recency_boost,
 };
 
+/// Maximum number of commit SHAs `range_query` will use in its
+/// `IN (...)` filter before truncating. SQLite's default parameter
+/// cap is 999 and the query also binds kinds + limit, so 900 leaves
+/// safe headroom. Exposed publicly so CLI / MCP callers can
+/// pre-validate via `git rev-list --count` before doing the heavy
+/// lifting and return a clean error rather than relying on the
+/// library's silent-truncation guard.
+pub const MAX_RANGE_COMMITS: usize = 900;
+
 /// Caller-supplied knobs for one range query. Mirrors [`SearchOptions`]
 /// where it makes sense (kinds, limit, token_budget) and drops the
 /// query-string concepts (FTS, vector, rerank) that don't apply.
@@ -74,10 +83,15 @@ pub fn range_query(conn: &Connection, opts: &RangeOptions) -> Result<Vec<SearchH
     // Build the IN-list. SQLite's default parameter cap is 999;
     // that's well above any realistic `git rev-list A..B` output for
     // a single-feature branch, but truncate defensively rather than
-    // failing the query mid-flight on a pathological caller.
-    const MAX_PARAMS: usize = 900; // leave headroom for kinds / limit
-    let commits: &[String] = if opts.commits.len() > MAX_PARAMS {
-        &opts.commits[..MAX_PARAMS]
+    // failing the query mid-flight on a pathological caller. Callers
+    // are expected to pre-validate via `git rev-list --count` and
+    // surface a clean error to the user; this guard is the last
+    // resort, so we emit a stderr warning when it fires (warn-once
+    // per process so it doesn't spam if the caller skips
+    // pre-validation in a tight loop).
+    let commits: &[String] = if opts.commits.len() > MAX_RANGE_COMMITS {
+        warn_truncation_once(opts.commits.len());
+        &opts.commits[..MAX_RANGE_COMMITS]
     } else {
         &opts.commits
     };
@@ -174,6 +188,22 @@ pub fn range_query(conn: &Connection, opts: &RangeOptions) -> Result<Vec<SearchH
 
     let truncated = apply_token_budget(deduped, opts.token_budget);
     Ok(truncated.into_iter().take(opts.limit).collect())
+}
+
+/// One-shot stderr warning when `range_query` had to truncate the
+/// commit list. Mirrors the warn-once pattern used by the embedder
+/// and reranker fallback paths. Callers should normally pre-validate
+/// the count and never trip this; the warning surfaces test-level
+/// or scripted-misuse cases where they didn't.
+fn warn_truncation_once(actual: usize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "warning: tempyr journal range commit list truncated from {actual} to {MAX_RANGE_COMMITS}; \
+             pre-validate with `git rev-list --count` to avoid silent truncation"
+        );
+    }
 }
 
 #[cfg(test)]
