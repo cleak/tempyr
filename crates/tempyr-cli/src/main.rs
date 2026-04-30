@@ -418,6 +418,13 @@ pub enum JournalAction {
     /// `A..B`, `HEAD~10..HEAD`, `feature-branch..main`, etc.
     Range(commands::journal_cmd::RangeArgs),
 
+    /// Surface every journal entry that referenced a given file path.
+    /// Pairs with `git blame` (which shows the *who/when* of each
+    /// line): `tempyr journal blame <file>` shows the *why* — every
+    /// decision, dead-end, and finding the agent recorded while
+    /// touching that file.
+    Blame(commands::journal_cmd::BlameArgs),
+
     /// Ensure the journal directory layout exists. Idempotent. Designed
     /// for the `SessionStart` Claude Code hook so a freshly-opened
     /// session has a place to write before any other tool runs.
@@ -794,6 +801,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             JournalAction::Index(args) => commands::journal_cmd::run_index(args, cli.json),
             JournalAction::Search(args) => commands::journal_cmd::run_search(args, cli.json),
             JournalAction::Range(args) => commands::journal_cmd::run_range(args, cli.json),
+            JournalAction::Blame(args) => commands::journal_cmd::run_blame(args, cli.json),
             JournalAction::Bootstrap(args) => commands::journal_cmd::run_bootstrap(args, cli.json),
             JournalAction::Finalize(args) => commands::journal_cmd::run_finalize(args, cli.json),
             JournalAction::Show(args) => commands::journal_cmd::run_show(args, cli.json),

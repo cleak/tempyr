@@ -1267,6 +1267,87 @@ fn test_journal_range_filters_by_commit_range() {
     assert!(!summaries.iter().any(|s| s.contains("entry one")));
 }
 
+/// `tempyr journal blame <file>` should surface every entry whose
+/// `files` field includes the given path, regardless of which
+/// commit was checked out at log time.
+#[test]
+fn test_journal_blame_finds_entries_referencing_path() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    // Configure git user so any commits succeed in CI.
+    for args in [
+        ["config", "user.name", "tempyr-test"].as_slice(),
+        ["config", "user.email", "tempyr-test@example.com"].as_slice(),
+    ] {
+        let out = ProcessCommand::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(out.success());
+    }
+
+    // Real files so the writer's path normalizer treats them as
+    // worktree-rooted.
+    fs::write(tmp.path().join("auth.rs"), "fn auth() {}").unwrap();
+    fs::write(tmp.path().join("api.rs"), "fn api() {}").unwrap();
+
+    // One entry tagged with auth.rs, another with api.rs.
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "journal",
+            "log",
+            "finding",
+            "tracked-down a token leak in the auth flow",
+            "--file",
+            "auth.rs",
+        ])
+        .assert()
+        .success();
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "journal",
+            "log",
+            "finding",
+            "noted the api response shape needs work",
+            "--file",
+            "api.rs",
+        ])
+        .assert()
+        .success();
+
+    // Blame for auth.rs should return only the first entry.
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "blame", "auth.rs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let count = json["count"].as_u64().unwrap();
+    assert_eq!(count, 1, "expected exactly one entry referencing auth.rs");
+    let summary = json["hits"][0]["entry"]["summary"].as_str().unwrap();
+    assert!(summary.contains("token leak"));
+
+    // Unknown path → empty.
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "blame", "nonexistent.rs"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["count"].as_u64().unwrap(), 0);
+}
+
 /// Outside a git repo, `bootstrap` and `finalize` should both exit 0
 /// silently — they're hook commands, and a Claude session opened in
 /// a non-tempyr directory must not blow up.

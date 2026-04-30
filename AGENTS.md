@@ -150,6 +150,7 @@ Before re-deriving something, search the journal:
 - `journal_search "<query>"` -- hybrid retrieval (BM25 + vec0 RRF + recency + kind boost). Pass `--rerank` to run a BGE cross-encoder over the top 50 RRF candidates and re-sort by relevance -- better on close calls (e.g. lexically distant but semantically on-topic). Filter by `--kind dead_end` to surface "approaches that didn't work."
 - `journal_get <id>` -- fetch one entry by id, transparently refreshes the index on a cache miss.
 - `journal_range "<A..B>"` -- list entries written while one of the in-range commits was checked out. Pairs with `git log A..B` for "what reasoning happened during this span of work?" Accepts any range expression `git rev-list` understands (`A..B`, `HEAD~10..HEAD`, `feature..main`).
+- `journal_blame <file>` -- every entry whose `files` field referenced this path. The *why* complement of `git blame`'s *who/when*: surfaces decisions, dead-ends, and findings tied to a specific file. Highest signal when the file accumulated several dead-ends before its current shape.
 
 ### Session lifecycle
 

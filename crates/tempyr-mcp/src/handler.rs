@@ -786,6 +786,27 @@ pub struct JournalSearchParams {
     pub rerank: Option<bool>,
 }
 
+/// Parameters for the `journal_blame` MCP tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalBlameParams {
+    /// File path. Repo-relative paths use forward-slash; absolute
+    /// paths under the worktree are normalized to that form.
+    /// Backslashes are converted to forward-slash to match the
+    /// on-disk format the indexer stores.
+    pub path: String,
+    /// Restrict to one or more kinds. Snake_case strings (`plan`,
+    /// `finding`, `decision`, `dead_end`, etc.). Empty/absent =
+    /// no filter. Useful filters: `["dead_end", "decision"]` for
+    /// the highest-signal reasoning about a file.
+    pub kinds: Option<Vec<String>>,
+    /// Cap on returned hits. Default 50.
+    pub limit: Option<usize>,
+    /// Token budget for the response payload. Default 4000.
+    pub token_budget: Option<usize>,
+    /// Include a per-hit recency / kind breakdown. Default false.
+    pub explain: Option<bool>,
+}
+
 /// Parameters for the `journal_range` MCP tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct JournalRangeParams {
@@ -2368,6 +2389,69 @@ impl TempyrServer {
 
         serde_json::to_string_pretty(&json!({
             "query": opts.query,
+            "count": hits.len(),
+            "hits": hits,
+        }))
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "journal_blame",
+        description = "Surface every journal entry that referenced a given file path. Pairs naturally with `git blame`: that command shows the *who/when* of each line, this tool shows the *why* — every decision, dead-end, and finding the agent recorded while touching that file. Particularly useful when the file accumulated several dead-ends before its current shape; those are the highest-signal entries for picking up the same code. Filter by `kinds` (e.g., `[\"dead_end\", \"decision\"]`) to focus on the high-value entries. Returns hits ordered by timestamp descending.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn journal_blame(
+        &self,
+        Parameters(p): Parameters<JournalBlameParams>,
+    ) -> Result<String, String> {
+        let (graph_dir, _gf_dir, _schema) = self.find_project()?;
+        let project_root = graph_dir
+            .parent()
+            .ok_or_else(|| "Failed to resolve project root from graph dir".to_string())?
+            .to_path_buf();
+        let common_dir = jpath::git_common_dir(&project_root).map_err(|e| e.to_string())?;
+        let repo_root = jpath::repo_toplevel(&project_root).map_err(|e| e.to_string())?;
+        let db_path = tempyr_journal_index::index_db_path(&common_dir);
+
+        // Refresh once before querying so an agent can see entries
+        // they just wrote via `journal_log`.
+        tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+            .map_err(|e| format!("journal index refresh failed: {e}"))?;
+
+        // Normalize the user's path the same way the writer
+        // normalized entry.files at log time. The MCP server's cwd
+        // is whatever launched it, so pass repo_root as both
+        // worktree_top and cwd here — that's the canonical
+        // reference frame for the project.
+        let normalized = jpath::resolve_file_path(&p.path, &repo_root, Some(&repo_root));
+
+        let mut kinds: Vec<Kind> = Vec::new();
+        if let Some(ks) = &p.kinds {
+            for s in ks {
+                kinds.push(Kind::parse_helpful(s).map_err(|e| e.to_string())?);
+            }
+        }
+
+        let opts = tempyr_journal_index::BlameOptions {
+            path: normalized.clone(),
+            kinds,
+            limit: p.limit.unwrap_or(50),
+            token_budget: p
+                .token_budget
+                .unwrap_or(tempyr_journal_index::search::DEFAULT_TOKEN_BUDGET),
+            explain: p.explain.unwrap_or(false),
+        };
+
+        let conn = tempyr_journal_index::schema::open(&db_path).map_err(|e| e.to_string())?;
+        let hits = tempyr_journal_index::blame_query(&conn, &opts).map_err(|e| e.to_string())?;
+
+        serde_json::to_string_pretty(&json!({
+            "path": normalized,
             "count": hits.len(),
             "hits": hits,
         }))
