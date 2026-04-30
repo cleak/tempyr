@@ -25,6 +25,7 @@ pub mod range;
 pub mod rerank;
 pub mod schema;
 pub mod search;
+pub mod stats;
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +40,9 @@ pub use lookup::{count_entries, count_entries_referencing_node, get_entry};
 pub use range::{MAX_RANGE_COMMITS, RangeOptions, range_query};
 pub use rerank::{Reranker, try_shared_reranker, warn_query_rerank_failure_once};
 pub use search::{ScoreBreakdown, SearchHit, SearchOptions, search};
+pub use stats::{
+    AgentCount, DayCount, FileCount, KindCount, StatsOptions, StatsReport, TagCount, compute_stats,
+};
 
 /// Resolved location of `index.db` for a given git common dir.
 pub fn index_db_path(common_dir: &Path) -> PathBuf {

@@ -1244,6 +1244,171 @@ fn count_journal_refs(
 }
 
 #[derive(Args, Debug)]
+pub struct StatsCmdArgs {
+    /// Restrict aggregates to entries newer than this many days.
+    /// Affects every section except the activity histogram (which
+    /// has its own window). Default: no filter (all of history).
+    /// Capped at 36,500 (100 years) so a typo can't trigger
+    /// pathological cutoff math; should be sufficient for any real
+    /// project.
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u32).range(
+            i64::from(tempyr_journal_index::stats::MIN_SINCE_DAYS)..=
+            i64::from(tempyr_journal_index::stats::MAX_SINCE_DAYS)
+        )
+    )]
+    pub since_days: Option<u32>,
+    /// Cap the top-tags list at this many rows. Default 20.
+    #[arg(
+        long,
+        default_value = "20",
+        value_parser = clap::value_parser!(u32).range(
+            i64::from(tempyr_journal_index::stats::MIN_TOP_LIST)..=
+            i64::from(tempyr_journal_index::stats::MAX_TOP_LIST)
+        )
+    )]
+    pub top_tags: u32,
+    /// Cap the top-files list at this many rows. Default 20.
+    #[arg(
+        long,
+        default_value = "20",
+        value_parser = clap::value_parser!(u32).range(
+            i64::from(tempyr_journal_index::stats::MIN_TOP_LIST)..=
+            i64::from(tempyr_journal_index::stats::MAX_TOP_LIST)
+        )
+    )]
+    pub top_files: u32,
+    /// Days of activity histogram to render, counting back from
+    /// today. Default 30.
+    #[arg(
+        long,
+        default_value = "30",
+        value_parser = clap::value_parser!(u32).range(
+            i64::from(tempyr_journal_index::stats::MIN_ACTIVITY_WINDOW_DAYS)..=
+            i64::from(tempyr_journal_index::stats::MAX_ACTIVITY_WINDOW_DAYS)
+        )
+    )]
+    pub activity_window_days: u32,
+}
+
+pub fn run_stats(args: StatsCmdArgs, json_output: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("read current directory")?;
+    let common_dir =
+        jpath::git_common_dir(&cwd).map_err(|e| anyhow!("not in a git repository: {e}"))?;
+    let repo_root =
+        jpath::repo_toplevel(&cwd).map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
+
+    // Refresh structural-only so the stats include anything the
+    // agent just logged. No query string => no embedder needed.
+    tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+        .map_err(|e| anyhow!("refresh index: {e}"))?;
+
+    let opts = tempyr_journal_index::StatsOptions {
+        since_days: args.since_days,
+        top_tags: args.top_tags as usize,
+        top_files: args.top_files as usize,
+        activity_window_days: args.activity_window_days,
+    };
+    let db_path = tempyr_journal_index::index_db_path(&common_dir);
+    let conn =
+        tempyr_journal_index::schema::open(&db_path).map_err(|e| anyhow!("open index: {e}"))?;
+    let report =
+        tempyr_journal_index::compute_stats(&conn, &opts).map_err(|e| anyhow!("stats: {e}"))?;
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
+        return Ok(());
+    }
+    render_stats_text(&report, &args);
+    Ok(())
+}
+
+fn render_stats_text(report: &tempyr_journal_index::StatsReport, args: &StatsCmdArgs) {
+    println!("Journal stats");
+    if let Some(d) = args.since_days {
+        println!("  filter: last {d} day(s)");
+    }
+    println!(
+        "  total entries:  {} (across {} session(s), {} agent(s))",
+        report.total_entries, report.total_sessions, report.total_agents
+    );
+    if report.total_entries > 0 {
+        let provisional_pct =
+            100.0 * report.provisional_entries as f64 / report.total_entries as f64;
+        let final_pct = 100.0 * report.final_entries as f64 / report.total_entries as f64;
+        println!(
+            "  provisional:    {} ({:.1}%)   final: {} ({:.1}%)",
+            report.provisional_entries, provisional_pct, report.final_entries, final_pct,
+        );
+    }
+    if let Some(ratio) = report.dead_end_ratio {
+        println!(
+            "  dead-end ratio: {:.1}% (dead_end / (decision + dead_end))",
+            ratio * 100.0
+        );
+        if ratio < 0.1 {
+            println!("    note: low dead-end rate often means agents aren't logging failures");
+        }
+    }
+
+    if !report.kind_distribution.is_empty() {
+        println!();
+        println!("Kind distribution");
+        let total = report.total_entries.max(1);
+        for k in &report.kind_distribution {
+            let pct = 100.0 * k.count as f64 / total as f64;
+            println!("  {:<11} {:>6}   {:>5.1}%", k.kind, k.count, pct);
+        }
+    }
+
+    if !report.sessions_per_agent.is_empty() {
+        println!();
+        println!("Sessions per agent");
+        for a in &report.sessions_per_agent {
+            println!("  {:<20} {:>6}", a.agent, a.session_count);
+        }
+    }
+
+    if !report.top_tags.is_empty() {
+        println!();
+        println!("Top tags");
+        for t in &report.top_tags {
+            println!("  {:<30} {:>6}", t.tag, t.count);
+        }
+    }
+
+    if !report.top_files.is_empty() {
+        println!();
+        println!("Top files");
+        for f in &report.top_files {
+            println!("  {:<50} {:>6}", f.path, f.count);
+        }
+    }
+
+    if !report.activity_per_day.is_empty() {
+        println!();
+        println!("Activity (last {} days)", report.activity_per_day.len());
+        // Find max so we can scale a tiny ASCII bar.
+        let max = report
+            .activity_per_day
+            .iter()
+            .map(|d| d.count)
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        for d in &report.activity_per_day {
+            let bar_len = ((d.count as f64 / max as f64) * 30.0).round() as usize;
+            let bar: String = std::iter::repeat_n('█', bar_len).collect();
+            println!("  {} {:>5}  {}", d.date, d.count, bar);
+        }
+    }
+}
+
+#[derive(Args, Debug)]
 pub struct ShowArgs {
     /// Entry id (e.g. `j-4b511f6f9cf9425b906ae90c31bd3367`).
     pub id: String,

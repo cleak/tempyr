@@ -1506,6 +1506,76 @@ fn test_journal_lint_strict_exits_nonzero_on_warnings() {
         .failure();
 }
 
+/// `tempyr journal stats --json` produces aggregate counts after
+/// a few entries are logged. Verifies kind distribution + total
+/// counts; the activity-histogram and top-files paths are exercised
+/// in the journal-index unit tests.
+#[test]
+fn test_journal_stats_aggregates_match() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    // Three entries: 2 findings + 1 dead_end. Dead-end ratio
+    // should land at 1.0 (one dead_end vs zero decisions).
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "journal",
+            "log",
+            "finding",
+            "first finding entry that has the right length",
+        ])
+        .assert()
+        .success();
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "journal",
+            "log",
+            "finding",
+            "second finding entry that has the right length",
+        ])
+        .assert()
+        .success();
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "journal",
+            "log",
+            "dead_end",
+            "tried something that didn't pan out as hoped",
+            "--detail",
+            &"x".repeat(60),
+            "--approach",
+            "tried option A",
+            "--failure-mode",
+            "hit a wall",
+        ])
+        .assert()
+        .success();
+
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "stats"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["total_entries"], 3);
+    let kinds = json["kind_distribution"].as_array().unwrap();
+    let by_kind: std::collections::HashMap<&str, u64> = kinds
+        .iter()
+        .map(|k| (k["kind"].as_str().unwrap(), k["count"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(by_kind.get("finding").copied(), Some(2));
+    assert_eq!(by_kind.get("dead_end").copied(), Some(1));
+    // dead_end_ratio = 1 dead_end / (0 decisions + 1 dead_end) = 1.0
+    assert!((json["dead_end_ratio"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+}
+
 /// `tempyr journal lint` outside a git repo should exit 0 with
 /// `skipped: true` and no warnings — the pre-commit hook depends on
 /// this behavior to stay harmless in unusual setups (e.g., a
