@@ -1168,6 +1168,105 @@ fn test_journal_bootstrap_and_finalize_lifecycle() {
     );
 }
 
+/// `tempyr journal range A..B` should expand the range via
+/// `git rev-list` and return entries whose head fell inside it.
+#[test]
+fn test_journal_range_filters_by_commit_range() {
+    let tmp = TempDir::new().unwrap();
+    init_git_repo(tmp.path());
+    init_project(&tmp);
+
+    // Configure git user so commits succeed in CI environments.
+    for args in [
+        ["config", "user.name", "tempyr-test"].as_slice(),
+        ["config", "user.email", "tempyr-test@example.com"].as_slice(),
+    ] {
+        let out = ProcessCommand::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(out.success());
+    }
+
+    let make_commit = |msg: &str, file: &str| {
+        fs::write(tmp.path().join(file), msg).unwrap();
+        let out = ProcessCommand::new("git")
+            .args(["add", file])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(out.success());
+        let out = ProcessCommand::new("git")
+            .args(["commit", "-q", "-m", msg])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(out.success());
+        let out = ProcessCommand::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+
+    let log_entry = |summary: &str| {
+        tempyr()
+            .current_dir(tmp.path())
+            .args(["journal", "log", "finding", summary])
+            .assert()
+            .success();
+    };
+
+    // Three commits, each with a journal entry written while it
+    // was HEAD. After each entry, finalize the session so the next
+    // log opens a fresh one against the new HEAD.
+    let sha1 = make_commit("first commit", "a.txt");
+    log_entry("entry one with enough characters to satisfy the validator");
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["journal", "finalize", "--quiet"])
+        .assert()
+        .success();
+    // Sleep so the next session id (second-precision) doesn't collide.
+    std::thread::sleep(Duration::from_millis(1100));
+
+    let _sha2 = make_commit("second commit", "b.txt");
+    log_entry("entry two with enough characters to satisfy the validator");
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["journal", "finalize", "--quiet"])
+        .assert()
+        .success();
+    std::thread::sleep(Duration::from_millis(1100));
+
+    let sha3 = make_commit("third commit", "c.txt");
+    log_entry("entry three with enough characters to satisfy the validator");
+
+    // `sha1..sha3` excludes sha1 itself but includes sha2 and sha3.
+    let output = tempyr()
+        .current_dir(tmp.path())
+        .args(["--json", "journal", "range", &format!("{sha1}..{sha3}")])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let count = json["count"].as_u64().unwrap();
+    assert_eq!(count, 2, "range should include 2 entries (commits 2 and 3)");
+    let summaries: Vec<&str> = json["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["entry"]["summary"].as_str().unwrap())
+        .collect();
+    assert!(summaries.iter().any(|s| s.contains("entry two")));
+    assert!(summaries.iter().any(|s| s.contains("entry three")));
+    assert!(!summaries.iter().any(|s| s.contains("entry one")));
+}
+
 /// Outside a git repo, `bootstrap` and `finalize` should both exit 0
 /// silently — they're hook commands, and a Claude session opened in
 /// a non-tempyr directory must not blow up.

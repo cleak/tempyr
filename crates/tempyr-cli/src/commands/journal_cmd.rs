@@ -811,6 +811,164 @@ pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
 }
 
 #[derive(Args, Debug)]
+pub struct RangeArgs {
+    /// Range expression understood by `git rev-list`: `A..B`,
+    /// `HEAD~10..HEAD`, `feature..main`, etc. The `A..B` form is
+    /// the same one `git log A..B` accepts.
+    pub range: String,
+    /// Restrict to one or more kinds (repeatable).
+    #[arg(long = "kind")]
+    pub kinds: Vec<String>,
+    /// Cap on returned hits (default 50).
+    #[arg(long, default_value = "50")]
+    pub limit: usize,
+    /// Token budget for the response. Detail bodies are truncated to fit.
+    #[arg(long)]
+    pub token_budget: Option<usize>,
+    /// Show per-hit score breakdown (recency / kind only — no
+    /// query-string signal in range mode).
+    #[arg(long)]
+    pub explain: bool,
+}
+
+pub fn run_range(args: RangeArgs, json_output: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("read current directory")?;
+    let common_dir =
+        jpath::git_common_dir(&cwd).map_err(|e| anyhow!("not in a git repository: {e}"))?;
+    let repo_root =
+        jpath::repo_toplevel(&cwd).map_err(|e| anyhow!("could not resolve repo top-level: {e}"))?;
+
+    // Refresh first so the range view sees anything the agent just
+    // logged. Use the structural-only path — vector embeddings don't
+    // affect range queries (no query-string signal in this mode), so
+    // skipping the embedder load keeps the command fast.
+    tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+        .map_err(|e| anyhow!("refresh index: {e}"))?;
+
+    // Expand the range expression via `git rev-list`. The user's
+    // input is forwarded unchanged so anything `git log A..B`
+    // accepts also works here. We pin `--no-merges` off (default
+    // includes merges) — for journal range we want every commit.
+    let commits = git_rev_list(&repo_root, &args.range)?;
+
+    let mut kinds: Vec<Kind> = Vec::new();
+    for s in &args.kinds {
+        kinds.push(Kind::parse_helpful(s).map_err(|e| anyhow!(format!("{e}")))?);
+    }
+
+    let opts = tempyr_journal_index::RangeOptions {
+        commits,
+        kinds,
+        limit: args.limit,
+        token_budget: args
+            .token_budget
+            .unwrap_or(tempyr_journal_index::search::DEFAULT_TOKEN_BUDGET),
+        explain: args.explain,
+    };
+
+    let db_path = tempyr_journal_index::index_db_path(&common_dir);
+    let conn =
+        tempyr_journal_index::schema::open(&db_path).map_err(|e| anyhow!("open index: {e}"))?;
+    let hits =
+        tempyr_journal_index::range_query(&conn, &opts).map_err(|e| anyhow!("range: {e}"))?;
+
+    if json_output {
+        let payload = serde_json::json!({
+            "range": args.range,
+            "count": hits.len(),
+            "hits": hits,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+    } else if hits.is_empty() {
+        println!("no entries in range {}", args.range);
+    } else {
+        for (i, hit) in hits.iter().enumerate() {
+            let entry = &hit.entry;
+            println!(
+                "[{:>2}] {:<10} {} ({})",
+                i + 1,
+                entry.kind.as_str(),
+                entry.id,
+                entry.ts.format("%Y-%m-%d")
+            );
+            println!("     {}", entry.summary);
+            if let Some(detail) = &entry.detail
+                && !detail.is_empty()
+            {
+                println!("     {}", detail.lines().next().unwrap_or(detail));
+            }
+            if args.explain
+                && let Some(b) = &hit.explain
+            {
+                println!(
+                    "     score: {:.3} (recency={:.3}, kind={:.3})",
+                    b.total, b.recency, b.kind
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shell out to `git rev-list <expr>` to expand the user's range
+/// expression into a concrete list of commit SHAs. Returns the SHAs
+/// in the order git emitted them (newest first by default).
+fn git_rev_list(repo_root: &std::path::Path, expr: &str) -> Result<Vec<String>> {
+    // Pre-validate the expansion size with `git rev-list --count`.
+    // A pathological range (e.g. `--all` on a large repo) would
+    // otherwise expand into tens of thousands of SHAs that
+    // `range_query` would silently truncate to MAX_RANGE_COMMITS.
+    // Better to fail clean here with a message the user can act on.
+    let count = git_rev_list_count(repo_root, expr)?;
+    if count > tempyr_journal_index::MAX_RANGE_COMMITS {
+        return Err(anyhow!(
+            "range `{expr}` expands to {count} commits, exceeds limit of {} — narrow the range (e.g. `A..B` instead of `--all`)",
+            tempyr_journal_index::MAX_RANGE_COMMITS
+        ));
+    }
+    let out = std::process::Command::new("git")
+        .args(["rev-list", expr])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| anyhow!("git rev-list: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(anyhow!("git rev-list {expr} failed: {}", stderr.trim()));
+    }
+    let stdout = String::from_utf8(out.stdout).context("git rev-list emitted non-UTF8")?;
+    Ok(stdout
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
+fn git_rev_list_count(repo_root: &std::path::Path, expr: &str) -> Result<usize> {
+    let out = std::process::Command::new("git")
+        .args(["rev-list", "--count", expr])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| anyhow!("git rev-list --count: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(anyhow!(
+            "git rev-list --count {expr} failed: {}",
+            stderr.trim()
+        ));
+    }
+    let stdout = String::from_utf8(out.stdout).context("git rev-list --count emitted non-UTF8")?;
+    stdout.trim().parse::<usize>().map_err(|e| {
+        anyhow!(
+            "git rev-list --count returned non-integer `{}`: {e}",
+            stdout.trim()
+        )
+    })
+}
+
+#[derive(Args, Debug)]
 pub struct ShowArgs {
     /// Entry id (e.g. `j-4b511f6f9cf9425b906ae90c31bd3367`).
     pub id: String,

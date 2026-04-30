@@ -648,7 +648,7 @@ fn push_filters(sql: &mut String, bind: &mut Vec<Value>, opts: &SearchOptions) -
 /// Map of `kind -> additive boost`. Decisions and dead-ends are the
 /// queries we expect agents to issue most often ("did anyone try
 /// approach X?"), so we tilt the ranking toward them.
-fn kind_boost(kind: Kind) -> f64 {
+pub(crate) fn kind_boost(kind: Kind) -> f64 {
     match kind {
         Kind::Decision | Kind::DeadEnd => 0.5,
         Kind::Finding => 0.3,
@@ -660,7 +660,7 @@ fn kind_boost(kind: Kind) -> f64 {
 
 /// Exponential decay with a 14-day half-life. Same-day → `+RECENCY_WEIGHT`;
 /// 14d ago → `+RECENCY_WEIGHT/2`; 28d ago → `+RECENCY_WEIGHT/4`.
-fn recency_boost(ts_rfc3339: &str, now: DateTime<Utc>) -> f64 {
+pub(crate) fn recency_boost(ts_rfc3339: &str, now: DateTime<Utc>) -> f64 {
     let Ok(ts) = DateTime::parse_from_rfc3339(ts_rfc3339) else {
         return 0.0;
     };
@@ -675,14 +675,14 @@ fn recency_boost(ts_rfc3339: &str, now: DateTime<Utc>) -> f64 {
 /// Lowercase + collapse whitespace for the dedup key. We don't strip
 /// punctuation — different punctuation in two summaries usually
 /// indicates a real semantic difference.
-fn normalize_for_dedup(s: &str) -> String {
+pub(crate) fn normalize_for_dedup(s: &str) -> String {
     s.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
 }
 
-fn apply_token_budget(hits: Vec<SearchHit>, budget: usize) -> Vec<SearchHit> {
+pub(crate) fn apply_token_budget(hits: Vec<SearchHit>, budget: usize) -> Vec<SearchHit> {
     let mut remaining = budget;
     let mut out: Vec<SearchHit> = Vec::with_capacity(hits.len());
     for mut hit in hits {
