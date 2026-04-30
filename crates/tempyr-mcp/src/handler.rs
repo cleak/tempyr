@@ -802,6 +802,22 @@ pub struct JournalSearchParams {
     pub rerank: Option<bool>,
 }
 
+/// Parameters for the `journal_stats` MCP tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JournalStatsParams {
+    /// Restrict aggregates to entries newer than this many days.
+    /// Affects every section except the activity histogram (which
+    /// has its own window). Default: no filter (all of history).
+    pub since_days: Option<u32>,
+    /// Cap the top-tags list at this many rows. Default 20.
+    pub top_tags: Option<usize>,
+    /// Cap the top-files list at this many rows. Default 20.
+    pub top_files: Option<usize>,
+    /// Days of activity histogram to return, counting back from
+    /// today. Default 30.
+    pub activity_window_days: Option<u32>,
+}
+
 /// Parameters for the `journal_blame` MCP tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct JournalBlameParams {
@@ -2404,6 +2420,46 @@ impl TempyrServer {
             "hits": hits,
         }))
         .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        name = "journal_stats",
+        description = "Aggregate journal stats: kind distribution, dead-end ratio, sessions per agent, top tags / files, and a per-day activity histogram. Useful for diagnosing usage patterns — a low dead-end rate or a flat activity histogram during active work usually means agents aren't reaching the journal. Read-only; safe to call frequently.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn journal_stats(
+        &self,
+        Parameters(p): Parameters<JournalStatsParams>,
+    ) -> Result<String, String> {
+        let (graph_dir, _gf_dir, _schema) = self.find_project()?;
+        let project_root = graph_dir
+            .parent()
+            .ok_or_else(|| "Failed to resolve project root from graph dir".to_string())?
+            .to_path_buf();
+        let common_dir = jpath::git_common_dir(&project_root).map_err(|e| e.to_string())?;
+        let repo_root = jpath::repo_toplevel(&project_root).map_err(|e| e.to_string())?;
+
+        // Refresh structural-only so the stats include anything the
+        // agent just logged.
+        tempyr_journal_index::refresh_index(&common_dir, &repo_root)
+            .map_err(|e| format!("journal index refresh failed: {e}"))?;
+
+        let opts = tempyr_journal_index::StatsOptions {
+            since_days: p.since_days,
+            top_tags: p.top_tags.unwrap_or(20),
+            top_files: p.top_files.unwrap_or(20),
+            activity_window_days: p.activity_window_days.unwrap_or(30),
+        };
+        let db_path = tempyr_journal_index::index_db_path(&common_dir);
+        let conn = tempyr_journal_index::schema::open(&db_path).map_err(|e| e.to_string())?;
+        let report =
+            tempyr_journal_index::compute_stats(&conn, &opts).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
     }
 
     #[tool(

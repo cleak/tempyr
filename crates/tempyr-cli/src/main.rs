@@ -432,6 +432,13 @@ pub enum JournalAction {
     /// commit; pass `--strict` to exit non-zero for CI use.
     Lint(commands::journal_cmd::LintArgs),
 
+    /// Aggregate journal stats: kind distribution, dead-end rate,
+    /// sessions per agent, top tags / files, and a per-day activity
+    /// histogram. Useful for debugging usage patterns — a low
+    /// dead-end rate or a flat activity histogram during active
+    /// work usually means agents aren't reaching the journal.
+    Stats(commands::journal_cmd::StatsCmdArgs),
+
     /// Ensure the journal directory layout exists. Idempotent. Designed
     /// for the `SessionStart` Claude Code hook so a freshly-opened
     /// session has a place to write before any other tool runs.
@@ -813,6 +820,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
                 commands::journal_cmd::run_lint(&ctx, args, cli.json)
             }
+            JournalAction::Stats(args) => commands::journal_cmd::run_stats(args, cli.json),
             JournalAction::Bootstrap(args) => commands::journal_cmd::run_bootstrap(args, cli.json),
             JournalAction::Finalize(args) => commands::journal_cmd::run_finalize(args, cli.json),
             JournalAction::Show(args) => commands::journal_cmd::run_show(args, cli.json),

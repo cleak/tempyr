@@ -170,6 +170,8 @@ The `SessionStart` hook runs `tempyr journal bootstrap` to ensure the layout exi
 
 `tempyr journal lint` flags `task` nodes with `status = in_progress` that have no journal entries referencing them. Catches the "edited the frontmatter directly without going through `tempyr status`" failure mode. The managed `pre-commit` git hook runs this in warn-only mode (never blocks a commit); pass `--strict` for CI to exit non-zero on warnings.
 
+`tempyr journal stats` prints aggregate signal: kind distribution, dead-end ratio, sessions per agent, top tags / files, and a per-day activity histogram. Useful for spotting usage anomalies -- a low dead-end rate or a flat activity histogram during active work usually means agents aren't reaching the journal. The `journal_stats` MCP tool returns the same data as JSON.
+
 ## Conventions
 
 - Node IDs are human-readable kebab-case slugs (e.g., `feat-session-replay`, `decision-storage-backend`)
