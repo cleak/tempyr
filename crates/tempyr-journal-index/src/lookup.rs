@@ -39,3 +39,20 @@ pub fn count_entries(conn: &Connection) -> Result<u64> {
     let n: i64 = conn.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
     Ok(n as u64)
 }
+
+/// Count journal entries whose `references` field includes `node_id`.
+/// Hits the `entry_refs(entry_id, node_id)` junction table, which is
+/// indexed on `node_id`, so the lookup is O(log N) per call. Used by
+/// `tempyr journal lint` to flag in-progress tasks that lack any
+/// journal coverage — the auto-emit on `backlog → in_progress` would
+/// have written a `plan` entry referencing the task, so a count of
+/// 0 means either the user bypassed `tempyr status` or the task has
+/// been sitting in_progress without ongoing journal context.
+pub fn count_entries_referencing_node(conn: &Connection, node_id: &str) -> Result<u64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM entry_refs WHERE node_id = ?1",
+        params![node_id],
+        |r| r.get(0),
+    )?;
+    Ok(n as u64)
+}

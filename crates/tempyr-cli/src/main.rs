@@ -425,6 +425,13 @@ pub enum JournalAction {
     /// touching that file.
     Blame(commands::journal_cmd::BlameArgs),
 
+    /// Lint the project for stale journal coverage. Flags every task
+    /// node with `status = in_progress` that has no journal entries
+    /// referencing it. Designed for the managed `pre-commit` git hook
+    /// — exits 0 by default (warning-only) so it never blocks a
+    /// commit; pass `--strict` to exit non-zero for CI use.
+    Lint(commands::journal_cmd::LintArgs),
+
     /// Ensure the journal directory layout exists. Idempotent. Designed
     /// for the `SessionStart` Claude Code hook so a freshly-opened
     /// session has a place to write before any other tool runs.
@@ -802,6 +809,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             JournalAction::Search(args) => commands::journal_cmd::run_search(args, cli.json),
             JournalAction::Range(args) => commands::journal_cmd::run_range(args, cli.json),
             JournalAction::Blame(args) => commands::journal_cmd::run_blame(args, cli.json),
+            JournalAction::Lint(args) => {
+                let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
+                commands::journal_cmd::run_lint(&ctx, args, cli.json)
+            }
             JournalAction::Bootstrap(args) => commands::journal_cmd::run_bootstrap(args, cli.json),
             JournalAction::Finalize(args) => commands::journal_cmd::run_finalize(args, cli.json),
             JournalAction::Show(args) => commands::journal_cmd::run_show(args, cli.json),

@@ -6,23 +6,53 @@ use std::process::Command;
 use super::managed::WriteOutcome;
 
 const TEMPYR_VERSION: &str = env!("CARGO_PKG_VERSION");
-const MANAGED_START: &str = "# >>> tempyr managed index warmup >>>";
-const MANAGED_END: &str = "# <<< tempyr managed index warmup <<<";
+const MANAGED_START: &str = "# >>> tempyr managed hook >>>";
+const MANAGED_END: &str = "# <<< tempyr managed hook <<<";
 const SHEBANG: &str = "#!/bin/sh\n";
 
 struct GitHookDef {
     name: &'static str,
     description: &'static str,
+    /// Hook-specific body that runs *inside* the managed block,
+    /// after the `run_tempyr` shell helper is defined and the
+    /// `.tempyr` / `.tempyr-redirect` guard succeeds. Should invoke
+    /// `run_tempyr <subcommand>` and handle its own redirection.
+    /// Examples below — index-warmup hooks redirect both streams to
+    /// /dev/null, while the lint hook lets stderr flow so the user
+    /// sees warnings.
+    body: &'static str,
 }
+
+/// Index-warmup hooks (post-checkout, post-merge) silence both
+/// streams and never block the git operation. The user already sees
+/// the underlying git output; we don't want to add tempyr noise
+/// after every checkout.
+const BODY_INDEX_WARMUP: &str =
+    "  run_tempyr index update --json --skip-embeddings >/dev/null 2>&1 || true";
+
+/// Pre-commit lint runs `tempyr journal lint` and lets stderr through
+/// so the user actually sees stale-task warnings; stdout is silenced
+/// (the JSON form is reserved for explicit `--json` invocations).
+/// The trailing `|| true` keeps the hook from blocking the commit
+/// even if the lint logic itself errors — the user can still commit;
+/// they just lose the warning for this run.
+const BODY_JOURNAL_LINT: &str = "  run_tempyr journal lint >/dev/null || true";
 
 const GIT_HOOKS: &[GitHookDef] = &[
     GitHookDef {
         name: "post-checkout",
         description: "warm index after checkout and new worktree creation",
+        body: BODY_INDEX_WARMUP,
     },
     GitHookDef {
         name: "post-merge",
         description: "refresh index after merges",
+        body: BODY_INDEX_WARMUP,
+    },
+    GitHookDef {
+        name: "pre-commit",
+        description: "warn on in-progress tasks without journal coverage",
+        body: BODY_JOURNAL_LINT,
     },
 ];
 
@@ -50,10 +80,9 @@ pub fn check_all(root: &Path) -> anyhow::Result<Vec<HookReport>> {
         return Ok(Vec::new());
     };
 
-    let managed_block = render_managed_block();
-
     let mut reports = Vec::new();
     for def in GIT_HOOKS {
+        let managed_block = render_managed_block(def);
         let status = hook_status(&hooks_dir.join(def.name), &managed_block)?;
         reports.push(HookReport {
             name: def.name,
@@ -73,10 +102,9 @@ pub fn install_all(root: &Path) -> anyhow::Result<Vec<HookInstallResult>> {
     fs::create_dir_all(&hooks_dir)
         .with_context(|| format!("Failed to create hooks dir {}", hooks_dir.display()))?;
 
-    let managed_block = render_managed_block();
-
     let mut results = Vec::new();
     for def in GIT_HOOKS {
+        let managed_block = render_managed_block(def);
         let path = hooks_dir.join(def.name);
         let existing = if path.is_file() {
             Some(
@@ -329,9 +357,11 @@ fn matches_shell_keyword(line: &str, keyword: &str) -> bool {
         )
 }
 
-fn render_managed_block() -> String {
+fn render_managed_block(def: &GitHookDef) -> String {
+    let body = def.body;
+    let hook_name = def.name;
     format!(
-        "{MANAGED_START}\n# tempyr version: {TEMPYR_VERSION}\nTEMPYR_BIN=\"${{TEMPYR_BIN:-}}\"\n\
+        "{MANAGED_START}\n# tempyr version: {TEMPYR_VERSION}\n# hook: {hook_name}\nTEMPYR_BIN=\"${{TEMPYR_BIN:-}}\"\n\
 run_tempyr() {{\n\
   if [ -n \"$TEMPYR_BIN\" ]; then\n\
     if [ -x \"$TEMPYR_BIN\" ]; then\n\
@@ -359,7 +389,7 @@ run_tempyr() {{\n\
   return 127\n\
 }}\n\
 if [ -d .tempyr ] || [ -f .tempyr-redirect ]; then\n\
-  run_tempyr index update --json --skip-embeddings >/dev/null 2>&1 || true\n\
+{body}\n\
 fi\n\
 {MANAGED_END}\n"
     )
@@ -405,7 +435,7 @@ mod tests {
 
     #[test]
     fn merge_hook_content_creates_new_hook() {
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
 
         let (content, outcome) = merge_hook_content(None, &managed);
 
@@ -416,7 +446,7 @@ mod tests {
 
     #[test]
     fn merge_hook_content_appends_to_existing_user_hook() {
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
         let existing = "#!/bin/sh\necho user-hook\n";
 
         let (content, outcome) = merge_hook_content(Some(existing), &managed);
@@ -428,33 +458,33 @@ mod tests {
 
     #[test]
     fn merge_hook_content_inserts_before_terminal_control_flow() {
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
         let existing = "#!/bin/sh\necho before\nexit 0\n";
 
         let (content, outcome) = merge_hook_content(Some(existing), &managed);
 
         assert_eq!(outcome, WriteOutcome::Merged);
-        assert!(content.contains("echo before\n\n# >>> tempyr managed index warmup >>>"));
+        assert!(content.contains("echo before\n\n# >>> tempyr managed hook >>>"));
         assert!(content.contains(&format!("{MANAGED_END}\nexit 0\n")));
     }
 
     #[test]
     fn merge_hook_content_ignores_indented_control_flow() {
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
         let existing = "#!/bin/sh\nif some_check; then\n  exit 0\nfi\n";
 
         let (content, outcome) = merge_hook_content(Some(existing), &managed);
 
         assert_eq!(outcome, WriteOutcome::Merged);
-        assert!(content.contains("fi\n\n# >>> tempyr managed index warmup >>>"));
-        assert!(!content.contains("then\n\n# >>> tempyr managed index warmup >>>"));
+        assert!(content.contains("fi\n\n# >>> tempyr managed hook >>>"));
+        assert!(!content.contains("then\n\n# >>> tempyr managed hook >>>"));
     }
 
     #[test]
     fn merge_hook_content_replaces_stale_managed_block() {
         let stale = format!("{MANAGED_START}\nold\n{MANAGED_END}\n");
         let existing = format!("#!/bin/sh\n{stale}echo after\n");
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
 
         let (content, outcome) = merge_hook_content(Some(&existing), &managed);
 
@@ -466,7 +496,7 @@ mod tests {
 
     #[test]
     fn merge_hook_content_repositions_unreachable_managed_block() {
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
         let existing = format!("#!/bin/sh\nexit 0\n\n{managed}");
 
         let (content, outcome) = merge_hook_content(Some(&existing), &managed);
@@ -478,7 +508,7 @@ mod tests {
 
     #[test]
     fn merge_hook_content_collapses_duplicate_managed_blocks() {
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
         let existing = format!("#!/bin/sh\n{managed}\necho after\n{managed}");
 
         let (content, outcome) = merge_hook_content(Some(&existing), &managed);
@@ -490,7 +520,7 @@ mod tests {
 
     #[test]
     fn merge_hook_content_replaces_stale_first_block_when_later_block_is_current() {
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
         let stale = format!("{MANAGED_START}\nold\n{MANAGED_END}\n");
         let existing = format!("#!/bin/sh\n{stale}\necho after\n{managed}");
 
@@ -508,7 +538,7 @@ mod tests {
         let path = tmp.path().join("post-checkout");
         fs::write(&path, "#!/bin/sh\necho user-hook\n").unwrap();
 
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
 
         assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);
     }
@@ -517,7 +547,7 @@ mod tests {
     fn hook_status_ignores_indented_control_flow_before_managed_block() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("post-checkout");
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
         let hook = format!("#!/bin/sh\nif some_check; then\n  exit 0\nfi\n\n{managed}");
         fs::write(&path, hook).unwrap();
 
@@ -528,7 +558,7 @@ mod tests {
     fn hook_status_treats_unreachable_managed_hook_as_stale() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("post-checkout");
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
         let hook = format!("#!/bin/sh\nexit 0\n\n{managed}");
         fs::write(&path, hook).unwrap();
 
@@ -539,7 +569,7 @@ mod tests {
     fn hook_status_treats_duplicate_managed_blocks_as_stale() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("post-checkout");
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
         let hook = format!("#!/bin/sh\n{managed}\n{managed}");
         fs::write(&path, hook).unwrap();
 
@@ -551,7 +581,7 @@ mod tests {
     fn hook_status_treats_non_executable_managed_hook_as_stale() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("post-checkout");
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
         fs::write(&path, &managed).unwrap();
 
         let mut perms = fs::metadata(&path).unwrap().permissions();
@@ -566,7 +596,7 @@ mod tests {
     fn hook_status_requires_owner_execute_bit() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("post-checkout");
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
         fs::write(&path, &managed).unwrap();
 
         let mut perms = fs::metadata(&path).unwrap().permissions();
@@ -614,12 +644,41 @@ mod tests {
 
     #[test]
     fn managed_block_is_worktree_agnostic() {
-        let managed = render_managed_block();
+        let managed = render_managed_block(&GIT_HOOKS[0]);
 
         assert!(managed.contains("TEMPYR_BIN=\"${TEMPYR_BIN:-}\""));
         assert!(managed.contains("./target/debug/tempyr"));
         assert!(managed.contains("if [ -d .tempyr ] || [ -f .tempyr-redirect ]; then"));
         assert!(!managed.contains("exit 0"));
         assert!(!managed.contains("/tmp/tempyr"));
+    }
+
+    #[test]
+    fn managed_block_body_varies_per_hook() {
+        // Per-hook body parameterization: the index-warmup hooks
+        // (post-checkout, post-merge) call `index update` while the
+        // pre-commit hook calls `journal lint`. Without parameterization
+        // this test would fail because all hooks would render the same
+        // body.
+        let post_checkout = GIT_HOOKS
+            .iter()
+            .find(|h| h.name == "post-checkout")
+            .expect("post-checkout hook def");
+        let pre_commit = GIT_HOOKS
+            .iter()
+            .find(|h| h.name == "pre-commit")
+            .expect("pre-commit hook def");
+
+        let warmup = render_managed_block(post_checkout);
+        let lint = render_managed_block(pre_commit);
+
+        assert!(warmup.contains("run_tempyr index update"));
+        assert!(!warmup.contains("run_tempyr journal lint"));
+        assert!(lint.contains("run_tempyr journal lint"));
+        assert!(!lint.contains("run_tempyr index update"));
+        // Both render with hook-name annotation in the header so
+        // the output is self-describing.
+        assert!(warmup.contains("# hook: post-checkout"));
+        assert!(lint.contains("# hook: pre-commit"));
     }
 }

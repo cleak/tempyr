@@ -168,6 +168,8 @@ The `SessionStart` hook runs `tempyr journal bootstrap` to ensure the layout exi
 
 `tempyr doctor` shows a `Journal` section: open / ready session counts, publisher lock state, stamped PID. Use it when sessions seem to be queuing up locally — usually means the publisher hasn't run.
 
+`tempyr journal lint` flags `task` nodes with `status = in_progress` that have no journal entries referencing them. Catches the "edited the frontmatter directly without going through `tempyr status`" failure mode. The managed `pre-commit` git hook runs this in warn-only mode (never blocks a commit); pass `--strict` for CI to exit non-zero on warnings.
+
 ## Conventions
 
 - Node IDs are human-readable kebab-case slugs (e.g., `feat-session-replay`, `decision-storage-backend`)

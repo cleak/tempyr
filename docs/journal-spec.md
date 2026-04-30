@@ -390,7 +390,7 @@ Tracked but not committed. Listed roughly in expected priority order:
 - **PR description block** — `tempyr journal pr` generates a markdown summary suitable for paste-into-PR.
 - **Session expansion in search** — when a result is in a session with related entries, surface the session summary inline.
 - **Stats dashboard** — `tempyr journal stats` shows kind distribution, dead-end rate, top tags by week.
-- **Pre-commit lint** — warning on commit if there's an open in-progress task without a finalized journal session.
+- ~~**Pre-commit lint**~~ — *implemented post-Phase 4.* `tempyr journal lint` flags every task with `status = in_progress` that has no journal entries referencing it. Wired as a managed `pre-commit` git hook in warn-only mode so it never blocks a commit; CI can opt into `--strict` to make warnings fatal. Required parameterizing the existing managed-hooks framework (previously hard-coded for index-warmup hooks) to support per-hook bodies — `post-checkout`/`post-merge` keep their old behavior, `pre-commit` runs `journal lint`.
 - **Encrypted journals** — opt-in symmetric encryption with a per-repo key for sensitive projects.
 - **Live secret verification** — TruffleHog-style API checks on top of regex matches to reduce redaction false positives.
 
