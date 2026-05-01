@@ -67,7 +67,7 @@ pub fn parse_node(content: &str, file_path: PathBuf) -> Result<Node> {
     let (frontmatter_str, body) = split_frontmatter(content)?;
 
     let frontmatter: NodeFrontmatter =
-        serde_yml::from_str(frontmatter_str).map_err(|e| TempyrError::Yaml(e.to_string()))?;
+        serde_yaml::from_str(frontmatter_str).map_err(|e| TempyrError::Yaml(e.to_string()))?;
 
     let content_hash = blake3::hash(body.as_bytes()).to_hex().to_string();
 
@@ -82,7 +82,7 @@ pub fn parse_node(content: &str, file_path: PathBuf) -> Result<Node> {
 /// Serialize a node back to its file format (YAML frontmatter + markdown body).
 pub fn serialize_node(node: &Node) -> Result<String> {
     let yaml =
-        serde_yml::to_string(&node.frontmatter).map_err(|e| TempyrError::Yaml(e.to_string()))?;
+        serde_yaml::to_string(&node.frontmatter).map_err(|e| TempyrError::Yaml(e.to_string()))?;
 
     Ok(format!("---\n{}---\n{}", yaml, node.body))
 }

@@ -6,7 +6,7 @@ use std::path::Path;
 // Embedded artifacts
 // ---------------------------------------------------------------------------
 
-const TEMPYR_HOOKS_JSON: &str = include_str!("../../../../.claude/settings.json");
+const TEMPYR_HOOKS_JSON: &str = include_str!("../../assets/claude.settings.json");
 const SKILL_INTERVIEW_MD: &str =
     include_str!("../../../../.claude/skills/tempyr-interview/SKILL.md");
 const AGENT_EXTRACTOR_MD: &str = include_str!("../../../../.claude/agents/tempyr-extractor.md");
@@ -38,7 +38,7 @@ const MANAGED_FILES: &[ManagedFileDef] = &[
         path: ".claude/settings.json",
         content: TEMPYR_HOOKS_JSON,
         strategy: Strategy::Merge,
-        description: "Claude Code hooks for validation and indexing",
+        description: "Claude Code hooks for journaling, validation, and indexing",
     },
     ManagedFileDef {
         artifact: ManagedArtifact::Skill,
@@ -456,22 +456,28 @@ fn upsert_manifest_entry(entries: &mut Vec<ManagedFile>, entry: ManagedFile) {
 // settings.json merge
 // ---------------------------------------------------------------------------
 
-fn is_tempyr_hook(entry: &serde_json::Value) -> bool {
-    if let Some(matcher) = entry.get("matcher").and_then(|m| m.as_str())
-        && matcher.contains("mcp__tempyr__")
-    {
-        return true;
+fn is_managed_hook(entry: &serde_json::Value, managed_entries: &[serde_json::Value]) -> bool {
+    managed_entries
+        .iter()
+        .any(|managed_entry| entry == managed_entry)
+        || is_legacy_managed_hook(entry)
+}
+
+fn is_legacy_managed_hook(entry: &serde_json::Value) -> bool {
+    const LEGACY_GRAPH_WRITE_COMMAND: &str = "bash -c 'INPUT=$(cat); if echo \"$INPUT\" | grep -q \"graph/\"; then tempyr index update --json; fi'";
+
+    if entry.get("matcher").and_then(|m| m.as_str()) != Some("Edit|Write") {
+        return false;
     }
-    if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
-        for hook in hooks {
-            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
-                && cmd.contains("tempyr ")
-            {
-                return true;
-            }
-        }
-    }
-    false
+
+    entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .is_some_and(|hooks| {
+            hooks.iter().any(|hook| {
+                hook.get("command").and_then(|c| c.as_str()) == Some(LEGACY_GRAPH_WRITE_COMMAND)
+            })
+        })
 }
 
 fn merge_settings(existing_json: &str, tempyr_hooks_json: &str) -> anyhow::Result<String> {
@@ -485,32 +491,36 @@ fn merge_settings(existing_json: &str, tempyr_hooks_json: &str) -> anyhow::Resul
     let tempyr_settings: serde_json::Value = serde_json::from_str(tempyr_hooks_json)
         .with_context(|| "Failed to parse embedded tempyr hooks")?;
 
-    let tempyr_entries = tempyr_settings
-        .pointer("/hooks/PostToolUse")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let tempyr_hooks = tempyr_settings
+        .get("hooks")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow::anyhow!("embedded tempyr hooks must contain a hooks object"))?;
 
-    // Ensure hooks.PostToolUse exists as an array.
+    // Ensure hooks exists as an object.
     let hooks = doc
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!(".claude/settings.json root is not an object"))?
         .entry("hooks")
         .or_insert(serde_json::json!({}));
-    let post_tool_use = hooks
+    let hooks_obj = hooks
         .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("hooks is not an object in .claude/settings.json"))?
-        .entry("PostToolUse")
-        .or_insert(serde_json::json!([]));
-    let arr = post_tool_use
-        .as_array_mut()
-        .ok_or_else(|| anyhow::anyhow!("hooks.PostToolUse is not an array"))?;
+        .ok_or_else(|| anyhow::anyhow!("hooks is not an object in .claude/settings.json"))?;
 
-    // Remove existing tempyr entries.
-    arr.retain(|entry| !is_tempyr_hook(entry));
+    for (event, tempyr_entries) in tempyr_hooks {
+        let tempyr_entries = tempyr_entries
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("embedded hooks.{event} is not an array"))?
+            .clone();
+        let entries = hooks_obj
+            .entry(event.clone())
+            .or_insert(serde_json::json!([]));
+        let arr = entries
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("hooks.{event} is not an array"))?;
 
-    // Append fresh tempyr entries.
-    arr.extend(tempyr_entries);
+        arr.retain(|entry| !is_managed_hook(entry, &tempyr_entries));
+        arr.extend(tempyr_entries);
+    }
 
     let mut output = serde_json::to_string_pretty(&doc)?;
     output.push('\n');
@@ -526,30 +536,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_tempyr_hook_mcp_matcher() {
-        let entry = serde_json::json!({
+    fn test_is_managed_hook_matches_exact_managed_entry() {
+        let managed_entry = serde_json::json!({
             "matcher": "mcp__tempyr__graph_add_node|mcp__tempyr__graph_update_node",
             "hooks": [{"type": "command", "command": "tempyr validate --json"}]
         });
-        assert!(is_tempyr_hook(&entry));
+        assert!(is_managed_hook(
+            &managed_entry,
+            std::slice::from_ref(&managed_entry)
+        ));
     }
 
     #[test]
-    fn test_is_tempyr_hook_tempyr_command() {
+    fn test_is_managed_hook_matches_legacy_graph_write_hook() {
         let entry = serde_json::json!({
             "matcher": "Edit|Write",
-            "hooks": [{"type": "command", "command": "bash -c 'if echo \"$INPUT\" | grep -q \"graph/\"; then tempyr index update --json; fi'"}]
+            "hooks": [{"type": "command", "command": "bash -c 'INPUT=$(cat); if echo \"$INPUT\" | grep -q \"graph/\"; then tempyr index update --json; fi'"}]
         });
-        assert!(is_tempyr_hook(&entry));
+        assert!(is_managed_hook(&entry, &[]));
     }
 
     #[test]
-    fn test_is_tempyr_hook_user_entry() {
+    fn test_is_managed_hook_preserves_user_tempyr_command() {
         let entry = serde_json::json!({
-            "matcher": "Edit|Write",
-            "hooks": [{"type": "command", "command": "eslint --fix $FILE"}]
+            "hooks": [{"type": "command", "command": "tempyr custom-health --json"}]
         });
-        assert!(!is_tempyr_hook(&entry));
+        assert!(!is_managed_hook(&entry, &[]));
     }
 
     #[test]
@@ -563,7 +575,11 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(arr.len(), 1);
-        assert!(is_tempyr_hook(&arr[0]));
+        let managed_entry = arr[0].clone();
+        assert!(is_managed_hook(
+            &managed_entry,
+            std::slice::from_ref(&managed_entry)
+        ));
     }
 
     #[test]
@@ -572,7 +588,7 @@ mod tests {
   "hooks": {
     "PostToolUse": [
       {"matcher": "Edit|Write", "hooks": [{"type": "command", "command": "eslint --fix $FILE"}]},
-      {"matcher": "mcp__tempyr__graph_add_node", "hooks": [{"type": "command", "command": "tempyr validate --json"}]}
+      {"matcher": "mcp__tempyr__graph_add_node|mcp__tempyr__graph_update_node", "hooks": [{"type":"command","command":"tempyr validate --json"},{"type":"command","command":"tempyr index update --json"}]}
     ]
   }
 }"#;
@@ -587,8 +603,11 @@ mod tests {
 
         // User's eslint hook preserved, old tempyr hook removed, new tempyr hook added.
         assert_eq!(arr.len(), 2);
-        assert!(!is_tempyr_hook(&arr[0])); // eslint
-        assert!(is_tempyr_hook(&arr[1])); // new tempyr
+        assert!(!is_managed_hook(&arr[0], &[])); // eslint
+        assert_eq!(
+            arr[1]["matcher"].as_str().unwrap(),
+            "mcp__tempyr__graph_add_node|mcp__tempyr__graph_update_node"
+        );
         assert_eq!(
             arr[0]["hooks"][0]["command"].as_str().unwrap(),
             "eslint --fix $FILE"
@@ -601,6 +620,79 @@ mod tests {
         let first = merge_settings("", tempyr).unwrap();
         let second = merge_settings(&first, tempyr).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_merge_settings_installs_full_tempyr_hook_set() {
+        let result = merge_settings("", TEMPYR_HOOKS_JSON).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+        for event in ["SessionStart", "SessionEnd", "PostToolUse"] {
+            let arr = parsed
+                .pointer(&format!("/hooks/{event}"))
+                .and_then(|value| value.as_array())
+                .unwrap_or_else(|| panic!("missing hooks.{event}"));
+            assert!(
+                !arr.is_empty(),
+                "hooks.{event} should include a managed tempyr hook"
+            );
+        }
+    }
+
+    #[test]
+    fn test_merge_settings_preserves_user_session_hooks() {
+        let existing = r#"{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "echo hello"}]}
+    ]
+  }
+}"#;
+
+        let result = merge_settings(existing, TEMPYR_HOOKS_JSON).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let arr = parsed
+            .pointer("/hooks/SessionStart")
+            .and_then(|value| value.as_array())
+            .unwrap();
+
+        assert_eq!(arr.len(), 2);
+        assert_eq!(
+            arr[0]["hooks"][0]["command"].as_str().unwrap(),
+            "echo hello"
+        );
+        assert_eq!(
+            arr[1]["hooks"][0]["command"].as_str().unwrap(),
+            "tempyr journal bootstrap --quiet --json"
+        );
+    }
+
+    #[test]
+    fn test_merge_settings_preserves_user_tempyr_session_hook() {
+        let existing = r#"{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "tempyr custom-health --json"}]}
+    ]
+  }
+}"#;
+
+        let result = merge_settings(existing, TEMPYR_HOOKS_JSON).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let arr = parsed
+            .pointer("/hooks/SessionStart")
+            .and_then(|value| value.as_array())
+            .unwrap();
+
+        assert_eq!(arr.len(), 2);
+        assert_eq!(
+            arr[0]["hooks"][0]["command"].as_str().unwrap(),
+            "tempyr custom-health --json"
+        );
+        assert_eq!(
+            arr[1]["hooks"][0]["command"].as_str().unwrap(),
+            "tempyr journal bootstrap --quiet --json"
+        );
     }
 
     #[test]

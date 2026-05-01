@@ -15,6 +15,7 @@
 
 # Local-only config (per-user settings, permissions)
 *.local.json
+.claude/settings.json
 
 # OS
 .DS_Store

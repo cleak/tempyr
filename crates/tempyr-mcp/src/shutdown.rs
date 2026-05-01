@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
@@ -90,7 +90,7 @@ fn spawn_parent_watcher(
     {
         let _ = reason;
         let _ = cancellation_token;
-        bail!("parent watcher is not implemented for this platform")
+        anyhow::bail!("parent watcher is not implemented for this platform")
     }
 }
 
@@ -151,7 +151,7 @@ fn spawn_windows_parent_watcher(
             trigger_parent_exit(reason, cancellation_token, parent_pid);
             return Ok(());
         }
-        bail!(
+        anyhow::bail!(
             "OpenProcess failed for parent pid {parent_pid}: {}",
             std::io::Error::last_os_error()
         );
@@ -240,7 +240,7 @@ unsafe fn find_process_entry(
 
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
-        bail!("{}: {}", snapshot_error(), std::io::Error::last_os_error());
+        anyhow::bail!("{}: {}", snapshot_error(), std::io::Error::last_os_error());
     }
 
     let mut entry = PROCESSENTRY32W {
@@ -288,7 +288,7 @@ unsafe fn find_process_entry(
     }
 
     if let Some(err) = close_handle_error {
-        bail!("{}: {}", close_error(), err);
+        anyhow::bail!("{}: {}", close_error(), err);
     }
 
     Ok(found)

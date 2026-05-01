@@ -157,7 +157,7 @@ fn add_field(graph_dir: &Path, node_type: &str, field: &str, default: &str) -> a
         let has_field = match field {
             "status" => node.frontmatter.status.is_some(),
             "owner" => node.frontmatter.owner.is_some(),
-            _ => false, // Custom fields would need serde_yml manipulation
+            _ => false, // Custom fields would need YAML value manipulation.
         };
 
         if !has_field {

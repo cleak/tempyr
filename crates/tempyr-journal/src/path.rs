@@ -110,10 +110,11 @@ pub fn worktree_hash(worktree_top: &Path) -> String {
 pub fn repo_relative_path(path: &str, worktree_top: &Path) -> String {
     let p = Path::new(path);
     let body = if p.is_absolute() {
-        let canon_p = canonicalize_or_keep(p);
+        let canon_p = canonicalize_with_existing_prefix(p);
         let canon_top = canonicalize_or_keep(worktree_top);
         canon_p
             .strip_prefix(&canon_top)
+            .or_else(|_| p.strip_prefix(worktree_top))
             .map(|rel| rel.to_string_lossy().into_owned())
             .unwrap_or_else(|_| path.to_string())
     } else {
@@ -130,14 +131,15 @@ pub fn repo_relative_path(path: &str, worktree_top: &Path) -> String {
 /// When `cwd` is `None`, falls back to [`repo_relative_path`]'s pass-through
 /// behavior for relative inputs.
 pub fn resolve_file_path(path: &str, worktree_top: &Path, cwd: Option<&Path>) -> String {
-    let p = Path::new(path);
+    let normalized = path.replace('\\', "/");
+    let p = Path::new(&normalized);
     if !p.is_absolute()
         && let Some(base) = cwd
     {
         let abs = base.join(p);
         return repo_relative_path(&abs.to_string_lossy(), worktree_top);
     }
-    repo_relative_path(path, worktree_top)
+    repo_relative_path(&normalized, worktree_top)
 }
 
 /// Tempyr's directory under the git common dir: `<common>/tempyr/`.
@@ -212,6 +214,33 @@ fn canonicalize_or_keep(p: &Path) -> PathBuf {
         Ok(c) => strip_unc(c),
         Err(_) => p.to_path_buf(),
     }
+}
+
+fn canonicalize_with_existing_prefix(p: &Path) -> PathBuf {
+    if let Ok(canonical) = p.canonicalize() {
+        return strip_unc(canonical);
+    }
+
+    let mut missing = Vec::new();
+    let mut current = p;
+    while !current.exists() {
+        let Some(name) = current.file_name() else {
+            return p.to_path_buf();
+        };
+        missing.push(name.to_os_string());
+        let Some(parent) = current.parent() else {
+            return p.to_path_buf();
+        };
+        current = parent;
+    }
+
+    let Ok(mut canonical) = current.canonicalize().map(strip_unc) else {
+        return p.to_path_buf();
+    };
+    for part in missing.iter().rev() {
+        canonical.push(part);
+    }
+    canonical
 }
 
 /// On Windows, `Path::canonicalize` returns paths prefixed with `\\?\`.
@@ -374,6 +403,16 @@ mod tests {
     }
 
     #[test]
+    fn repo_relative_path_strips_worktree_prefix_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("crates").join("foo");
+        std::fs::create_dir_all(&nested).unwrap();
+        let absolute = nested.join("missing.rs");
+        let normalized = repo_relative_path(&absolute.to_string_lossy(), dir.path());
+        assert_eq!(normalized, "crates/foo/missing.rs");
+    }
+
+    #[test]
     fn repo_relative_path_passes_through_relative_input() {
         let dir = tempfile::tempdir().unwrap();
         // Forward-slash relative input round-trips unchanged.
@@ -417,6 +456,16 @@ mod tests {
         // The recorded path must be crates/foo/bar.rs, not bar.rs.
         let resolved = resolve_file_path("bar.rs", dir.path(), Some(&sub));
         assert_eq!(resolved, "crates/foo/bar.rs");
+    }
+
+    #[test]
+    fn resolve_file_path_joins_missing_relative_against_cwd_then_normalizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("crates").join("foo");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let resolved = resolve_file_path("missing.rs", dir.path(), Some(&sub));
+        assert_eq!(resolved, "crates/foo/missing.rs");
     }
 
     #[test]
