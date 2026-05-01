@@ -15,7 +15,7 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -114,11 +114,12 @@ pub(crate) fn wait_with_timeout(
             break s;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            // Drain after kill so the threads exit cleanly.
-            let _ = out_h.join();
-            let _ = err_h.join();
+            terminate_child_tree(&mut child);
+            let _ = wait_after_terminate(&mut child, Duration::from_secs(2));
+            // Do not join the drain threads on timeout. On Windows, `git.exe`
+            // can spawn a helper process that inherits the pipes; if the
+            // helper survives the parent, joining the drainers can wedge the
+            // caller even though the timeout path already did its job.
             return Err(JournalError::Git(format!(
                 "git {} timed out after {}s",
                 args.join(" "),
@@ -135,6 +136,37 @@ pub(crate) fn wait_with_timeout(
         stdout,
         stderr,
     })
+}
+
+fn terminate_child_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let pid = child.id().to_string();
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    let _ = child.kill();
+}
+
+fn wait_after_terminate(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| JournalError::Git(format!("wait after kill: {e}")))?
+        {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn drain<R: Read>(mut r: R) -> String {

@@ -45,21 +45,23 @@ cargo build --workspace
 Install the CLI from the local checkout:
 
 ```sh
-cargo install --path crates/tempyr-cli
+cargo install --path crates/tempyr-cli --locked
 ```
 
 Confirm the binary is available:
 
 ```sh
-tempyr doctor
+tempyr --help
 ```
 
 ## Quick Start
 
-Initialize a Tempyr project:
+Create or enter a project directory, then initialize Tempyr:
 
 ```sh
-tempyr init
+mkdir tempyr-demo
+cd tempyr-demo
+tempyr init --no-wizard
 ```
 
 Add a node:
@@ -92,6 +94,12 @@ Render a document from a root node:
 tempyr render prd feat-session-replay --output renders/session-replay-prd.md
 ```
 
+Inspect project health:
+
+```sh
+tempyr doctor
+```
+
 Start an interview from a brain dump:
 
 ```sh
@@ -117,11 +125,12 @@ provider-specific keys you need. `.env` is intentionally ignored by git.
 Useful commands:
 
 ```sh
-cargo build
-cargo test
+cargo build --workspace --locked
+cargo test --workspace --locked
 cargo test --lib
-cargo clippy
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
+cargo audit
 cargo run -- <subcommand>
 ```
 

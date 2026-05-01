@@ -578,6 +578,12 @@ mod tests {
         let managed = render_managed_block(&GIT_HOOKS[0]);
         let hook = format!("#!/bin/sh\nif some_check; then\n  exit 0\nfi\n\n{managed}");
         fs::write(&path, hook).unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms).unwrap();
+        }
 
         assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::UpToDate);
     }
@@ -628,7 +634,7 @@ mod tests {
         fs::write(&path, &managed).unwrap();
 
         let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o055);
+        perms.set_mode(0o455);
         fs::set_permissions(&path, perms).unwrap();
 
         assert_eq!(hook_status(&path, &managed).unwrap(), HookStatus::Stale);

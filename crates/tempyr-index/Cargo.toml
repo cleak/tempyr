@@ -28,4 +28,4 @@ optional = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
-serde_yml = { workspace = true }
+serde_yaml = { workspace = true }

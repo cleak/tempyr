@@ -1,0 +1,26 @@
+title = "Tempyr secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Intentional fake credentials used by redaction and no-leak tests"
+condition = "AND"
+paths = [
+  '''crates/tempyr-cli/src/commands/onboarding\.rs''',
+  '''crates/tempyr-cli/tests/integration\.rs''',
+  '''crates/tempyr-index/src/embeddings\.rs''',
+  '''crates/tempyr-journal/src/redact\.rs''',
+  '''crates/tempyr-journal/src/writer\.rs''',
+]
+regexes = [
+  '''pa-1234567890abcdef''',
+  '''AIzaSyA-LongerLookingKey123''',
+  '''sk-doctor-test-secret-must-not-leak''',
+  '''sk-mcp-doctor-secret-must-not-leak''',
+  '''sk-ant-abcdefghijklmnop1234567890qrstuvwx''',
+  '''sk-proj-abc1234567890defghij''',
+  '''ghp_abcdefghijklmnopqrstuvwxyz0123456789AB''',
+  '''AKIAIOSFODNN7EXAMPLE''',
+  '''MIIEvQ\.\.\.etc''',
+]

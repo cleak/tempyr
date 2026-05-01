@@ -51,6 +51,11 @@ pub fn run(
     };
 
     if let Some(output_path) = output {
+        if let Some(parent) = output_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::write(output_path, &result)?;
         println!("Rendered to {}", output_path.display());
     } else {

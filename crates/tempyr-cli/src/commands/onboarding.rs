@@ -384,15 +384,9 @@ fn handle_provider(state: &mut WizardState, key: KeyCode) {
     let all = EmbeddingProviderChoice::all();
 
     match key {
-        KeyCode::Up | KeyCode::Char('k') => {
-            if current > 0 {
-                update_provider(state, all[current - 1]);
-            }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if current + 1 < all.len() {
-                update_provider(state, all[current + 1]);
-            }
+        KeyCode::Up | KeyCode::Char('k') if current > 0 => update_provider(state, all[current - 1]),
+        KeyCode::Down | KeyCode::Char('j') if current + 1 < all.len() => {
+            update_provider(state, all[current + 1])
         }
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('n') => state.next_page(),
         KeyCode::Left | KeyCode::Backspace | KeyCode::Char('b') => state.prev_page(),

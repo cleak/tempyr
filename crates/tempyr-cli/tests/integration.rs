@@ -1984,6 +1984,40 @@ fn test_render_to_file() {
 }
 
 #[test]
+fn test_render_to_file_creates_parent_directories() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    write_node(
+        &tmp,
+        "features",
+        "feat-a",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feature A\n\nBody text.\n",
+    );
+
+    let output_path = tmp.path().join("renders").join("feature-a.md");
+    let parent = output_path.parent().unwrap();
+    assert!(
+        !parent.exists(),
+        "precondition failed: parent dir should not exist before render"
+    );
+    tempyr()
+        .current_dir(tmp.path())
+        .args([
+            "render",
+            "prd",
+            "feat-a",
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rendered to"));
+
+    assert!(output_path.exists());
+}
+
+#[test]
 fn test_json_output() {
     let tmp = TempDir::new().unwrap();
     init_project(&tmp);
