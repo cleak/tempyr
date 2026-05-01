@@ -86,7 +86,11 @@ function Stop-TargetProcesses {
 
     $processIds = @(Get-TargetProcessIds -BinaryPath $BinaryPath)
     if ($processIds.Count -eq 0) {
-        return [pscustomobject]@{ Cleared = $true; Respawned = $false }
+        return [pscustomobject]@{
+            PidsCleared = $true
+            IsUnlocked  = -not (Test-FileLocked -Path $BinaryPath)
+            Respawned   = $false
+        }
     }
 
     Write-Host "Detected a locked Tempyr install at $BinaryPath. Stopping matching processes: $($processIds -join ', ')"
@@ -100,23 +104,31 @@ function Stop-TargetProcesses {
     }
 
     $remaining = @(Get-TargetProcessIds -BinaryPath $BinaryPath)
-    if ($remaining.Count -eq 0) {
-        return [pscustomobject]@{ Cleared = $true; Respawned = $false }
-    }
+    $pidsCleared = $remaining.Count -eq 0
 
     # Different PIDs than what we just killed → a parent (e.g. another
     # Claude Code / IDE running tempyr as an MCP child) is respawning them.
     # Retrying cargo will lose the same race; surface a clear error instead.
-    $original = [System.Collections.Generic.HashSet[int]]::new([int[]]$processIds)
     $respawned = $false
-    foreach ($id in $remaining) {
-        if (-not $original.Contains([int]$id)) {
-            $respawned = $true
-            break
+    if (-not $pidsCleared) {
+        $original = [System.Collections.Generic.HashSet[int]]::new([int[]]$processIds)
+        foreach ($id in $remaining) {
+            if (-not $original.Contains([int]$id)) {
+                $respawned = $true
+                break
+            }
         }
     }
 
-    return [pscustomobject]@{ Cleared = $false; Respawned = $respawned }
+    # IsUnlocked is the gate for fast-retry. PIDs gone but the binary still
+    # locked means an external holder (AV scan, Explorer preview, stale
+    # kernel handle) — fast-retry won't help; let the caller fall through
+    # to the delay-and-retry path.
+    return [pscustomobject]@{
+        PidsCleared = $pidsCleared
+        IsUnlocked  = $pidsCleared -and (-not (Test-FileLocked -Path $BinaryPath))
+        Respawned   = $respawned
+    }
 }
 
 function ConvertTo-CanonicalPathEntry {
@@ -406,7 +418,7 @@ function Invoke-CargoInstallWithLockRecovery {
             if ($stopResult.Respawned) {
                 throw "Tempyr is being respawned by a parent process (likely another Claude Code or IDE session that has tempyr registered as an MCP server). Close those clients and re-run install.ps1."
             }
-            if ($stopResult.Cleared) {
+            if ($stopResult.IsUnlocked) {
                 if ($attempt -ge $maxAttempts) {
                     return $installResult
                 }
