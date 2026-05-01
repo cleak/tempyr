@@ -2,6 +2,7 @@
 name = "tempyr-linear"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 tempyr-core = { path = "../tempyr-core" }
