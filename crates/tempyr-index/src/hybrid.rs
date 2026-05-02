@@ -50,7 +50,7 @@ type ScoreMap = std::collections::HashMap<String, ScoreTriplet>;
 /// Run the full hybrid retrieval pipeline.
 ///
 /// Combines structural traversal (if root_id provided), BM25 full-text search,
-/// and vector similarity (deferred — always None for now).
+/// and vector similarity when a query embedding is provided.
 pub fn hybrid_retrieve(
     index: &Index,
     graph: &Graph,

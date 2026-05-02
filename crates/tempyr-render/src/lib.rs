@@ -29,12 +29,55 @@ pub enum RenderError {
 
 pub type Result<T> = std::result::Result<T, RenderError>;
 
+/// Request issued by a semantic-search render section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticSearchRequest {
+    pub query: String,
+    pub target_type: Option<String>,
+    pub max_results: usize,
+    pub min_similarity: Option<f64>,
+}
+
+/// One semantic-search result returned to the renderer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticSearchHit {
+    pub node_id: String,
+    pub score: f64,
+}
+
+/// Semantic search implementation supplied by callers that have index access.
+pub trait SemanticSearchProvider {
+    fn search(&mut self, request: &SemanticSearchRequest) -> Result<Vec<SemanticSearchHit>>;
+}
+
+#[derive(Default)]
+pub struct RenderOptions<'a> {
+    pub semantic_search: Option<&'a mut dyn SemanticSearchProvider>,
+}
+
 /// Render a document from a graph using a template.
 pub fn render(
     graph: &Graph,
     template_path: &Path,
     root_id: &str,
     temporal_filter: &TemporalFilter,
+) -> Result<String> {
+    render_with_options(
+        graph,
+        template_path,
+        root_id,
+        temporal_filter,
+        RenderOptions::default(),
+    )
+}
+
+/// Render a document from a graph using a template and caller-provided options.
+pub fn render_with_options(
+    graph: &Graph,
+    template_path: &Path,
+    root_id: &str,
+    temporal_filter: &TemporalFilter,
+    options: RenderOptions<'_>,
 ) -> Result<String> {
     let tmpl = template::RenderTemplate::load(template_path)?;
 
@@ -54,11 +97,13 @@ pub fn render(
     }
 
     // Collect all sections
-    let sections: Vec<_> = tmpl
-        .sections
-        .iter()
-        .map(|section_def| collector::collect_section(graph, root, section_def, temporal_filter))
-        .collect();
+    let sections = collect_sections(
+        graph,
+        root,
+        &tmpl.sections,
+        temporal_filter,
+        options.semantic_search,
+    )?;
 
     // Format to markdown
     Ok(formatter::render_to_markdown(&tmpl, root, sections))
@@ -70,6 +115,23 @@ pub fn render_from_str(
     template_toml: &str,
     root_id: &str,
     temporal_filter: &TemporalFilter,
+) -> Result<String> {
+    render_from_str_with_options(
+        graph,
+        template_toml,
+        root_id,
+        temporal_filter,
+        RenderOptions::default(),
+    )
+}
+
+/// Render using a template string and caller-provided options.
+pub fn render_from_str_with_options(
+    graph: &Graph,
+    template_toml: &str,
+    root_id: &str,
+    temporal_filter: &TemporalFilter,
+    options: RenderOptions<'_>,
 ) -> Result<String> {
     let tmpl: template::RenderTemplate = template_toml.parse()?;
 
@@ -87,13 +149,47 @@ pub fn render_from_str(
         )));
     }
 
-    let sections: Vec<_> = tmpl
-        .sections
-        .iter()
-        .map(|section_def| collector::collect_section(graph, root, section_def, temporal_filter))
-        .collect();
+    let sections = collect_sections(
+        graph,
+        root,
+        &tmpl.sections,
+        temporal_filter,
+        options.semantic_search,
+    )?;
 
     Ok(formatter::render_to_markdown(&tmpl, root, sections))
+}
+
+fn collect_sections(
+    graph: &Graph,
+    root: &tempyr_core::node::Node,
+    section_defs: &[template::SectionDef],
+    temporal_filter: &TemporalFilter,
+    semantic_search: Option<&mut dyn SemanticSearchProvider>,
+) -> Result<Vec<collector::SectionData>> {
+    let mut sections = Vec::with_capacity(section_defs.len());
+    if let Some(provider) = semantic_search {
+        for section_def in section_defs {
+            sections.push(collector::collect_section_with_semantic_search(
+                graph,
+                root,
+                section_def,
+                temporal_filter,
+                provider,
+            )?);
+        }
+    } else {
+        for section_def in section_defs {
+            sections.push(collector::collect_section(
+                graph,
+                root,
+                section_def,
+                temporal_filter,
+                None,
+            )?);
+        }
+    }
+    Ok(sections)
 }
 
 #[cfg(test)]
@@ -150,6 +246,19 @@ A recording agent captures DOM snapshots.
         graph.add_node(parse_node(task, PathBuf::from("t.md")).unwrap());
 
         graph
+    }
+
+    struct FakeSemanticSearch;
+
+    impl SemanticSearchProvider for FakeSemanticSearch {
+        fn search(&mut self, request: &SemanticSearchRequest) -> Result<Vec<SemanticSearchHit>> {
+            assert!(request.query.contains("Session Replay"));
+            assert_eq!(request.target_type.as_deref(), Some("decision"));
+            Ok(vec![SemanticSearchHit {
+                node_id: "decision-storage".to_string(),
+                score: 0.95,
+            }])
+        }
     }
 
     #[test]
@@ -221,5 +330,41 @@ source = "root"
         .unwrap();
         assert!(result.contains("Simple Doc: Session Replay"));
         assert!(result.contains("## Overview"));
+    }
+
+    #[test]
+    fn test_render_from_str_with_semantic_provider() {
+        let graph = build_full_graph();
+        let template_toml = r#"
+[meta]
+name = "Semantic Doc"
+root_types = ["feature"]
+output_format = "markdown"
+
+[[sections]]
+heading = "Related Decisions"
+source = "semantic_search"
+query_from = "root"
+target_type = "decision"
+max_results = 3
+min_similarity = 0.7
+include_body = true
+"#;
+        let mut provider = FakeSemanticSearch;
+
+        let result = render_from_str_with_options(
+            &graph,
+            template_toml,
+            "feat-replay",
+            &TemporalFilter::current(),
+            RenderOptions {
+                semantic_search: Some(&mut provider),
+            },
+        )
+        .unwrap();
+
+        assert!(result.contains("## Related Decisions"));
+        assert!(result.contains("### Storage Backend"));
+        assert!(result.contains("Use ClickHouse."));
     }
 }
