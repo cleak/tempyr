@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tempyr_core::graph::Graph;
 use tempyr_core::project;
-use tempyr_core::project::{CacheLayout, IndexLayout};
+use tempyr_core::project::{CacheLayout, IndexLayout, SnapshotBuildLock};
 use tempyr_core::schema::Schema;
 use tempyr_index::embeddings::{
     self, EmbeddingConfig, ResolvedEmbeddingConfig, resolve_embedding_config,
@@ -99,6 +99,24 @@ impl ProjectContext {
         let layout = self.index_layout()?;
         layout.set_snapshot_key(snapshot_key);
         Ok(layout.publish_active_snapshot()?)
+    }
+
+    /// Path to the shared content-addressed snapshot index for the current
+    /// graph state. The file may or may not exist yet.
+    pub fn shared_snapshot_index_path(&self) -> anyhow::Result<PathBuf> {
+        let layout = self.index_layout()?;
+        Ok(layout.shared_snapshot_index_path()?)
+    }
+
+    /// Try to acquire the per-snapshot build lock. Returns `Ok(None)` if
+    /// another process is already building this snapshot.
+    pub fn try_acquire_snapshot_build_lock(&self) -> anyhow::Result<Option<SnapshotBuildLock>> {
+        let layout = self.index_layout()?;
+        Ok(layout.try_acquire_snapshot_build_lock()?)
+    }
+
+    pub fn cache_layout(&self) -> &CacheLayout {
+        &self.cache
     }
 
     /// Refresh the index so query commands keep working after graph mutations.

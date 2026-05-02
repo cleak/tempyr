@@ -10,7 +10,7 @@
 //! from a different working directory than the active repo.
 
 use std::cell::RefCell;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -84,6 +84,27 @@ impl CacheLayout {
             .join("index.db")
     }
 
+    pub fn snapshots_root(&self) -> PathBuf {
+        self.shared_root.join("snapshots")
+    }
+
+    /// Directory holding per-snapshot build coordination locks.
+    /// Lock files live here so the snapshot dir itself does not need to exist
+    /// before a builder takes the lock.
+    pub fn snapshot_locks_dir(&self) -> PathBuf {
+        self.shared_root.join("snapshots").join(".locks")
+    }
+
+    pub fn snapshot_build_lock_path(&self, snapshot_key: &str) -> PathBuf {
+        self.snapshot_locks_dir()
+            .join(format!("{snapshot_key}.build.lock"))
+    }
+
+    /// Root containing every per-worktree cursor directory.
+    pub fn worktrees_root(&self) -> PathBuf {
+        self.shared_root.join("worktrees")
+    }
+
     pub fn embeddings_dir(&self) -> PathBuf {
         self.shared_root.join("embeddings")
     }
@@ -96,6 +117,42 @@ pub struct IndexLayout {
     graph_dir: PathBuf,
     tempyr_dir: PathBuf,
     pub legacy_index_path: PathBuf,
+}
+
+/// Held exclusive lock for building one specific snapshot key. Two worktrees
+/// that race to build the same never-seen graph state will see one acquire
+/// and the other receive `None` — the loser should wait briefly then re-check
+/// whether the shared snapshot now exists rather than redoing the work.
+///
+/// Drop releases the OS lock; the lockfile is left behind under
+/// `<shared_root>/snapshots/.locks/` for reuse by the next builder.
+#[derive(Debug)]
+pub struct SnapshotBuildLock {
+    _file: File,
+}
+
+impl SnapshotBuildLock {
+    /// Attempt a non-blocking exclusive acquire of the per-key build lock.
+    pub fn try_acquire(cache: &CacheLayout, snapshot_key: &str) -> io::Result<Option<Self>> {
+        let locks_dir = cache.snapshot_locks_dir();
+        fs::create_dir_all(&locks_dir)?;
+        let path = cache.snapshot_build_lock_path(snapshot_key);
+
+        // `read(true)` is required for `File::try_lock` on Windows even though
+        // we never read — same constraint observed in PublisherLock.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+
+        match file.try_lock() {
+            Ok(()) => Ok(Some(SnapshotBuildLock { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
+        }
+    }
 }
 
 struct StagedActiveIndex {
@@ -205,6 +262,13 @@ impl IndexLayout {
 
     pub fn shared_snapshot_index_path(&self) -> io::Result<PathBuf> {
         Ok(self.cache.snapshot_index_path(&self.snapshot_key()?))
+    }
+
+    /// Try to acquire the build lock for the current snapshot key.
+    /// Caller decides whether to wait, retry, or short-circuit if `None`.
+    pub fn try_acquire_snapshot_build_lock(&self) -> io::Result<Option<SnapshotBuildLock>> {
+        let snapshot_key = self.snapshot_key()?;
+        SnapshotBuildLock::try_acquire(&self.cache, &snapshot_key)
     }
 
     pub fn current_index_path(&self) -> io::Result<Option<PathBuf>> {
@@ -711,12 +775,24 @@ fn read_commondir(git_dir: &Path) -> Option<PathBuf> {
     fs::canonicalize(resolved).ok()
 }
 
-fn short_path_hash(path: &Path) -> String {
+/// Stable per-worktree id derived from the path of the worktree's private
+/// `.git` admin dir. Used to namespace per-worktree state under
+/// `<shared_root>/worktrees/<id>/` and exposed so snapshot pruning can
+/// recompute the same id from a `git worktree list` result.
+pub fn short_path_hash(path: &Path) -> String {
     let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut hasher = Hasher::new();
     hasher.update(canonical.to_string_lossy().as_bytes());
     let hex = hasher.finalize().to_hex().to_string();
     hex[..12].to_string()
+}
+
+/// Snapshot keys are the first 16 hex chars of a BLAKE3 digest, see
+/// [`graph_snapshot_key`]. This predicate filters out the `.locks`
+/// coordination dir and any partial-prune `.gc-*` stubs from a `read_dir`
+/// over `<shared_root>/snapshots/`.
+pub fn is_snapshot_key(name: &str) -> bool {
+    name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -1220,6 +1296,61 @@ mod tests {
                 .trim(),
             snapshot_key
         );
+    }
+
+    #[test]
+    fn is_snapshot_key_accepts_only_canonical_form() {
+        assert!(is_snapshot_key("12971a01c28ece80"));
+        assert!(is_snapshot_key("0000000000000000"));
+        assert!(!is_snapshot_key(""));
+        assert!(!is_snapshot_key("12971a01c28ece8"));
+        assert!(!is_snapshot_key("12971a01c28ece800"));
+        assert!(!is_snapshot_key(".locks"));
+        assert!(!is_snapshot_key(".gc-12971a01c28ece80"));
+        assert!(!is_snapshot_key("ZZ971a01c28ece80"));
+    }
+
+    #[test]
+    fn snapshot_build_lock_is_exclusive_per_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CacheLayout {
+            shared_root: tmp.path().to_path_buf(),
+            worktree_root: tmp.path().join("worktrees").join("default"),
+        };
+        let key = "deadbeefcafef00d";
+
+        let first = SnapshotBuildLock::try_acquire(&cache, key).unwrap();
+        assert!(first.is_some());
+
+        let second = SnapshotBuildLock::try_acquire(&cache, key).unwrap();
+        assert!(
+            second.is_none(),
+            "second acquire while first still held should return None"
+        );
+
+        // Distinct key — no contention.
+        let other = SnapshotBuildLock::try_acquire(&cache, "abc1234567890def").unwrap();
+        assert!(other.is_some());
+
+        drop(first);
+        let after_release = SnapshotBuildLock::try_acquire(&cache, key).unwrap();
+        assert!(after_release.is_some());
+    }
+
+    #[test]
+    fn snapshot_build_lock_creates_locks_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CacheLayout {
+            shared_root: tmp.path().to_path_buf(),
+            worktree_root: tmp.path().join("worktrees").join("default"),
+        };
+
+        let _lock = SnapshotBuildLock::try_acquire(&cache, "cafefacecafefade")
+            .unwrap()
+            .unwrap();
+
+        assert!(cache.snapshot_locks_dir().is_dir());
+        assert!(cache.snapshot_build_lock_path("cafefacecafefade").is_file());
     }
 
     #[test]

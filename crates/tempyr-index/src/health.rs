@@ -118,6 +118,13 @@ pub struct IndexSection {
     pub snapshot_key_error: Option<String>,
     pub fts_entries: Option<usize>,
     pub embedding_count_for_index: Option<usize>,
+    /// Number of historical snapshot directories under
+    /// `<shared_root>/snapshots/`. Excludes the `.locks` dir and any
+    /// `.gc-*` eviction stubs left by a partial prune.
+    pub snapshot_store_count: Option<usize>,
+    /// Total bytes used by historical snapshot directories. A high number
+    /// here is the signal to run `tempyr snapshot prune`.
+    pub snapshot_store_bytes: Option<u64>,
 }
 
 const LOCAL_EMBEDDINGS_COMPILED_IN: bool = cfg!(feature = "local-embeddings");
@@ -360,6 +367,8 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
     let layout = match IndexLayout::resolve(inputs.root, inputs.graph_dir, inputs.tempyr_dir) {
         Ok(layout) => layout,
         Err(err) => {
+            let (snapshot_store_count, snapshot_store_bytes) =
+                probe_snapshot_store(&inputs.cache.snapshots_root());
             return IndexSection {
                 active_index_path: inputs.cache.active_index_path(),
                 active_index_exists: inputs.cache.active_index_path().exists(),
@@ -372,6 +381,8 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
                 snapshot_key_error: Some(err.to_string()),
                 fts_entries: None,
                 embedding_count_for_index: None,
+                snapshot_store_count,
+                snapshot_store_bytes,
             };
         }
     };
@@ -398,6 +409,9 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
         None => (None, None),
     };
 
+    let (snapshot_store_count, snapshot_store_bytes) =
+        probe_snapshot_store(&inputs.cache.snapshots_root());
+
     IndexSection {
         active_index_path,
         active_index_exists,
@@ -410,7 +424,50 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
         snapshot_key_error,
         fts_entries,
         embedding_count_for_index,
+        snapshot_store_count,
+        snapshot_store_bytes,
     }
+}
+
+/// Walk `<shared_root>/snapshots/` and return `(snapshot_dir_count, total_bytes)`.
+/// Uses [`project::is_snapshot_key`] so the count agrees with what
+/// `tempyr snapshot prune` would consider — the `.locks` coordination dir
+/// and any partial-prune `.gc-*` stubs are excluded. Returns `(None, None)`
+/// if the dir does not exist or cannot be read (snapshot store unused on
+/// this project yet).
+fn probe_snapshot_store(snapshots_root: &Path) -> (Option<usize>, Option<u64>) {
+    if !snapshots_root.is_dir() {
+        return (None, None);
+    }
+    let read = match std::fs::read_dir(snapshots_root) {
+        Ok(read) => read,
+        Err(_) => return (None, None),
+    };
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for entry in read.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !project::is_snapshot_key(&name) {
+            continue;
+        }
+        count += 1;
+        for sub in walkdir::WalkDir::new(entry.path()) {
+            let Ok(sub) = sub else { continue };
+            if let Ok(meta) = sub.metadata()
+                && meta.is_file()
+            {
+                bytes = bytes.saturating_add(meta.len());
+            }
+        }
+    }
+    (Some(count), Some(bytes))
 }
 
 fn probe_index(index_path: &Path, store_path: Option<&Path>) -> (Option<usize>, Option<usize>) {
