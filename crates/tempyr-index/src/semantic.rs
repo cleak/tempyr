@@ -11,7 +11,6 @@ pub struct SemanticSearchEngine {
     index: Index,
     store: EmbeddingStore,
     provider: Box<dyn EmbeddingProvider>,
-    embeddings_ready: bool,
 }
 
 impl SemanticSearchEngine {
@@ -20,17 +19,14 @@ impl SemanticSearchEngine {
             index,
             store,
             provider,
-            embeddings_ready: false,
         }
     }
 
     pub async fn ensure_embeddings(&mut self, graph: &Graph) -> Result<()> {
-        if self.embeddings_ready {
-            return Ok(());
-        }
-
+        // embed_graph is content-hash aware and skips cached entries, so keep
+        // checking the current graph instead of assuming a long-lived engine has
+        // already seen every future graph mutation.
         embeddings::embed_graph(&self.store, graph, self.provider.as_ref()).await?;
-        self.embeddings_ready = true;
         Ok(())
     }
 
@@ -135,6 +131,18 @@ allowed_edges = []
         graph
     }
 
+    fn make_graph_with_extra_insight() -> Graph {
+        let mut graph = make_graph();
+        graph.add_node(
+            parse_node(
+                "---\nid: insight-b\ntype: insight\n---\n# New Insight\n\nFresh context.\n",
+                PathBuf::from("graph/insights/insight-b.md"),
+            )
+            .unwrap(),
+        );
+        graph
+    }
+
     struct FixedProvider;
 
     #[async_trait]
@@ -145,6 +153,7 @@ allowed_edges = []
                 .map(|text| match input_type {
                     InputType::Query => vec![0.0, 1.0],
                     InputType::Document if text.contains("Related Insight") => vec![0.0, 1.0],
+                    InputType::Document if text.contains("New Insight") => vec![0.0, 1.0],
                     InputType::Document => vec![1.0, 0.0],
                 })
                 .collect())
@@ -176,6 +185,29 @@ allowed_edges = []
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].node_id, "insight-a");
+    }
+
+    #[test]
+    fn vector_search_rechecks_embeddings_when_graph_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original_graph = make_graph();
+        let updated_graph = make_graph_with_extra_insight();
+        let index = Index::create_in_memory().unwrap();
+        index.rebuild(&updated_graph).unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let provider = Box::new(FixedProvider);
+        let mut engine = SemanticSearchEngine::new(index, store, provider);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(engine.vector_search(&original_graph, "related", 10, Some("insight"), None))
+            .unwrap();
+
+        let results = runtime
+            .block_on(engine.vector_search(&updated_graph, "new", 10, Some("insight"), Some(0.7)))
+            .unwrap();
+
+        assert!(results.iter().any(|result| result.node_id == "insight-b"));
     }
 
     #[test]
