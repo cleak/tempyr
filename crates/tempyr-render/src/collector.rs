@@ -313,7 +313,7 @@ mod tests {
 id: feat-replay
 type: feature
 status: draft
-owner: caleb
+owner: alice
 created: 2026-03-20T14:30:00Z
 updated: 2026-03-23T09:15:00Z
 edges:

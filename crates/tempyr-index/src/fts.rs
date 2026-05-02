@@ -230,7 +230,7 @@ mod tests {
     fn build_test_index() -> Index {
         let mut graph = Graph::new(make_schema());
 
-        let feat = "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\ntags: [replay, observability]\n---\n# Session Replay\n\nCapture and replay user sessions for debugging funnel drop-offs.\n";
+        let feat = "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: alice\ntags: [replay, observability]\n---\n# Session Replay\n\nCapture and replay user sessions for debugging funnel drop-offs.\n";
         let decision = "---\nid: decision-storage\ntype: decision\nstatus: decided\n---\n# Storage Backend Decision\n\nWe decided to use ClickHouse for replay event storage due to high write throughput.\n";
         let task = "---\nid: task-ingestion\ntype: task\nstatus: backlog\n---\n# Build Ingestion Pipeline\n\nImplement the event ingestion pipeline for session replay data.\n";
 
@@ -320,7 +320,7 @@ mod tests {
     fn test_fts_with_owner_filter() {
         let index = build_test_index();
         let filter = MetadataFilter {
-            owner: Some("caleb"),
+            owner: Some("alice"),
             ..Default::default()
         };
         let results = index
@@ -395,13 +395,13 @@ mod tests {
     fn test_query_by_metadata_owner() {
         let index = build_test_index();
         let filter = MetadataFilter {
-            owner: Some("caleb"),
+            owner: Some("alice"),
             ..Default::default()
         };
         let results = index.query_by_metadata(&filter, 100).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].node_id, "feat-replay");
-        assert_eq!(results[0].owner.as_deref(), Some("caleb"));
+        assert_eq!(results[0].owner.as_deref(), Some("alice"));
     }
 
     #[test]
@@ -420,7 +420,7 @@ mod tests {
         let index = build_test_index();
         let filter = MetadataFilter {
             node_type: Some("feature"),
-            owner: Some("caleb"),
+            owner: Some("alice"),
             ..Default::default()
         };
         let results = index.query_by_metadata(&filter, 100).unwrap();

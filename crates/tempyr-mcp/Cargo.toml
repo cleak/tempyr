@@ -1,18 +1,26 @@
 [package]
 name = "tempyr-mcp"
+description = "MCP server library for Tempyr: exposes graph operations as tools for Claude Code and other MCP clients."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 anyhow = "1"
-tempyr-core = { path = "../tempyr-core" }
-tempyr-index = { path = "../tempyr-index" }
-tempyr-interview = { path = "../tempyr-interview" }
-tempyr-render = { path = "../tempyr-render" }
-tempyr-linear = { path = "../tempyr-linear" }
-tempyr-journal = { path = "../tempyr-journal" }
-tempyr-journal-index = { path = "../tempyr-journal-index" }
+tempyr-core = { path = "../tempyr-core", version = "0.1.0" }
+tempyr-index = { path = "../tempyr-index", version = "0.1.0" }
+tempyr-interview = { path = "../tempyr-interview", version = "0.1.0" }
+tempyr-render = { path = "../tempyr-render", version = "0.1.0" }
+tempyr-linear = { path = "../tempyr-linear", version = "0.1.0" }
+tempyr-journal = { path = "../tempyr-journal", version = "0.1.0" }
+tempyr-journal-index = { path = "../tempyr-journal-index", version = "0.1.0" }
 chrono = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }

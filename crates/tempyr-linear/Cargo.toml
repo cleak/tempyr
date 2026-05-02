@@ -1,12 +1,20 @@
 [package]
 name = "tempyr-linear"
+description = "Linear integration for Tempyr: push/pull sync, status mapping, and context generation."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-tempyr-core = { path = "../tempyr-core" }
-tempyr-index = { path = "../tempyr-index" }
+tempyr-core = { path = "../tempyr-core", version = "0.1.0" }
+tempyr-index = { path = "../tempyr-index", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

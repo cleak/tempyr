@@ -216,8 +216,8 @@ mod tests {
     fn test_validate_clean_graph() {
         let mut graph = Graph::new(make_schema());
 
-        let epic = "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n";
-        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n";
+        let epic = "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n";
+        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n";
 
         graph.add_node(parse_node(epic, PathBuf::from("epic.md")).unwrap());
         graph.add_node(parse_node(feat, PathBuf::from("feat.md")).unwrap());
@@ -234,7 +234,7 @@ mod tests {
     fn test_validate_dangling_edge() {
         let mut graph = Graph::new(make_schema());
 
-        let node = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: nonexistent-node\n    type: depends_on\n---\n# Feat A\n";
+        let node = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\nedges:\n  - target: nonexistent-node\n    type: depends_on\n---\n# Feat A\n";
         graph.add_node(parse_node(node, PathBuf::from("feat.md")).unwrap());
 
         let issues = validate_graph(&graph);
@@ -250,8 +250,8 @@ mod tests {
         let mut graph = Graph::new(make_schema());
 
         // feat-a has child_of -> epic-a, but epic-a does NOT have parent_of -> feat-a
-        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n";
-        let epic = "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic A\n";
+        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n";
+        let epic = "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\n---\n# Epic A\n";
 
         graph.add_node(parse_node(feat, PathBuf::from("feat.md")).unwrap());
         graph.add_node(parse_node(epic, PathBuf::from("epic.md")).unwrap());
@@ -282,7 +282,7 @@ mod tests {
     fn test_validate_invalid_status() {
         let mut graph = Graph::new(make_schema());
 
-        let node = "---\nid: feat-a\ntype: feature\nstatus: banana\nowner: caleb\n---\n# Feat\n";
+        let node = "---\nid: feat-a\ntype: feature\nstatus: banana\nowner: alice\n---\n# Feat\n";
         graph.add_node(parse_node(node, PathBuf::from("feat.md")).unwrap());
 
         let issues = validate_graph(&graph);

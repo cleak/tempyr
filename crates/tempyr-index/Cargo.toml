@@ -1,12 +1,20 @@
 [package]
 name = "tempyr-index"
+description = "SQLite-backed indexing for Tempyr: FTS5 full-text search, sqlite-vec embeddings, and hybrid retrieval."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-tempyr-core = { path = "../tempyr-core" }
-tempyr-journal = { path = "../tempyr-journal" }
+tempyr-core = { path = "../tempyr-core", version = "0.1.0" }
+tempyr-journal = { path = "../tempyr-journal", version = "0.1.0" }
 rusqlite = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

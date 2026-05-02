@@ -1,3 +1,10 @@
+//! AI-assisted interview engine for Tempyr.
+//!
+//! Drives the five-phase interview state machine (Discovery → Product →
+//! Technical → Decomposition → Review). Phase transitions and gap detection
+//! are deterministic Rust; the LLM only extracts structured data from
+//! natural-language answers. Proposals are tentative until the user commits.
+
 pub mod gaps;
 pub mod llm;
 pub mod phases;

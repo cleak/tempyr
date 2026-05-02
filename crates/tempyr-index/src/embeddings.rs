@@ -887,7 +887,7 @@ reverse = "dependency_of"
     fn make_graph() -> Graph {
         let mut graph = Graph::new(make_schema());
         let node = parse_node(
-            "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Session Replay\n\nCapture sessions.\n",
+            "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: alice\n---\n# Session Replay\n\nCapture sessions.\n",
             PathBuf::from("graph/features/feat-replay.md"),
         )
         .unwrap();
@@ -988,12 +988,12 @@ reverse = "dependency_of"
         let schema = make_schema();
         let mut graph = Graph::new(schema);
         let node_a = parse_node(
-            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Shared Title\n\nSame body.\n",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# Shared Title\n\nSame body.\n",
             PathBuf::from("graph/features/feat-a.md"),
         )
         .unwrap();
         let node_b = parse_node(
-            "---\nid: feat-b\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Shared Title\n\nSame body.\n",
+            "---\nid: feat-b\ntype: feature\nstatus: draft\nowner: alice\n---\n# Shared Title\n\nSame body.\n",
             PathBuf::from("graph/features/feat-b.md"),
         )
         .unwrap();
