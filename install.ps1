@@ -323,33 +323,25 @@ function ConvertTo-WindowsArgument {
     return $builder.ToString()
 }
 
-function Invoke-CargoInstall {
+function Invoke-CargoCommand {
     param(
         [Parameter(Mandatory)]
-        [string]$CratePath,
+        [string[]]$Arguments,
         [Parameter(Mandatory)]
-        [string]$InstallRootPath
+        [string]$WorkingDirectory
     )
 
     $cargoExe = (Get-Command cargo -ErrorAction Stop).Source
-    $cargoArgs = @(
-        "install",
-        "--path", $CratePath,
-        "--root", $InstallRootPath,
-        "--locked",
-        "--force",
-        "--bin", "tempyr"
-    )
     $stdoutFile = New-TemporaryFile
     $stderrFile = New-TemporaryFile
     try {
         # Windows PowerShell 5.1 turns native stderr into a terminating NativeCommandError
         # when ErrorActionPreference=Stop, even for cargo's normal progress output.
-        $argumentLine = ($cargoArgs | ForEach-Object { ConvertTo-WindowsArgument -Value "$_" }) -join ' '
+        $argumentLine = ($Arguments | ForEach-Object { ConvertTo-WindowsArgument -Value "$_" }) -join ' '
         $process = Start-Process `
             -FilePath $cargoExe `
             -ArgumentList $argumentLine `
-            -WorkingDirectory $CratePath `
+            -WorkingDirectory $WorkingDirectory `
             -RedirectStandardOutput $stdoutFile.FullName `
             -RedirectStandardError $stderrFile.FullName `
             -NoNewWindow `
@@ -378,6 +370,53 @@ function Invoke-CargoInstall {
     } finally {
         Remove-Item -LiteralPath $stdoutFile.FullName -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stderrFile.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-CargoInstall {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CratePath,
+        [Parameter(Mandatory)]
+        [string]$InstallRootPath
+    )
+
+    $cargoArgs = @(
+        "install",
+        "--path", $CratePath,
+        "--root", $InstallRootPath,
+        "--locked",
+        "--force",
+        "--bin", "tempyr"
+    )
+
+    return Invoke-CargoCommand -Arguments $cargoArgs -WorkingDirectory $CratePath
+}
+
+function Invoke-CargoBuild {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CratePath
+    )
+
+    $cargoArgs = @(
+        "build",
+        "--release",
+        "--manifest-path", (Join-Path $CratePath "Cargo.toml"),
+        "--locked",
+        "--bin", "tempyr"
+    )
+
+    $buildResult = Invoke-CargoCommand -Arguments $cargoArgs -WorkingDirectory $CratePath
+    if ($buildResult.ExitCode -ne 0) {
+        $message = "cargo build --release failed with exit code $($buildResult.ExitCode)."
+        if (-not [string]::IsNullOrWhiteSpace($buildResult.Output)) {
+            $output = $buildResult.Output.TrimEnd()
+            if (-not [string]::IsNullOrWhiteSpace($output)) {
+                $message = "$message`n$output"
+            }
+        }
+        throw $message
     }
 }
 
@@ -454,6 +493,8 @@ $targetBinary = Join-Path $binDir "tempyr.exe"
 if (-not (Test-Path -LiteralPath (Join-Path $cratePath "Cargo.toml"))) {
     throw "Could not find crates/tempyr-cli/Cargo.toml relative to $scriptRoot."
 }
+
+Invoke-CargoBuild -CratePath $cratePath
 
 $installResult = Invoke-CargoInstallWithLockRecovery `
     -CratePath $cratePath `

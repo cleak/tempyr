@@ -10,7 +10,13 @@ Run:
 bash install.sh
 ```
 
-The script installs Tempyr with:
+The script first builds Tempyr in release mode:
+
+```bash
+cargo build --release --manifest-path crates/tempyr-cli/Cargo.toml --locked --bin tempyr
+```
+
+Then it installs Tempyr with:
 
 ```bash
 cargo install --path crates/tempyr-cli --root "${XDG_DATA_HOME:-$HOME/.local/share}/tempyr" --locked --force --bin tempyr
@@ -32,7 +38,13 @@ Run:
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-The script installs Tempyr with:
+The script first builds Tempyr in release mode:
+
+```powershell
+cargo build --release --manifest-path .\crates\tempyr-cli\Cargo.toml --locked --bin tempyr
+```
+
+Then it installs Tempyr with:
 
 ```powershell
 cargo install --path .\crates\tempyr-cli --root "$Env:LocalAppData\Tempyr" --locked --force --bin tempyr
@@ -48,7 +60,7 @@ If you want `install.ps1` to skip user `PATH` changes, pass `-NoPathUpdate`:
 
 ## Updating safely
 
-Rerun the installer to update Tempyr. Both installers check whether the target Tempyr binary is already in use before invoking `cargo install`. If it is, they only stop processes whose executable path exactly matches the target installed binary. They do not kill processes based on name alone.
+Rerun the installer to update Tempyr. Both installers run the release build before checking whether the target Tempyr binary is already in use, so compile failures do not interrupt a currently running installed binary. If the target binary is in use, they only stop processes whose executable path exactly matches the target installed binary. They do not kill processes based on name alone.
 
 If the binary becomes locked during the install anyway, the installers stop matching Tempyr processes and retry. On Windows, the installer also waits and retries a few times before failing when the lock appears to be transient.
 
