@@ -726,12 +726,7 @@ impl EmbeddingStore {
                 self.clear_embeddings()?;
                 self.set_meta_value(Self::PROVIDER_FINGERPRINT_KEY, &fingerprint)
             }
-            None => {
-                if self.count()? > 0 {
-                    self.clear_embeddings()?;
-                }
-                self.set_meta_value(Self::PROVIDER_FINGERPRINT_KEY, &fingerprint)
-            }
+            None => self.set_meta_value(Self::PROVIDER_FINGERPRINT_KEY, &fingerprint),
         }
     }
 
@@ -1140,6 +1135,29 @@ reverse = "dependency_of"
         assert_eq!(
             store.get_embedding(&content_hash).unwrap().unwrap(),
             vec![0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn embed_graph_seeds_legacy_store_fingerprint_without_clearing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let graph = make_graph();
+        let content_hash = graph.get_node("feat-replay").unwrap().content_hash.clone();
+        store.store_embedding(&content_hash, &[1.0, 0.0]).unwrap();
+        let provider = NamedProvider {
+            name: "legacy-provider",
+            embeddings: vec![vec![0.0, 1.0]],
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let stats = rt.block_on(embed_graph(&store, &graph, &provider)).unwrap();
+
+        assert_eq!(stats.embedded, 0);
+        assert_eq!(store.count().unwrap(), 1);
+        assert_eq!(
+            store.get_embedding(&content_hash).unwrap().unwrap(),
+            vec![1.0, 0.0]
         );
     }
 
