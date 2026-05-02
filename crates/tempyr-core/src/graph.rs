@@ -143,7 +143,7 @@ mod tests {
 
     fn make_feature_node(id: &str, edges: &str) -> Node {
         let content = format!(
-            "---\nid: {id}\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n{edges}---\n# {id}\n\nBody of {id}.\n"
+            "---\nid: {id}\ntype: feature\nstatus: draft\nowner: alice\nedges:\n{edges}---\n# {id}\n\nBody of {id}.\n"
         );
         parse_node(&content, PathBuf::from(format!("graph/features/{id}.md"))).unwrap()
     }

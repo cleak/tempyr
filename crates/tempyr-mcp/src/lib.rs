@@ -1,3 +1,9 @@
+//! MCP server for Tempyr.
+//!
+//! Exposes graph, search, render, journal, and interview operations as
+//! Model Context Protocol tools so AI clients (e.g. Claude Code) can read
+//! and mutate a Tempyr project conversationally. Launched via `tempyr --mcp`.
+
 pub mod handler;
 mod journal_ticker;
 mod shutdown;

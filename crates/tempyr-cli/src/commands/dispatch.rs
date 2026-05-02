@@ -506,7 +506,7 @@ mod tests {
 id: epic-vs
 type: epic
 status: active
-owner: caleb
+owner: alice
 edges:
   - target: feat-chain
     type: parent_of
@@ -520,7 +520,7 @@ Build the core caravan escort loop.
 id: feat-chain
 type: feature
 status: active
-owner: caleb
+owner: alice
 edges:
   - target: epic-vs
     type: child_of
@@ -743,7 +743,7 @@ Tune spring/damper parameters for stability.
 id: feat-done
 type: feature
 status: completed
-owner: caleb
+owner: alice
 edges:
   - target: task-after
     type: decomposes_to

@@ -80,7 +80,7 @@ mod tests {
     use tempyr_core::node::parse_node;
 
     fn make_root() -> Node {
-        let content = "---\nid: feat-test\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Test Feature\n\nA test feature body.\n";
+        let content = "---\nid: feat-test\ntype: feature\nstatus: draft\nowner: alice\n---\n# Test Feature\n\nA test feature body.\n";
         parse_node(content, PathBuf::from("test.md")).unwrap()
     }
 

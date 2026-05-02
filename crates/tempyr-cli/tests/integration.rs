@@ -667,7 +667,7 @@ fn test_mcp_relative_project_root_arg_prefers_client_roots_over_launch_project()
 
     fs::write(
         client_root.join("graph/features/client-only.md"),
-        "---\nid: client-only\ntype: feature\nstatus: draft\nowner: caleb\nedges: []\n---\n# Client Only\n",
+        "---\nid: client-only\ntype: feature\nstatus: draft\nowner: alice\nedges: []\n---\n# Client Only\n",
     )
     .unwrap();
 
@@ -798,7 +798,7 @@ fn test_add_node() {
             "--status",
             "draft",
             "--owner",
-            "caleb",
+            "alice",
         ])
         .assert()
         .success()
@@ -816,13 +816,13 @@ fn test_validate_with_valid_nodes() {
         &tmp,
         "features",
         "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n",
     );
     write_node(
         &tmp,
         "epics",
         "epic-a",
-        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n",
+        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n",
     );
 
     tempyr()
@@ -842,7 +842,7 @@ fn test_validate_catches_dangling_edge() {
         &tmp,
         "features",
         "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: nonexistent\n    type: depends_on\n---\n# A\n",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\nedges:\n  - target: nonexistent\n    type: depends_on\n---\n# A\n",
     );
 
     tempyr()
@@ -861,13 +861,13 @@ fn test_add_edge_and_validate() {
         &tmp,
         "features",
         "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
     );
     write_node(
         &tmp,
         "epics",
         "epic-a",
-        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n",
+        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\n---\n# Epic\n",
     );
 
     tempyr()
@@ -894,13 +894,13 @@ fn test_remove_edge() {
         &tmp,
         "features",
         "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
     );
     write_node(
         &tmp,
         "epics",
         "epic-a",
-        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n",
+        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\n---\n# Epic\n",
     );
 
     tempyr()
@@ -926,7 +926,7 @@ fn test_rename_node() {
         &tmp,
         "features",
         "feat-old",
-        "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Old\n",
+        "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: alice\n---\n# Old\n",
     );
 
     tempyr()
@@ -949,7 +949,7 @@ fn test_status_update() {
         &tmp,
         "features",
         "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
     );
 
     tempyr()
@@ -1659,7 +1659,7 @@ fn test_status_does_not_emit_for_non_task_nodes() {
         &tmp,
         "features",
         "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
     );
 
     tempyr()
@@ -1722,13 +1722,13 @@ fn test_traverse() {
         &tmp,
         "features",
         "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feat A\n",
     );
     write_node(
         &tmp,
         "epics",
         "epic-a",
-        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n",
+        "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n",
     );
 
     tempyr()
@@ -1749,7 +1749,7 @@ fn test_index_rebuild_and_search() {
         &tmp,
         "features",
         "feat-replay",
-        "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Session Replay\n\nCapture and replay user sessions.\n",
+        "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: alice\n---\n# Session Replay\n\nCapture and replay user sessions.\n",
     );
 
     tempyr()
@@ -1776,7 +1776,7 @@ fn test_search_builds_structural_index_when_missing() {
         &tmp,
         "features",
         "feat-replay",
-        "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Session Replay\n\nCapture and replay user sessions.\n",
+        "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: alice\n---\n# Session Replay\n\nCapture and replay user sessions.\n",
     );
 
     tempyr()
@@ -1796,7 +1796,7 @@ fn test_add_refreshes_index_for_follow_up_search() {
         &tmp,
         "features",
         "feat-existing",
-        "---\nid: feat-existing\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Existing\n\nAlready indexed.\n",
+        "---\nid: feat-existing\ntype: feature\nstatus: draft\nowner: alice\n---\n# Existing\n\nAlready indexed.\n",
     );
 
     tempyr()
@@ -1815,7 +1815,7 @@ fn test_add_refreshes_index_for_follow_up_search() {
             "--status",
             "draft",
             "--owner",
-            "caleb",
+            "alice",
             "--body",
             "# Terrain Streaming\n\nLOD terrain streaming for large worlds.\n",
         ])
@@ -1845,7 +1845,7 @@ fn test_add_builds_index_when_missing() {
             "--status",
             "draft",
             "--owner",
-            "caleb",
+            "alice",
             "--body",
             "# Terrain Streaming\n\nLOD terrain streaming for large worlds.\n",
         ])
@@ -1869,7 +1869,7 @@ fn test_status_refreshes_index_for_filtered_search() {
         &tmp,
         "features",
         "feat-terrain",
-        "---\nid: feat-terrain\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Terrain Streaming\n\nLOD terrain streaming for large worlds.\n",
+        "---\nid: feat-terrain\ntype: feature\nstatus: draft\nowner: alice\n---\n# Terrain Streaming\n\nLOD terrain streaming for large worlds.\n",
     );
 
     tempyr()
@@ -1901,13 +1901,13 @@ fn test_add_edge_refreshes_index_for_follow_up_search() {
         &tmp,
         "features",
         "feat-terrain",
-        "---\nid: feat-terrain\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Terrain Streaming\n\nLOD terrain streaming for large worlds.\n",
+        "---\nid: feat-terrain\ntype: feature\nstatus: draft\nowner: alice\n---\n# Terrain Streaming\n\nLOD terrain streaming for large worlds.\n",
     );
     write_node(
         &tmp,
         "epics",
         "epic-world",
-        "---\nid: epic-world\ntype: epic\nstatus: draft\nowner: caleb\n---\n# World Streaming\n\nParent epic.\n",
+        "---\nid: epic-world\ntype: epic\nstatus: draft\nowner: alice\n---\n# World Streaming\n\nParent epic.\n",
     );
 
     tempyr()
@@ -1939,7 +1939,7 @@ fn test_render_prd() {
         &tmp,
         "features",
         "feat-replay",
-        "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Session Replay\n\nCapture user sessions.\n",
+        "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: alice\n---\n# Session Replay\n\nCapture user sessions.\n",
     );
 
     tempyr()
@@ -1961,7 +1961,7 @@ fn test_render_to_file() {
         &tmp,
         "features",
         "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feature A\n\nBody text.\n",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# Feature A\n\nBody text.\n",
     );
 
     let output_path = tmp.path().join("output.md");
@@ -1992,7 +1992,7 @@ fn test_render_to_file_creates_parent_directories() {
         &tmp,
         "features",
         "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feature A\n\nBody text.\n",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# Feature A\n\nBody text.\n",
     );
 
     let output_path = tmp.path().join("renders").join("feature-a.md");
@@ -2026,7 +2026,7 @@ fn test_json_output() {
         &tmp,
         "features",
         "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
     );
 
     tempyr()
@@ -2046,7 +2046,7 @@ fn test_index_stats() {
         &tmp,
         "features",
         "feat-a",
-        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+        "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
     );
 
     tempyr()
@@ -2072,19 +2072,19 @@ fn test_list_by_status() {
         &tmp,
         "tasks",
         "task-a",
-        "---\nid: task-a\ntype: task\nstatus: backlog\nowner: caleb\n---\n# Task A\n\nDo stuff.\n",
+        "---\nid: task-a\ntype: task\nstatus: backlog\nowner: alice\n---\n# Task A\n\nDo stuff.\n",
     );
     write_node(
         &tmp,
         "tasks",
         "task-b",
-        "---\nid: task-b\ntype: task\nstatus: in_progress\nowner: alice\n---\n# Task B\n\nDo other stuff.\n",
+        "---\nid: task-b\ntype: task\nstatus: in_progress\nowner: bob\n---\n# Task B\n\nDo other stuff.\n",
     );
     write_node(
         &tmp,
         "features",
         "feat-x",
-        "---\nid: feat-x\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feature X\n\nA feature.\n",
+        "---\nid: feat-x\ntype: feature\nstatus: draft\nowner: alice\n---\n# Feature X\n\nA feature.\n",
     );
 
     tempyr()
@@ -2114,7 +2114,7 @@ fn test_list_by_status() {
     // List by owner
     tempyr()
         .current_dir(tmp.path())
-        .args(["list", "--owner", "caleb"])
+        .args(["list", "--owner", "alice"])
         .assert()
         .success()
         .stdout(predicate::str::contains("task-a"))

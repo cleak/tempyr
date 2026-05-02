@@ -1,8 +1,16 @@
 [package]
 name = "tempyr-journal"
+description = "Append-only agent reasoning journal for Tempyr: cross-platform locking, JSONL storage, and secret redaction."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde = { workspace = true }

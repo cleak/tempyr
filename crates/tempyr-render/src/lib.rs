@@ -1,3 +1,9 @@
+//! Document rendering for Tempyr.
+//!
+//! PRDs, TDDs, and similar documents are rendered views over the graph: a
+//! TOML template selects a root node and walks specified edges, then a
+//! formatter assembles the collected nodes into a Markdown document.
+
 pub mod collector;
 pub mod formatter;
 pub mod template;
@@ -115,7 +121,7 @@ mod tests {
 id: feat-replay
 type: feature
 status: draft
-owner: caleb
+owner: alice
 edges:
   - target: decision-storage
     type: depends_on

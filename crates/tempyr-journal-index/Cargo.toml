@@ -1,11 +1,19 @@
 [package]
 name = "tempyr-journal-index"
+description = "Hybrid search index for the Tempyr journal: FTS5 + vec0 RRF with optional cross-encoder reranking."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-tempyr-journal = { path = "../tempyr-journal" }
+tempyr-journal = { path = "../tempyr-journal", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

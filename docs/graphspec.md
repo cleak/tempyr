@@ -212,7 +212,7 @@ type: feature
 status: draft                        # draft | active | completed | superseded | archived
 created: 2026-03-20T14:30:00Z
 updated: 2026-03-23T09:15:00Z
-owner: caleb
+owner: alice
 tags: [replay, observability, q2-2026]
 edges:
   - target: epic-observability-v2

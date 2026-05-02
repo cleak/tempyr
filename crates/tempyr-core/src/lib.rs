@@ -1,3 +1,9 @@
+//! Core graph data model for Tempyr.
+//!
+//! Provides node and edge parsing from Markdown + YAML frontmatter, schema
+//! validation, an in-memory graph with traversal, bidirectional edge
+//! consistency, and temporal filtering via `valid_from` / `valid_until`.
+
 pub mod edge;
 pub mod graph;
 pub mod id;

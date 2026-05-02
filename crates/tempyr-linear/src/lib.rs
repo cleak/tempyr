@@ -1,3 +1,8 @@
+//! Linear integration for Tempyr.
+//!
+//! Push and pull task nodes between the Tempyr graph and a Linear workspace,
+//! including status mapping and rendering of context payloads for assignees.
+
 #![allow(clippy::too_many_arguments)]
 
 pub mod client;
