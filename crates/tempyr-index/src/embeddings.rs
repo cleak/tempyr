@@ -25,6 +25,11 @@ pub trait EmbeddingProvider: Send + Sync {
 
     /// Provider name for display.
     fn name(&self) -> &str;
+
+    /// Stable cache identity for vectors produced by this provider.
+    fn fingerprint(&self) -> String {
+        format!("provider={};dimensions={}", self.name(), self.dimensions())
+    }
 }
 
 /// Whether the text is a query or a document (some models optimize differently).
@@ -135,6 +140,13 @@ impl EmbeddingProvider for VoyageClient {
 
     fn name(&self) -> &str {
         "voyage"
+    }
+
+    fn fingerprint(&self) -> String {
+        format!(
+            "provider=voyage;model={};dimensions={}",
+            self.model, self.dimensions
+        )
     }
 }
 
@@ -320,6 +332,13 @@ impl EmbeddingProvider for GeminiClient {
     fn name(&self) -> &str {
         "gemini"
     }
+
+    fn fingerprint(&self) -> String {
+        format!(
+            "provider=gemini;model={};dimensions={}",
+            self.model, self.dimensions
+        )
+    }
 }
 
 // Local fastembed fallback
@@ -372,6 +391,13 @@ impl EmbeddingProvider for FastembedClient {
 
     fn name(&self) -> &str {
         "local (all-MiniLM-L6-v2)"
+    }
+
+    fn fingerprint(&self) -> String {
+        format!(
+            "provider=local;model={LOCAL_MODEL};dimensions={}",
+            self.dimensions()
+        )
     }
 }
 
@@ -633,6 +659,7 @@ pub struct EmbeddingStore {
 
 impl EmbeddingStore {
     const SQLITE_BATCH_SIZE: usize = 900;
+    const PROVIDER_FINGERPRINT_KEY: &str = "provider_fingerprint";
 
     pub fn open_or_create(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -655,9 +682,57 @@ impl EmbeddingStore {
                 content_hash TEXT PRIMARY KEY,
                 embedding    BLOB NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS embedding_store_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             ",
         )?;
         Ok(())
+    }
+
+    fn meta_value(&self, key: &str) -> Result<Option<String>> {
+        let result = self.conn.query_row(
+            "SELECT value FROM embedding_store_meta WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn set_meta_value(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO embedding_store_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
+    fn clear_embeddings(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM embeddings", [])?;
+        Ok(())
+    }
+
+    pub fn ensure_provider_fingerprint(&self, provider: &dyn EmbeddingProvider) -> Result<()> {
+        let fingerprint = provider.fingerprint();
+        match self.meta_value(Self::PROVIDER_FINGERPRINT_KEY)? {
+            Some(existing) if existing == fingerprint => Ok(()),
+            Some(_) => {
+                self.clear_embeddings()?;
+                self.set_meta_value(Self::PROVIDER_FINGERPRINT_KEY, &fingerprint)
+            }
+            None => {
+                if self.count()? > 0 {
+                    self.clear_embeddings()?;
+                }
+                self.set_meta_value(Self::PROVIDER_FINGERPRINT_KEY, &fingerprint)
+            }
+        }
     }
 
     pub fn has_embedding(&self, content_hash: &str) -> Result<bool> {
@@ -793,6 +868,8 @@ pub async fn embed_graph(
     graph: &Graph,
     provider: &dyn EmbeddingProvider,
 ) -> Result<EmbedStats> {
+    store.ensure_provider_fingerprint(provider)?;
+
     let mut to_embed: Vec<(String, String, String)> = Vec::new(); // (id, hash, text)
     let mut seen_hashes = HashSet::new();
 
@@ -914,6 +991,26 @@ reverse = "dependency_of"
         }
     }
 
+    struct NamedProvider {
+        name: &'static str,
+        embeddings: Vec<Vec<f32>>,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for NamedProvider {
+        async fn embed(&self, _texts: &[String], _input_type: InputType) -> Result<Vec<Vec<f32>>> {
+            Ok(self.embeddings.clone())
+        }
+
+        fn dimensions(&self) -> usize {
+            self.embeddings.first().map_or(0, Vec::len)
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+    }
+
     #[test]
     fn embed_graph_rejects_mismatched_provider_output_count() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1009,6 +1106,41 @@ reverse = "dependency_of"
 
         assert_eq!(stats.embedded, 1);
         assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn embed_graph_replaces_cache_when_provider_fingerprint_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let graph = make_graph();
+        let content_hash = graph.get_node("feat-replay").unwrap().content_hash.clone();
+        let provider_a = NamedProvider {
+            name: "provider-a",
+            embeddings: vec![vec![1.0, 0.0]],
+        };
+        let provider_b = NamedProvider {
+            name: "provider-b",
+            embeddings: vec![vec![0.0, 1.0]],
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(embed_graph(&store, &graph, &provider_a))
+            .unwrap();
+        assert_eq!(
+            store.get_embedding(&content_hash).unwrap().unwrap(),
+            vec![1.0, 0.0]
+        );
+
+        let stats = rt
+            .block_on(embed_graph(&store, &graph, &provider_b))
+            .unwrap();
+
+        assert_eq!(stats.embedded, 1);
+        assert_eq!(store.count().unwrap(), 1);
+        assert_eq!(
+            store.get_embedding(&content_hash).unwrap().unwrap(),
+            vec![0.0, 1.0]
+        );
     }
 
     #[test]
