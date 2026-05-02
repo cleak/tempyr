@@ -5,8 +5,10 @@
 [![Rust](https://img.shields.io/badge/rust-2024_edition-orange.svg)](https://www.rust-lang.org)
 [![Status: experimental](https://img.shields.io/badge/status-experimental-yellow.svg)](#status)
 
-> **Status:** Early, experimental, solo side project. APIs, schemas, and the
-> on-disk graph layout may change without notice. Use at your own risk.
+## Status
+
+> Early, experimental, solo side project. APIs, schemas, and the on-disk
+> graph layout may change without notice. Use at your own risk.
 
 Tempyr is a file-based knowledge graph for AI-assisted product and technical
 design. It sits between a PRD helper, a project management system, and an
