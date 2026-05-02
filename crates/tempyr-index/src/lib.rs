@@ -5,6 +5,7 @@ pub mod hybrid;
 pub mod incremental;
 pub mod indexer;
 pub mod refresh;
+pub mod semantic;
 pub mod vector;
 
 use thiserror::Error;

@@ -1,7 +1,7 @@
+use crate::commands::semantic::SemanticSearchRuntime;
 use crate::config::ProjectContext;
 use tempyr_core::graph::Graph;
-use tempyr_index::hybrid::{RetrievalConfig, hybrid_retrieve};
-use tempyr_index::indexer::Index;
+use tempyr_index::hybrid::RetrievalConfig;
 
 pub fn run(
     ctx: &ProjectContext,
@@ -9,15 +9,14 @@ pub fn run(
     root: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let index_path = ctx.queryable_index_path()?;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
-    let index = Index::open(&index_path)?;
     let config = RetrievalConfig {
         token_budget: 8000,
         ..RetrievalConfig::standard()
     };
 
-    let results = hybrid_retrieve(&index, &graph, question, root, &config, None)?;
+    let mut semantic_search = SemanticSearchRuntime::new(ctx)?;
+    let results = semantic_search.hybrid_retrieve(&graph, question, root, config)?;
 
     if results.is_empty() {
         println!("No relevant context found for: {question}");

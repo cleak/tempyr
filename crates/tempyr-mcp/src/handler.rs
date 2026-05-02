@@ -20,11 +20,13 @@ use tempyr_core::schema::Schema;
 use tempyr_core::temporal::TemporalFilter;
 use tempyr_core::traverse::bfs;
 use tempyr_core::validate::validate_graph;
+use tempyr_index::embeddings::{self, EmbeddingStore};
 use tempyr_index::fts::MetadataFilter;
 use tempyr_index::health::{self, HealthInputs};
-use tempyr_index::hybrid::{RetrievalConfig, hybrid_retrieve};
+use tempyr_index::hybrid::RetrievalConfig;
 use tempyr_index::indexer::Index;
 use tempyr_index::refresh::refresh_index_for_graph;
+use tempyr_index::semantic::SemanticSearchEngine;
 use tempyr_interview::gaps::next_questions;
 use tempyr_interview::proposer;
 use tempyr_interview::session::{
@@ -499,6 +501,151 @@ fn ensure_index_path(
         .current_index_path()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Index refresh did not produce a queryable snapshot.".to_string())
+}
+
+struct McpSemanticSearch<'a> {
+    graph_dir: &'a Path,
+    gf_dir: &'a Path,
+    schema: &'a Schema,
+    graph: &'a Graph,
+    runtime: Option<McpSemanticSearchRuntime>,
+}
+
+struct McpSemanticSearchRuntime {
+    engine: SemanticSearchEngine,
+}
+
+impl<'a> McpSemanticSearch<'a> {
+    fn new(graph_dir: &'a Path, gf_dir: &'a Path, schema: &'a Schema, graph: &'a Graph) -> Self {
+        Self {
+            graph_dir,
+            gf_dir,
+            schema,
+            graph,
+            runtime: None,
+        }
+    }
+
+    fn runtime(&mut self) -> tempyr_render::Result<&mut McpSemanticSearchRuntime> {
+        if self.runtime.is_none() {
+            let runtime =
+                McpSemanticSearchRuntime::new(self.graph_dir, self.gf_dir, self.schema, self.graph)
+                    .map_err(tempyr_render_error)?;
+            self.runtime = Some(runtime);
+        }
+        Ok(self.runtime.as_mut().expect("semantic runtime initialized"))
+    }
+}
+
+impl tempyr_render::SemanticSearchProvider for McpSemanticSearch<'_> {
+    fn search(
+        &mut self,
+        request: &tempyr_render::SemanticSearchRequest,
+    ) -> tempyr_render::Result<Vec<tempyr_render::SemanticSearchHit>> {
+        let graph = self.graph;
+        let results = self
+            .runtime()?
+            .vector_search(
+                graph,
+                &request.query,
+                request.max_results,
+                request.target_type.as_deref(),
+                request.min_similarity,
+            )
+            .map_err(tempyr_render_error)?;
+
+        Ok(results
+            .into_iter()
+            .map(|result| tempyr_render::SemanticSearchHit {
+                node_id: result.node_id,
+                score: result.similarity,
+            })
+            .collect())
+    }
+}
+
+impl McpSemanticSearchRuntime {
+    fn new(
+        graph_dir: &Path,
+        gf_dir: &Path,
+        schema: &Schema,
+        graph: &Graph,
+    ) -> Result<Self, String> {
+        let root = graph_dir
+            .parent()
+            .ok_or_else(|| "Failed to resolve project root from graph dir".to_string())?;
+        let _ = tempyr_core::project::load_project_env_from(root.to_path_buf());
+
+        let index_path = ensure_index_path(graph_dir, gf_dir, schema, Some(graph))?;
+        let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
+
+        let config = embeddings::load_embedding_config_from_file(&gf_dir.join("config.toml"))
+            .map_err(|e| e.to_string())?;
+        let resolved = embeddings::resolve_embedding_config(&config).map_err(|e| e.to_string())?;
+        let cache = tempyr_core::project::cache_layout(root, gf_dir);
+        let store_path = embeddings::embedding_store_path(
+            &cache,
+            &resolved.provider,
+            resolved.model.as_deref(),
+            Some(resolved.dimensions),
+        );
+        let store = EmbeddingStore::open_or_create(&store_path).map_err(|e| e.to_string())?;
+        let provider =
+            embeddings::create_provider_from_resolved(&resolved).map_err(|e| e.to_string())?;
+
+        Ok(Self {
+            engine: SemanticSearchEngine::new(index, store, provider),
+        })
+    }
+
+    fn vector_search(
+        &mut self,
+        graph: &Graph,
+        query: &str,
+        max_results: usize,
+        node_type: Option<&str>,
+        min_similarity: Option<f64>,
+    ) -> Result<Vec<tempyr_index::vector::VectorSearchResult>, String> {
+        block_on_index_future(self.engine.vector_search(
+            graph,
+            query,
+            max_results,
+            node_type,
+            min_similarity,
+        ))
+    }
+
+    fn hybrid_retrieve(
+        &mut self,
+        graph: &Graph,
+        query: &str,
+        root: Option<&str>,
+        config: RetrievalConfig,
+    ) -> Result<Vec<tempyr_index::hybrid::HybridResult>, String> {
+        block_on_index_future(self.engine.hybrid_retrieve(graph, query, root, config))
+    }
+}
+
+fn block_on_index_future<T, F>(future: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = tempyr_index::Result<T>>,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err(
+                "Semantic retrieval requires a multi-threaded Tokio runtime in MCP mode."
+                    .to_string(),
+            );
+        }
+        tokio::task::block_in_place(|| handle.block_on(future)).map_err(|e| e.to_string())
+    } else {
+        let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+        runtime.block_on(future).map_err(|e| e.to_string())
+    }
+}
+
+fn tempyr_render_error(err: String) -> tempyr_render::RenderError {
+    tempyr_render::RenderError::General(err)
 }
 
 fn refresh_index_for_current_snapshot(
@@ -1117,22 +1264,15 @@ impl TempyrServer {
             .transpose()?;
         let graph =
             Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
-        let index_path = ensure_index_path(&graph_dir, &gf_dir, &schema, Some(&graph))?;
-        let index = Index::open(&index_path).map_err(|e| format!("Index: {e}"))?;
 
         let config = RetrievalConfig {
             token_budget: budget,
             ..RetrievalConfig::standard()
         };
-        let results = hybrid_retrieve(
-            &index,
-            &graph,
-            &p.query,
-            resolved_root.as_deref(),
-            &config,
-            None,
-        )
-        .map_err(|e| e.to_string())?;
+        let mut semantic_search =
+            McpSemanticSearchRuntime::new(&graph_dir, &gf_dir, &schema, &graph)?;
+        let results =
+            semantic_search.hybrid_retrieve(&graph, &p.query, resolved_root.as_deref(), config)?;
 
         let mut output = String::new();
         for r in &results {
@@ -1461,7 +1601,8 @@ impl TempyrServer {
     fn graph_render(&self, Parameters(p): Parameters<GraphRenderParams>) -> Result<String, String> {
         let (graph_dir, gf_dir, schema) = self.find_project()?;
         let root_id = ops::resolve_node_id(&graph_dir, &p.root_node).map_err(|e| e.to_string())?;
-        let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
+        let graph =
+            Graph::load_from_directory(&graph_dir, schema.clone()).map_err(|e| e.to_string())?;
 
         let filter = if p.include_history.unwrap_or(false) {
             TemporalFilter::with_history()
@@ -1469,9 +1610,19 @@ impl TempyrServer {
             TemporalFilter::current()
         };
 
+        let mut semantic_search = McpSemanticSearch::new(&graph_dir, &gf_dir, &schema, &graph);
         let local_path = gf_dir.join("render").join(format!("{}.toml", p.template));
         if local_path.exists() {
-            tempyr_render::render(&graph, &local_path, &root_id, &filter).map_err(|e| e.to_string())
+            tempyr_render::render_with_options(
+                &graph,
+                &local_path,
+                &root_id,
+                &filter,
+                tempyr_render::RenderOptions {
+                    semantic_search: Some(&mut semantic_search),
+                },
+            )
+            .map_err(|e| e.to_string())
         } else {
             let template_toml = match p.template.as_str() {
                 "prd" => include_str!("../../../templates/prd.toml"),
@@ -1479,8 +1630,16 @@ impl TempyrServer {
                 "task-prompt" => include_str!("../../../templates/task-prompt.toml"),
                 _ => return Err(format!("Unknown template: '{}'", p.template)),
             };
-            tempyr_render::render_from_str(&graph, template_toml, &root_id, &filter)
-                .map_err(|e| e.to_string())
+            tempyr_render::render_from_str_with_options(
+                &graph,
+                template_toml,
+                &root_id,
+                &filter,
+                tempyr_render::RenderOptions {
+                    semantic_search: Some(&mut semantic_search),
+                },
+            )
+            .map_err(|e| e.to_string())
         }
     }
     // Interview tools

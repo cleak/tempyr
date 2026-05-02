@@ -157,7 +157,7 @@ pub fn build_report(inputs: &HealthInputs<'_>) -> HealthReport {
     }
     if matches!(embedding.store_exists, Some(false)) && embedding.api_key_set != Some(false) {
         warnings.push(format!(
-            "Embedding store does not exist at {}. Run `tempyr index rebuild` to populate embeddings.",
+            "Embedding store does not exist at {}. Run a vector-backed command or `tempyr index rebuild` to populate embeddings.",
             embedding.store_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
         ));
     }

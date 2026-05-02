@@ -23,6 +23,7 @@ pub(crate) mod process_utils;
 pub mod rename;
 pub mod render_cmd;
 pub mod search;
+pub mod semantic;
 pub mod status_cmd;
 pub mod traverse;
 pub mod update;

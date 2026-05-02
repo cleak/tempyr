@@ -159,5 +159,6 @@ mod tests {
         assert_eq!(insights.source.as_deref(), Some("semantic_search"));
         assert_eq!(insights.query_from.as_deref(), Some("root"));
         assert_eq!(insights.max_results, Some(5));
+        assert_eq!(insights.include_body, Some(true));
     }
 }
