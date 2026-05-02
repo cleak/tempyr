@@ -67,9 +67,13 @@ impl SemanticSearchEngine {
             .provider
             .embed(&[query.to_string()], InputType::Query)
             .await?;
-        query_embeddings.into_iter().next().ok_or_else(|| {
-            IndexError::General("Embedding provider returned no vector for the query.".to_string())
-        })
+        if query_embeddings.len() != 1 {
+            return Err(IndexError::General(
+                "Embedding provider returned wrong number of vectors for the query; expected exactly 1"
+                    .to_string(),
+            ));
+        }
+        Ok(query_embeddings.into_iter().next().unwrap())
     }
 }
 
@@ -168,6 +172,26 @@ allowed_edges = []
         }
     }
 
+    struct WrongQueryProvider;
+
+    #[async_trait]
+    impl EmbeddingProvider for WrongQueryProvider {
+        async fn embed(&self, texts: &[String], input_type: InputType) -> Result<Vec<Vec<f32>>> {
+            match input_type {
+                InputType::Query => Ok(vec![vec![0.0, 1.0], vec![1.0, 0.0]]),
+                InputType::Document => Ok(texts.iter().map(|_| vec![0.0, 1.0]).collect()),
+            }
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+
+        fn name(&self) -> &str {
+            "wrong-query"
+        }
+    }
+
     #[test]
     fn vector_search_embeds_missing_graph_nodes_before_searching() {
         let tmp = tempfile::tempdir().unwrap();
@@ -208,6 +232,27 @@ allowed_edges = []
             .unwrap();
 
         assert!(results.iter().any(|result| result.node_id == "insight-b"));
+    }
+
+    #[test]
+    fn vector_search_rejects_wrong_query_embedding_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let graph = make_graph();
+        let index = Index::create_in_memory().unwrap();
+        index.rebuild(&graph).unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let provider = Box::new(WrongQueryProvider);
+        let mut engine = SemanticSearchEngine::new(index, store, provider);
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(engine.vector_search(&graph, "related", 10, Some("insight"), None))
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("wrong number of vectors for the query; expected exactly 1")
+        );
     }
 
     #[test]
