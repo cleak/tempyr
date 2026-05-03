@@ -128,7 +128,7 @@ type: feature
 status: draft
 created: 2026-03-20T14:30:00Z
 updated: 2026-03-23T09:15:00Z
-owner: caleb
+owner: alice
 tags: [replay, observability, q2-2026]
 edges:
   - target: epic-observability-v2
@@ -158,7 +158,7 @@ Platform engineers currently debug funnel drop-offs by reading logs.
         assert_eq!(node.id(), "feat-session-replay");
         assert_eq!(node.node_type(), "feature");
         assert_eq!(node.status(), Some("draft"));
-        assert_eq!(node.frontmatter.owner.as_deref(), Some("caleb"));
+        assert_eq!(node.frontmatter.owner.as_deref(), Some("alice"));
         assert_eq!(
             node.frontmatter.tags.as_ref().unwrap(),
             &["replay", "observability", "q2-2026"]

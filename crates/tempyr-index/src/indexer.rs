@@ -324,8 +324,8 @@ mod tests {
     fn make_test_graph() -> Graph {
         let mut graph = Graph::new(make_schema());
 
-        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\ntags: [replay, test]\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feature A\n\nThis feature handles session replay.\n";
-        let epic = "---\nid: epic-a\ntype: epic\nstatus: active\nowner: caleb\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n\nThe observability epic.\n";
+        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\ntags: [replay, test]\nedges:\n  - target: epic-a\n    type: child_of\n---\n# Feature A\n\nThis feature handles session replay.\n";
+        let epic = "---\nid: epic-a\ntype: epic\nstatus: active\nowner: alice\nedges:\n  - target: feat-a\n    type: parent_of\n---\n# Epic A\n\nThe observability epic.\n";
         let task = "---\nid: task-a\ntype: task\nstatus: backlog\n---\n# Task A\n\nImplement ingestion pipeline.\n";
 
         graph.add_node(parse_node(feat, PathBuf::from("feat.md")).unwrap());

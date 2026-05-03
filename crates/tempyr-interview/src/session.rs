@@ -706,7 +706,7 @@ mod tests {
         session
             .root_node
             .fields
-            .insert("owner".to_string(), "caleb".to_string());
+            .insert("owner".to_string(), "alice".to_string());
 
         session.add_tentative_node(TentativeNode {
             id: "persona-dev".to_string(),

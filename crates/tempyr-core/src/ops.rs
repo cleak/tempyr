@@ -609,7 +609,7 @@ mod tests {
             "feat-test",
             "feature",
             Some("draft"),
-            Some("caleb"),
+            Some("alice"),
             Some(&["test".to_string()]),
             "# Test Feature\n\nA test.\n",
         )
@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(node.id(), "feat-test");
         assert_eq!(node.node_type(), "feature");
         assert_eq!(node.status(), Some("draft"));
-        assert_eq!(node.frontmatter.owner.as_deref(), Some("caleb"));
+        assert_eq!(node.frontmatter.owner.as_deref(), Some("alice"));
     }
 
     #[test]
@@ -662,13 +662,13 @@ mod tests {
             &graph_dir,
             "features",
             "feat-a",
-            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Feat A\n",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# Feat A\n",
         );
         write_node(
             &graph_dir,
             "epics",
             "epic-a",
-            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic A\n",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\n---\n# Epic A\n",
         );
 
         add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
@@ -704,19 +704,19 @@ mod tests {
             &graph_dir,
             "features",
             "feat-a",
-            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
         );
         write_node(
             &graph_dir,
             "epics",
             "epic-z",
-            "---\nid: epic-z\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Z\n",
+            "---\nid: epic-z\ntype: epic\nstatus: draft\nowner: alice\n---\n# Z\n",
         );
         write_node(
             &graph_dir,
             "epics",
             "epic-a",
-            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# A\n",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\n---\n# A\n",
         );
 
         add_edge(&graph_dir, "feat-a", "epic-z", "child_of", &schema).unwrap();
@@ -738,13 +738,13 @@ mod tests {
             &graph_dir,
             "features",
             "feat-a",
-            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
         );
         write_node(
             &graph_dir,
             "epics",
             "epic-a",
-            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# A\n",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\n---\n# A\n",
         );
 
         add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
@@ -762,13 +762,13 @@ mod tests {
             &graph_dir,
             "features",
             "feat-a",
-            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
         );
         write_node(
             &graph_dir,
             "epics",
             "epic-a",
-            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# A\n",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\n---\n# A\n",
         );
 
         add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
@@ -792,7 +792,7 @@ mod tests {
             &graph_dir,
             "features",
             "feat-old",
-            "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Old\n",
+            "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: alice\n---\n# Old\n",
         );
 
         let modified = rename_node(&graph_dir, "feat-old", "feat-new").unwrap();
@@ -818,13 +818,13 @@ mod tests {
             &graph_dir,
             "features",
             "feat-a",
-            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
         );
         write_node(
             &graph_dir,
             "epics",
             "epic-a",
-            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\n---\n# Epic\n",
         );
 
         add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
@@ -848,13 +848,13 @@ mod tests {
             &graph_dir,
             "features",
             "feat-a",
-            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
         );
         write_node(
             &graph_dir,
             "features",
             "feat-b",
-            "---\nid: feat-b\ntype: feature\nstatus: draft\nowner: caleb\n---\n# B\n",
+            "---\nid: feat-b\ntype: feature\nstatus: draft\nowner: alice\n---\n# B\n",
         );
 
         let err = rename_node(&graph_dir, "feat-a", "feat-b").unwrap_err();
@@ -873,7 +873,7 @@ mod tests {
             &graph_dir,
             "features",
             "feat-a",
-            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
         );
 
         update_status(&graph_dir, "feat-a", "active", &schema).unwrap();
@@ -893,7 +893,7 @@ mod tests {
             &graph_dir,
             "features",
             "feat-a",
-            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
         );
 
         let result = update_status(&graph_dir, "feat-a", "banana", &schema);
@@ -910,7 +910,7 @@ mod tests {
             &graph_dir,
             "features",
             "feat-a",
-            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n\nOld body.\n",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n\nOld body.\n",
         );
 
         update_node(
@@ -930,7 +930,7 @@ mod tests {
         assert!(node.body.contains("New body."));
         assert!(!node.body.contains("Old body."));
         // Owner should be preserved
-        assert_eq!(node.frontmatter.owner.as_deref(), Some("caleb"));
+        assert_eq!(node.frontmatter.owner.as_deref(), Some("alice"));
     }
 
     #[test]
@@ -943,13 +943,13 @@ mod tests {
             &graph_dir,
             "features",
             "feat-a",
-            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n",
+            "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n",
         );
         write_node(
             &graph_dir,
             "epics",
             "epic-a",
-            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: caleb\n---\n# Epic\n",
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\n---\n# Epic\n",
         );
 
         add_edge(&graph_dir, "feat-a", "epic-a", "child_of", &schema).unwrap();
@@ -986,7 +986,7 @@ mod tests {
             "session-replay",
             "feature",
             Some("draft"),
-            Some("caleb"),
+            Some("alice"),
             None,
             "# Session Replay\n\nA feature.\n",
         )
@@ -1073,7 +1073,7 @@ mod tests {
             &graph_dir,
             "features",
             "feat-old",
-            "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: caleb\n---\n# Old\n",
+            "---\nid: feat-old\ntype: feature\nstatus: draft\nowner: alice\n---\n# Old\n",
         );
 
         let result = rename_node_slug(&graph_dir, "feat-old", "new-name");

@@ -1,13 +1,6 @@
+use crate::commands::semantic::SemanticSearchRuntime;
 use crate::config::ProjectContext;
-use tempyr_index::embeddings::{self, EmbeddingStore, InputType};
-use tempyr_index::indexer::Index;
-
-fn should_use_legacy_embeddings(
-    store_embedding_count: usize,
-    legacy_embedding_count: usize,
-) -> bool {
-    legacy_embedding_count > 0 && legacy_embedding_count > store_embedding_count
-}
+use tempyr_core::graph::Graph;
 
 pub fn run(
     ctx: &ProjectContext,
@@ -16,44 +9,9 @@ pub fn run(
     node_type: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let index_path = ctx.queryable_index_path()?;
-    let index = Index::open(&index_path)?;
-    let resolved = ctx.resolved_embedding_config()?;
-    let store_path = ctx.embedding_store_path(
-        &resolved.provider,
-        resolved.model.as_deref(),
-        Some(resolved.dimensions),
-    );
-    let store = EmbeddingStore::open_or_create(&store_path)?;
-
-    // Check if embeddings exist
-    let store_embedding_count = store.count_embeddings_for_index(&index, node_type)?;
-    let legacy_embedding_count = index.embedding_count_for_node_type(node_type)?;
-    let use_legacy_index_embeddings =
-        should_use_legacy_embeddings(store_embedding_count, legacy_embedding_count);
-    if store_embedding_count == 0 && legacy_embedding_count == 0 {
-        anyhow::bail!(
-            "No embeddings found. Run `tempyr index rebuild` with an embedding \
-             API key set in Tempyr's shared worktree env, `.env.local`, or \
-             your shell environment (VOYAGE_API_KEY or GEMINI_API_KEY)."
-        );
-    }
-
-    // Embed the query
-    let provider = embeddings::create_provider_from_resolved(&resolved)?;
-
-    let rt = tokio::runtime::Runtime::new()?;
-    let query_embeddings = rt.block_on(provider.embed(&[query.to_string()], InputType::Query))?;
-
-    if query_embeddings.is_empty() {
-        anyhow::bail!("Failed to embed query");
-    }
-
-    let results = if use_legacy_index_embeddings {
-        index.vector_search(&query_embeddings[0], max_results, node_type)?
-    } else {
-        store.vector_search(&index, &query_embeddings[0], max_results, node_type)?
-    };
+    let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
+    let mut semantic_search = SemanticSearchRuntime::new(ctx)?;
+    let results = semantic_search.vector_search(&graph, query, max_results, node_type, None)?;
 
     if json {
         let json_results: Vec<_> = results
@@ -77,24 +35,4 @@ pub fn run(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::should_use_legacy_embeddings;
-
-    #[test]
-    fn prefers_legacy_when_shared_store_is_empty() {
-        assert!(should_use_legacy_embeddings(0, 3));
-    }
-
-    #[test]
-    fn prefers_shared_store_when_coverage_is_equal() {
-        assert!(!should_use_legacy_embeddings(2, 2));
-    }
-
-    #[test]
-    fn prefers_shared_store_when_it_has_more_coverage() {
-        assert!(!should_use_legacy_embeddings(3, 2));
-    }
 }

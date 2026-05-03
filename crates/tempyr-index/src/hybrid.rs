@@ -50,7 +50,7 @@ type ScoreMap = std::collections::HashMap<String, ScoreTriplet>;
 /// Run the full hybrid retrieval pipeline.
 ///
 /// Combines structural traversal (if root_id provided), BM25 full-text search,
-/// and vector similarity (deferred — always None for now).
+/// and vector similarity when a query embedding is provided.
 pub fn hybrid_retrieve(
     index: &Index,
     graph: &Graph,
@@ -249,7 +249,7 @@ mod tests {
     fn build_graph_and_index() -> (Graph, Index) {
         let mut graph = Graph::new(make_schema());
 
-        let feat = "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: caleb\nupdated: 2026-03-23T10:00:00Z\nedges:\n  - target: decision-storage\n    type: depends_on\n---\n# Session Replay\n\nCapture and replay user sessions.\n";
+        let feat = "---\nid: feat-replay\ntype: feature\nstatus: draft\nowner: alice\nupdated: 2026-03-23T10:00:00Z\nedges:\n  - target: decision-storage\n    type: depends_on\n---\n# Session Replay\n\nCapture and replay user sessions.\n";
         let decision = "---\nid: decision-storage\ntype: decision\nstatus: decided\nupdated: 2026-03-23T10:00:00Z\nedges:\n  - target: feat-replay\n    type: decision_for\n---\n# Storage Backend\n\nUse ClickHouse for replay storage.\n";
         let task = "---\nid: task-ingestion\ntype: task\nstatus: backlog\nupdated: 2026-01-01T00:00:00Z\n---\n# Ingestion Pipeline\n\nBuild the session replay ingestion pipeline.\n";
 

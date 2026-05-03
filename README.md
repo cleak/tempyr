@@ -1,5 +1,15 @@
 # Tempyr
 
+[![CI](https://github.com/cleak/tempyr/actions/workflows/ci.yml/badge.svg)](https://github.com/cleak/tempyr/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust](https://img.shields.io/badge/rust-2024_edition-orange.svg)](https://www.rust-lang.org)
+[![Status: experimental](https://img.shields.io/badge/status-experimental-yellow.svg)](#status)
+
+## Status
+
+> Early, experimental, solo side project. APIs, schemas, and the on-disk
+> graph layout may change without notice. Use at your own risk.
+
 Tempyr is a file-based knowledge graph for AI-assisted product and technical
 design. It sits between a PRD helper, a project management system, and an
 AI-centric task system: graph files are the source of truth, while PRDs, TDDs,
@@ -67,7 +77,7 @@ tempyr init --no-wizard
 Add a node:
 
 ```sh
-tempyr add feature --id feat-session-replay --status draft --owner caleb --body "Capture and replay user sessions."
+tempyr add feature --id feat-session-replay --status draft --owner alice --body "Capture and replay user sessions."
 ```
 
 Validate the graph:

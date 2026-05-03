@@ -1,7 +1,7 @@
+use crate::commands::semantic::SemanticSearchRuntime;
 use crate::config::ProjectContext;
 use tempyr_core::graph::Graph;
-use tempyr_index::hybrid::{RetrievalConfig, hybrid_retrieve};
-use tempyr_index::indexer::Index;
+use tempyr_index::hybrid::RetrievalConfig;
 
 pub fn run(
     ctx: &ProjectContext,
@@ -10,15 +10,14 @@ pub fn run(
     budget: usize,
     json: bool,
 ) -> anyhow::Result<()> {
-    let index_path = ctx.queryable_index_path()?;
     let graph = Graph::load_from_directory(&ctx.graph_dir, ctx.schema.clone())?;
-    let index = Index::open(&index_path)?;
     let config = RetrievalConfig {
         token_budget: budget,
         ..RetrievalConfig::standard()
     };
 
-    let results = hybrid_retrieve(&index, &graph, query, root, &config, None)?;
+    let mut semantic_search = SemanticSearchRuntime::new(ctx)?;
+    let results = semantic_search.hybrid_retrieve(&graph, query, root, config)?;
 
     if json {
         let json_results: Vec<_> = results
@@ -29,6 +28,7 @@ pub fn run(
                     "combined_score": r.combined_score,
                     "structural_score": r.structural_score,
                     "bm25_score": r.bm25_score,
+                    "vector_score": r.vector_score,
                 })
             })
             .collect();
@@ -50,8 +50,12 @@ pub fn run(
             .bm25_score
             .map(|s| format!(" bm25={s:.2}"))
             .unwrap_or_default();
+        let vector = result
+            .vector_score
+            .map(|s| format!(" vec={s:.2}"))
+            .unwrap_or_default();
         println!(
-            "{} (score={:.3}{structural}{bm25})",
+            "{} (score={:.3}{structural}{bm25}{vector})",
             result.node_id, result.combined_score
         );
     }

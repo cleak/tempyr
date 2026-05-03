@@ -83,6 +83,14 @@ run_cargo_install() {
   return "$status"
 }
 
+run_cargo_build() {
+  cargo build \
+    --release \
+    --manifest-path "$CRATE_PATH/Cargo.toml" \
+    --locked \
+    --bin tempyr
+}
+
 preflight_locked_target() {
   [[ -e "$TARGET_BIN" ]] || return 0
 
@@ -313,6 +321,7 @@ ensure_path_persistence() {
   esac
 }
 
+run_cargo_build
 preflight_locked_target
 
 run_cargo_install || {

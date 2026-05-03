@@ -329,7 +329,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join(format!("{id}.md")),
-            format!("---\nid: {id}\ntype: {node_type}\nstatus: draft\nowner: caleb\n---\n# {id}\n"),
+            format!("---\nid: {id}\ntype: {node_type}\nstatus: draft\nowner: alice\n---\n# {id}\n"),
         )
         .unwrap();
     }

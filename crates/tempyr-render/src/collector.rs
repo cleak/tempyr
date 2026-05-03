@@ -3,6 +3,7 @@ use tempyr_core::node::Node;
 use tempyr_core::temporal::{TemporalFilter, filter_edges, is_node_visible};
 
 use crate::template::SectionDef;
+use crate::{RenderError, Result, SemanticSearchProvider, SemanticSearchRequest};
 
 /// Collected data for a single rendered section.
 #[derive(Debug, Clone)]
@@ -24,39 +25,150 @@ pub struct SectionItem {
     pub internal_edges: Vec<(String, String, String)>, // (from_id, to_id, edge_type)
 }
 
-/// Collect data for a section by traversing the graph from the root node.
+/// Collect data for a section without a semantic-search provider.
+fn collect_section_without_semantic_search(
+    graph: &Graph,
+    root: &Node,
+    section: &SectionDef,
+    filter: &TemporalFilter,
+) -> Result<SectionData> {
+    let heading = section.heading.clone();
+
+    // Root body sections
+    if section.source.as_deref() == Some("root") {
+        return Ok(collect_root_section(root, section));
+    }
+
+    if section.source.as_deref() == Some("semantic_search") {
+        return Err(RenderError::General(format!(
+            "Section '{heading}' requires semantic search, but no semantic search provider was configured."
+        )));
+    }
+
+    // Traversal-based sections
+    if let Some(edge_type) = &section.traverse {
+        return Ok(collect_traverse_section(
+            graph, root, section, edge_type, filter,
+        ));
+    }
+
+    // Fallback: empty section
+    Ok(SectionData {
+        heading,
+        items: Vec::new(),
+        is_root_section: false,
+    })
+}
+
+/// Collect data for a section, using semantic search when requested.
+pub(crate) fn collect_section_with_semantic_search(
+    graph: &Graph,
+    root: &Node,
+    section: &SectionDef,
+    filter: &TemporalFilter,
+    semantic_search: &mut dyn SemanticSearchProvider,
+) -> Result<SectionData> {
+    if section.source.as_deref() == Some("semantic_search") {
+        return collect_semantic_section(graph, root, section, filter, semantic_search);
+    }
+
+    collect_section_without_semantic_search(graph, root, section, filter)
+}
+
+/// Collect data for a section, optionally using semantic search when requested.
 pub fn collect_section(
     graph: &Graph,
     root: &Node,
     section: &SectionDef,
     filter: &TemporalFilter,
-) -> SectionData {
-    let heading = section.heading.clone();
-
-    // Root body sections
-    if section.source.as_deref() == Some("root") {
-        return collect_root_section(root, section);
+    semantic_search: Option<&mut dyn SemanticSearchProvider>,
+) -> Result<SectionData> {
+    if let Some(provider) = semantic_search {
+        collect_section_with_semantic_search(graph, root, section, filter, provider)
+    } else {
+        collect_section_without_semantic_search(graph, root, section, filter)
     }
+}
 
-    // Semantic search placeholder (not yet implemented)
-    if section.source.as_deref() == Some("semantic_search") {
-        return SectionData {
-            heading,
-            items: Vec::new(),
-            is_root_section: false,
+/// Collect a section from semantic vector search.
+fn collect_semantic_section(
+    graph: &Graph,
+    root: &Node,
+    section: &SectionDef,
+    temporal_filter: &TemporalFilter,
+    semantic_search: &mut dyn SemanticSearchProvider,
+) -> Result<SectionData> {
+    let query = semantic_query(root, section)?;
+    let request = SemanticSearchRequest {
+        query,
+        target_type: section.target_type.clone(),
+        max_results: section.max_results.unwrap_or(10),
+        min_similarity: section.min_similarity,
+    };
+    let hits = semantic_search.search(&request)?;
+    let include_body = section.include_body.unwrap_or(false);
+    let mut items = Vec::new();
+
+    for hit in hits {
+        if let Some(min_similarity) = section.min_similarity
+            && hit.score < min_similarity
+        {
+            continue;
+        }
+
+        if hit.node_id == root.id() {
+            continue;
+        }
+
+        let Some(node) = graph.get_node(&hit.node_id) else {
+            continue;
         };
+
+        if let Some(target_type) = section.target_type.as_deref()
+            && node.node_type() != target_type
+        {
+            continue;
+        }
+
+        if !is_node_visible(node, temporal_filter) {
+            continue;
+        }
+
+        if !matches_status_filter(node, section) {
+            continue;
+        }
+
+        let body = if include_body {
+            Some(node.body.clone())
+        } else {
+            None
+        };
+
+        items.push(SectionItem {
+            node_id: node.id().to_string(),
+            title: node.title().to_string(),
+            node_type: node.node_type().to_string(),
+            fields: collect_fields(node, section),
+            body,
+            sub_items: Vec::new(),
+            internal_edges: Vec::new(),
+        });
     }
 
-    // Traversal-based sections
-    if let Some(edge_type) = &section.traverse {
-        return collect_traverse_section(graph, root, section, edge_type, filter);
-    }
-
-    // Fallback: empty section
-    SectionData {
-        heading,
-        items: Vec::new(),
+    Ok(SectionData {
+        heading: section.heading.clone(),
+        items,
         is_root_section: false,
+    })
+}
+
+fn semantic_query(root: &Node, section: &SectionDef) -> Result<String> {
+    match section.query_from.as_deref().unwrap_or("root") {
+        "root" => Ok(format!("{}\n\n{}", root.title(), root.body.trim())),
+        other => Err(RenderError::General(format!(
+            "Unsupported semantic_search query_from value '{other}' in section '{}'.",
+            section.heading
+        ))),
     }
 }
 
@@ -124,12 +236,7 @@ fn collect_traverse_section(
             continue;
         }
 
-        // Apply status filter if specified
-        if let Some(filter_map) = &section.filter
-            && let Some(allowed_statuses) = filter_map.get("status")
-            && let Some(status) = target_node.status()
-            && !allowed_statuses.contains(&status.to_string())
-        {
+        if !matches_status_filter(target_node, section) {
             continue;
         }
 
@@ -261,6 +368,19 @@ fn collect_fields(node: &Node, section: &SectionDef) -> Vec<(String, String)> {
     result
 }
 
+fn matches_status_filter(node: &Node, section: &SectionDef) -> bool {
+    let Some(filter_map) = &section.filter else {
+        return true;
+    };
+    let Some(allowed_statuses) = filter_map.get("status") else {
+        return true;
+    };
+    let Some(status) = node.status() else {
+        return true;
+    };
+    allowed_statuses.contains(&status.to_string())
+}
+
 /// Extract a named section (## Heading) from a markdown body.
 pub fn extract_body_section(body: &str, section_name: &str) -> Option<String> {
     let heading_prefix = format!("## {section_name}");
@@ -313,7 +433,7 @@ mod tests {
 id: feat-replay
 type: feature
 status: draft
-owner: caleb
+owner: alice
 created: 2026-03-20T14:30:00Z
 updated: 2026-03-23T09:15:00Z
 edges:
@@ -370,7 +490,8 @@ A recording agent captures DOM snapshots.
             query_from: None,
         };
 
-        let data = collect_section(&graph, root, &section, &TemporalFilter::current());
+        let data =
+            collect_section(&graph, root, &section, &TemporalFilter::current(), None).unwrap();
         assert!(data.is_root_section);
         assert_eq!(data.items.len(), 1);
         assert!(
@@ -410,7 +531,8 @@ A recording agent captures DOM snapshots.
             query_from: None,
         };
 
-        let data = collect_section(&graph, root, &section, &TemporalFilter::current());
+        let data =
+            collect_section(&graph, root, &section, &TemporalFilter::current(), None).unwrap();
         let body = data.items[0].body.as_ref().unwrap();
         assert!(body.contains("Engineers need to see"));
         assert!(!body.contains("## Solution")); // should stop at next heading
@@ -438,7 +560,8 @@ A recording agent captures DOM snapshots.
             query_from: None,
         };
 
-        let data = collect_section(&graph, root, &section, &TemporalFilter::current());
+        let data =
+            collect_section(&graph, root, &section, &TemporalFilter::current(), None).unwrap();
         assert_eq!(data.items.len(), 1);
         assert_eq!(data.items[0].title, "Platform Engineer");
         assert!(data.items[0].body.is_some());
@@ -475,7 +598,8 @@ A recording agent captures DOM snapshots.
             query_from: None,
         };
 
-        let data = collect_section(&graph, root, &section, &TemporalFilter::current());
+        let data =
+            collect_section(&graph, root, &section, &TemporalFilter::current(), None).unwrap();
         assert_eq!(data.items.len(), 1);
         assert_eq!(data.items[0].node_id, "decision-storage");
     }
@@ -493,8 +617,67 @@ A recording agent captures DOM snapshots.
         assert!(extract_body_section(body, "Missing").is_none());
     }
 
+    struct FakeSemanticSearch {
+        request: Option<SemanticSearchRequest>,
+    }
+
+    impl SemanticSearchProvider for FakeSemanticSearch {
+        fn search(
+            &mut self,
+            request: &SemanticSearchRequest,
+        ) -> Result<Vec<crate::SemanticSearchHit>> {
+            self.request = Some(request.clone());
+            Ok(vec![crate::SemanticSearchHit {
+                node_id: "decision-storage".to_string(),
+                score: 0.91,
+            }])
+        }
+    }
+
     #[test]
-    fn test_semantic_search_placeholder() {
+    fn test_semantic_search_collects_matching_hits() {
+        let graph = build_test_graph();
+        let root = graph.get_node("feat-replay").unwrap();
+        let section = SectionDef {
+            heading: "Insights".to_string(),
+            source: Some("semantic_search".to_string()),
+            body_section: None,
+            traverse: None,
+            target_type: Some("decision".to_string()),
+            include_body: Some(true),
+            include_fields: None,
+            filter: None,
+            sub_traverse: None,
+            sub_target_type: None,
+            show_internal_edges: None,
+            internal_edge_types: None,
+            max_results: Some(5),
+            min_similarity: Some(0.7),
+            query_from: Some("root".to_string()),
+        };
+        let mut provider = FakeSemanticSearch { request: None };
+
+        let data = collect_section(
+            &graph,
+            root,
+            &section,
+            &TemporalFilter::current(),
+            Some(&mut provider),
+        )
+        .unwrap();
+
+        let request = provider.request.unwrap();
+        assert!(request.query.contains("Session Replay"));
+        assert_eq!(request.target_type.as_deref(), Some("decision"));
+        assert_eq!(request.max_results, 5);
+        assert_eq!(request.min_similarity, Some(0.7));
+        assert_eq!(data.items.len(), 1);
+        assert_eq!(data.items[0].node_id, "decision-storage");
+        assert!(data.items[0].body.as_ref().unwrap().contains("ClickHouse"));
+    }
+
+    #[test]
+    fn test_semantic_search_requires_provider() {
         let graph = build_test_graph();
         let root = graph.get_node("feat-replay").unwrap();
         let section = SectionDef {
@@ -515,7 +698,12 @@ A recording agent captures DOM snapshots.
             query_from: Some("root".to_string()),
         };
 
-        let data = collect_section(&graph, root, &section, &TemporalFilter::current());
-        assert!(data.items.is_empty()); // placeholder returns empty
+        let err =
+            collect_section(&graph, root, &section, &TemporalFilter::current(), None).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("requires semantic search, but no semantic search provider")
+        );
     }
 }

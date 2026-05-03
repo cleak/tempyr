@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn test_incremental_add_new() {
         let mut graph = Graph::new(make_schema());
-        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n";
+        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n";
         graph.add_node(parse_node(feat, PathBuf::from("f.md")).unwrap());
 
         let index = Index::create_in_memory().unwrap();
@@ -140,14 +140,14 @@ mod tests {
     #[test]
     fn test_incremental_update_changed() {
         let mut graph = Graph::new(make_schema());
-        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n\nOriginal body.\n";
+        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n\nOriginal body.\n";
         graph.add_node(parse_node(feat, PathBuf::from("f.md")).unwrap());
 
         let index = Index::create_in_memory().unwrap();
         index.rebuild(&graph).unwrap();
 
         // Update the body (changes content hash)
-        let updated = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n\nUpdated body content.\n";
+        let updated = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n\nUpdated body content.\n";
         graph.add_node(parse_node(updated, PathBuf::from("f.md")).unwrap());
 
         let stats = index.incremental_update(&graph).unwrap();
@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn test_incremental_remove_deleted() {
         let mut graph = Graph::new(make_schema());
-        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n";
+        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n";
         let task = "---\nid: task-b\ntype: task\nstatus: backlog\n---\n# B\n";
         graph.add_node(parse_node(feat, PathBuf::from("f.md")).unwrap());
         graph.add_node(parse_node(task, PathBuf::from("t.md")).unwrap());
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn test_incremental_no_changes() {
         let mut graph = Graph::new(make_schema());
-        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: caleb\n---\n# A\n";
+        let feat = "---\nid: feat-a\ntype: feature\nstatus: draft\nowner: alice\n---\n# A\n";
         graph.add_node(parse_node(feat, PathBuf::from("f.md")).unwrap());
 
         let index = Index::create_in_memory().unwrap();

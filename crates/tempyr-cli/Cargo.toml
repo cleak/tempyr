@@ -1,22 +1,30 @@
 [package]
 name = "tempyr-cli"
+description = "Tempyr command-line interface: file-based knowledge graph for AI-assisted product and technical design."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords = ["tempyr", "knowledge-graph", "ai", "agents", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "tempyr"
 path = "src/main.rs"
 
 [dependencies]
-tempyr-core = { path = "../tempyr-core" }
-tempyr-index = { path = "../tempyr-index" }
-tempyr-interview = { path = "../tempyr-interview" }
-tempyr-render = { path = "../tempyr-render" }
-tempyr-linear = { path = "../tempyr-linear" }
-tempyr-mcp = { path = "../tempyr-mcp" }
-tempyr-journal = { path = "../tempyr-journal" }
-tempyr-journal-index = { path = "../tempyr-journal-index" }
+tempyr-core = { path = "../tempyr-core", version = "0.1.0" }
+tempyr-index = { path = "../tempyr-index", version = "0.1.0" }
+tempyr-interview = { path = "../tempyr-interview", version = "0.1.0" }
+tempyr-render = { path = "../tempyr-render", version = "0.1.0" }
+tempyr-linear = { path = "../tempyr-linear", version = "0.1.0" }
+tempyr-mcp = { path = "../tempyr-mcp", version = "0.1.0" }
+tempyr-journal = { path = "../tempyr-journal", version = "0.1.0" }
+tempyr-journal-index = { path = "../tempyr-journal-index", version = "0.1.0" }
 anyhow = "1"
 blake3 = { workspace = true }
 clap = { workspace = true }

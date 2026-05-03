@@ -212,7 +212,7 @@ type: feature
 status: draft                        # draft | active | completed | superseded | archived
 created: 2026-03-20T14:30:00Z
 updated: 2026-03-23T09:15:00Z
-owner: caleb
+owner: alice
 tags: [replay, observability, q2-2026]
 edges:
   - target: epic-observability-v2
@@ -586,10 +586,13 @@ Step 6: Output
 | Command | Behavior |
 |---------|----------|
 | `tempyr search <query>` | BM25 only (fast, keyword-exact) |
-| `tempyr vsearch <query>` | Vector only (semantic similarity) |
-| `tempyr context <query> [--root <id>]` | Full hybrid pipeline |
+| `tempyr vsearch <query>` | Vector-only semantic similarity; populates missing embeddings first |
+| `tempyr context <query> [--root <id>]` | Full hybrid pipeline; populates missing embeddings first |
 | `tempyr traverse <id> [--depth N]` | Structural only, no ranking |
 | `tempyr ask <question>` | Full hybrid → feed to LLM → answer |
+
+Vector-backed commands use the configured embedding provider to fill missing
+entries in the shared embedding store before retrieval.
 
 ### 3.7 Interview Engine
 
@@ -963,6 +966,7 @@ query_from = "root"                     # use root node body as search query
 target_type = "insight"
 max_results = 5
 min_similarity = 0.7
+include_body = true
 ```
 
 #### 3.8.2 Rendering with Temporal Filters
