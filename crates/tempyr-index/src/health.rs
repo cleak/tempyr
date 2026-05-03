@@ -434,6 +434,12 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
 /// `tempyr snapshot prune` would consider — the `.locks` coordination dir
 /// and any partial-prune `.gc-*` stubs are excluded.
 ///
+/// A missing snapshots directory returns `(Some(0), Some(0))` — this is
+/// a definitively-empty store, not a probe failure (a fresh project
+/// before any rebuild, or a non-git tempyr project before any indexing).
+/// Distinguishing this from probe failure lets `tempyr doctor` show
+/// `snapshot store: 0 dirs, 0 B (ok)` instead of suppressing the line.
+///
 /// Returns `(None, None)` for any IO failure rather than reporting
 /// partial totals: an undercount that hides a multi-GB store from the
 /// `tempyr doctor` prune hint is worse than a clear "unavailable" signal.
@@ -441,7 +447,13 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
 /// (rename-then-remove races with our walk); a re-run of doctor after
 /// the prune completes will succeed.
 fn probe_snapshot_store(snapshots_root: &Path) -> (Option<usize>, Option<u64>) {
+    if !snapshots_root.exists() {
+        // Fresh project — no rebuild has populated the store yet.
+        return (Some(0), Some(0));
+    }
     if !snapshots_root.is_dir() {
+        // Path exists but isn't a directory — that's a real anomaly,
+        // not "empty". Surface as unavailable.
         return (None, None);
     }
     let Ok(read) = std::fs::read_dir(snapshots_root) else {
@@ -655,5 +667,54 @@ allowed_edges = []
             .find(|c| c.name == "config.toml")
             .unwrap();
         assert!(config_entry.exists);
+    }
+
+    #[test]
+    fn probe_snapshot_store_treats_missing_dir_as_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshots_root = tmp.path().join("never-created");
+
+        let (count, bytes) = probe_snapshot_store(&snapshots_root);
+
+        assert_eq!(
+            count,
+            Some(0),
+            "missing dir should be empty store, not failure"
+        );
+        assert_eq!(bytes, Some(0));
+    }
+
+    #[test]
+    fn probe_snapshot_store_treats_non_directory_as_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshots_root = tmp.path().join("not-a-dir");
+        fs::write(&snapshots_root, b"oops").unwrap();
+
+        let (count, bytes) = probe_snapshot_store(&snapshots_root);
+
+        assert_eq!(count, None, "non-directory at the path is a real anomaly");
+        assert_eq!(bytes, None);
+    }
+
+    #[test]
+    fn probe_snapshot_store_counts_canonical_snapshots_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshots_root = tmp.path().join("snapshots");
+        fs::create_dir_all(&snapshots_root).unwrap();
+
+        // Two real snapshots
+        for key in ["0123456789abcdef", "fedcba9876543210"] {
+            let dir = snapshots_root.join(key);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("index.db"), vec![0u8; 100]).unwrap();
+        }
+        // Plus a `.locks` dir and a `.gc-*` stub that must be ignored.
+        fs::create_dir_all(snapshots_root.join(".locks")).unwrap();
+        fs::create_dir_all(snapshots_root.join(".gc-stale")).unwrap();
+        fs::write(snapshots_root.join(".gc-stale").join("index.db"), b"x").unwrap();
+
+        let (count, bytes) = probe_snapshot_store(&snapshots_root);
+        assert_eq!(count, Some(2));
+        assert_eq!(bytes, Some(200));
     }
 }

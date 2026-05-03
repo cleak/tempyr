@@ -133,7 +133,23 @@ pub struct SnapshotBuildLock {
 
 impl SnapshotBuildLock {
     /// Attempt a non-blocking exclusive acquire of the per-key build lock.
+    ///
+    /// Rejects any `snapshot_key` that does not satisfy [`is_snapshot_key`]
+    /// — the path helpers it composes (`snapshot_locks_dir` +
+    /// `snapshot_build_lock_path`) are pure path construction and would
+    /// happily produce a path outside the locks directory if given an
+    /// input like `"../../etc/passwd"`. The validation here, at the IO
+    /// boundary, ensures no caller (internal or external) can use this
+    /// API to open or lock a file outside the snapshots store.
     pub fn try_acquire(cache: &CacheLayout, snapshot_key: &str) -> io::Result<Option<Self>> {
+        if !is_snapshot_key(snapshot_key) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid snapshot key {snapshot_key:?}: expected 16 lowercase hex characters"
+                ),
+            ));
+        }
         let locks_dir = cache.snapshot_locks_dir();
         fs::create_dir_all(&locks_dir)?;
         let path = cache.snapshot_build_lock_path(snapshot_key);
@@ -1367,6 +1383,39 @@ mod tests {
         drop(first);
         let after_release = SnapshotBuildLock::try_acquire(&cache, key).unwrap();
         assert!(after_release.is_some());
+    }
+
+    #[test]
+    fn snapshot_build_lock_rejects_path_traversal_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CacheLayout {
+            shared_root: tmp.path().to_path_buf(),
+            worktree_root: tmp.path().join("worktrees").join("default"),
+        };
+
+        for bad in [
+            "..",
+            "../escape",
+            "../../etc/passwd",
+            "ABCDEF1234567890", // wrong case
+            "deadbeef",         // wrong length
+            "",
+            "deadbeefcafef00g", // 'g' is not hex
+        ] {
+            let err = SnapshotBuildLock::try_acquire(&cache, bad).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                io::ErrorKind::InvalidInput,
+                "expected InvalidInput for {bad:?}, got {err:?}"
+            );
+        }
+
+        // Sanity: nothing got created outside the cache root.
+        let escaped = tmp.path().parent().unwrap().join("etc");
+        assert!(
+            !escaped.exists(),
+            "rejection must not produce any side effects outside the cache root"
+        );
     }
 
     #[test]
