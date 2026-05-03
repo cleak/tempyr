@@ -271,7 +271,7 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
         let ctx = ProjectContext::find(Some(root.join("graph").as_path()))?;
         println!();
         println!("Running initial index rebuild...");
-        if let Err(err) = index_cmd::run_rebuild(&ctx, false, false) {
+        if let Err(err) = index_cmd::run_rebuild(&ctx, false, false, false) {
             eprintln!("Warning: initial index rebuild failed: {err}");
         }
     }

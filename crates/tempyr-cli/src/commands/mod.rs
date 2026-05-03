@@ -24,6 +24,7 @@ pub mod rename;
 pub mod render_cmd;
 pub mod search;
 pub mod semantic;
+pub mod snapshot_cmd;
 pub mod status_cmd;
 pub mod traverse;
 pub mod update;

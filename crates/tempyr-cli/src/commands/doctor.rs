@@ -5,6 +5,7 @@
 
 use std::io::{self, Write};
 
+use crate::commands::snapshot_cmd::{SNAPSHOT_STORE_HINT_BYTES, SNAPSHOT_STORE_HINT_DIRS};
 use crate::config::ProjectContext;
 use tempyr_index::health::{self, HealthInputs, HealthReport};
 use tempyr_journal::path as jpath;
@@ -197,6 +198,21 @@ pub(crate) fn render_text(out: &mut impl Write, report: &HealthReport) -> io::Re
     if let Some(count) = report.index.embedding_count_for_index {
         writeln!(out, "  embedded nodes: {count}")?;
     }
+    if let (Some(count), Some(bytes)) = (
+        report.index.snapshot_store_count,
+        report.index.snapshot_store_bytes,
+    ) {
+        let hint = if count > SNAPSHOT_STORE_HINT_DIRS || bytes > SNAPSHOT_STORE_HINT_BYTES {
+            "consider `tempyr snapshot prune`"
+        } else {
+            "ok"
+        };
+        writeln!(
+            out,
+            "  snapshot store: {count} dirs, {} ({hint})",
+            human_bytes(bytes),
+        )?;
+    }
 
     if let Some(journal) = &report.journal {
         writeln!(out, "\nJournal")?;
@@ -253,6 +269,21 @@ pub(crate) fn render_text(out: &mut impl Write, report: &HealthReport) -> io::Re
 
 fn missing_marker(exists: bool) -> &'static str {
     if exists { "" } else { " (MISSING)" }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +349,8 @@ mod tests {
                 snapshot_key_error: None,
                 fts_entries: None,
                 embedding_count_for_index: None,
+                snapshot_store_count: None,
+                snapshot_store_bytes: None,
             },
             journal: None,
             warnings: vec!["something is amiss".to_string()],
@@ -395,6 +428,48 @@ mod tests {
         assert!(report.journal.is_none());
         let out = render_to_string(&report);
         assert!(!out.contains("\nJournal\n"));
+    }
+
+    #[test]
+    fn human_bytes_formats_known_magnitudes() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(2 * 1024), "2.0 KB");
+        assert_eq!(human_bytes(3 * 1024 * 1024), "3.0 MB");
+        assert_eq!(human_bytes(4 * 1024 * 1024 * 1024), "4.00 GB");
+    }
+
+    #[test]
+    fn render_text_includes_snapshot_store_when_populated() {
+        let mut report = fixture_report();
+        report.index.snapshot_store_count = Some(884);
+        report.index.snapshot_store_bytes = Some(1_649_267_441); // ~1.54 GB
+        let out = render_to_string(&report);
+
+        assert!(out.contains("snapshot store: 884 dirs"));
+        assert!(out.contains("GB"));
+        assert!(
+            out.contains("consider `tempyr snapshot prune`"),
+            "high-usage stores should hint at prune; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_text_marks_small_snapshot_store_ok() {
+        let mut report = fixture_report();
+        report.index.snapshot_store_count = Some(5);
+        report.index.snapshot_store_bytes = Some(8 * 1024 * 1024);
+        let out = render_to_string(&report);
+        assert!(out.contains("snapshot store: 5 dirs"));
+        assert!(out.contains("ok"));
+        assert!(!out.contains("consider `tempyr snapshot prune`"));
+    }
+
+    #[test]
+    fn render_text_omits_snapshot_store_when_unprobed() {
+        let report = fixture_report(); // snapshot_store_count is None
+        let out = render_to_string(&report);
+        assert!(!out.contains("snapshot store:"));
     }
 
     #[test]

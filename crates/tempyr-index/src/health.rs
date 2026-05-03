@@ -118,6 +118,13 @@ pub struct IndexSection {
     pub snapshot_key_error: Option<String>,
     pub fts_entries: Option<usize>,
     pub embedding_count_for_index: Option<usize>,
+    /// Number of historical snapshot directories under
+    /// `<shared_root>/snapshots/`. Excludes the `.locks` dir and any
+    /// `.gc-*` eviction stubs left by a partial prune.
+    pub snapshot_store_count: Option<usize>,
+    /// Total bytes used by historical snapshot directories. A high number
+    /// here is the signal to run `tempyr snapshot prune`.
+    pub snapshot_store_bytes: Option<u64>,
 }
 
 const LOCAL_EMBEDDINGS_COMPILED_IN: bool = cfg!(feature = "local-embeddings");
@@ -360,6 +367,8 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
     let layout = match IndexLayout::resolve(inputs.root, inputs.graph_dir, inputs.tempyr_dir) {
         Ok(layout) => layout,
         Err(err) => {
+            let (snapshot_store_count, snapshot_store_bytes) =
+                probe_snapshot_store(&inputs.cache.snapshots_root());
             return IndexSection {
                 active_index_path: inputs.cache.active_index_path(),
                 active_index_exists: inputs.cache.active_index_path().exists(),
@@ -372,6 +381,8 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
                 snapshot_key_error: Some(err.to_string()),
                 fts_entries: None,
                 embedding_count_for_index: None,
+                snapshot_store_count,
+                snapshot_store_bytes,
             };
         }
     };
@@ -398,6 +409,9 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
         None => (None, None),
     };
 
+    let (snapshot_store_count, snapshot_store_bytes) =
+        probe_snapshot_store(&inputs.cache.snapshots_root());
+
     IndexSection {
         active_index_path,
         active_index_exists,
@@ -410,7 +424,72 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
         snapshot_key_error,
         fts_entries,
         embedding_count_for_index,
+        snapshot_store_count,
+        snapshot_store_bytes,
     }
+}
+
+/// Walk `<shared_root>/snapshots/` and return `(snapshot_dir_count, total_bytes)`.
+/// Uses [`project::is_snapshot_key`] so the count agrees with what
+/// `tempyr snapshot prune` would consider — the `.locks` coordination dir
+/// and any partial-prune `.gc-*` stubs are excluded.
+///
+/// A missing snapshots directory returns `(Some(0), Some(0))` — this is
+/// a definitively-empty store, not a probe failure (a fresh project
+/// before any rebuild, or a non-git tempyr project before any indexing).
+/// Distinguishing this from probe failure lets `tempyr doctor` show
+/// `snapshot store: 0 dirs, 0 B (ok)` instead of suppressing the line.
+///
+/// Returns `(None, None)` for any IO failure rather than reporting
+/// partial totals: an undercount that hides a multi-GB store from the
+/// `tempyr doctor` prune hint is worse than a clear "unavailable" signal.
+/// `tempyr snapshot prune` running concurrently can briefly trigger this
+/// (rename-then-remove races with our walk); a re-run of doctor after
+/// the prune completes will succeed.
+fn probe_snapshot_store(snapshots_root: &Path) -> (Option<usize>, Option<u64>) {
+    if !snapshots_root.exists() {
+        // Fresh project — no rebuild has populated the store yet.
+        return (Some(0), Some(0));
+    }
+    if !snapshots_root.is_dir() {
+        // Path exists but isn't a directory — that's a real anomaly,
+        // not "empty". Surface as unavailable.
+        return (None, None);
+    }
+    let Ok(read) = std::fs::read_dir(snapshots_root) else {
+        return (None, None);
+    };
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for entry in read {
+        let Ok(entry) = entry else {
+            return (None, None);
+        };
+        let Ok(file_type) = entry.file_type() else {
+            return (None, None);
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !project::is_snapshot_key(&name) {
+            continue;
+        }
+        count += 1;
+        for sub in walkdir::WalkDir::new(entry.path()) {
+            let Ok(sub) = sub else {
+                return (None, None);
+            };
+            let Ok(meta) = sub.metadata() else {
+                return (None, None);
+            };
+            if meta.is_file() {
+                bytes = bytes.saturating_add(meta.len());
+            }
+        }
+    }
+    (Some(count), Some(bytes))
 }
 
 fn probe_index(index_path: &Path, store_path: Option<&Path>) -> (Option<usize>, Option<usize>) {
@@ -588,5 +667,54 @@ allowed_edges = []
             .find(|c| c.name == "config.toml")
             .unwrap();
         assert!(config_entry.exists);
+    }
+
+    #[test]
+    fn probe_snapshot_store_treats_missing_dir_as_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshots_root = tmp.path().join("never-created");
+
+        let (count, bytes) = probe_snapshot_store(&snapshots_root);
+
+        assert_eq!(
+            count,
+            Some(0),
+            "missing dir should be empty store, not failure"
+        );
+        assert_eq!(bytes, Some(0));
+    }
+
+    #[test]
+    fn probe_snapshot_store_treats_non_directory_as_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshots_root = tmp.path().join("not-a-dir");
+        fs::write(&snapshots_root, b"oops").unwrap();
+
+        let (count, bytes) = probe_snapshot_store(&snapshots_root);
+
+        assert_eq!(count, None, "non-directory at the path is a real anomaly");
+        assert_eq!(bytes, None);
+    }
+
+    #[test]
+    fn probe_snapshot_store_counts_canonical_snapshots_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshots_root = tmp.path().join("snapshots");
+        fs::create_dir_all(&snapshots_root).unwrap();
+
+        // Two real snapshots
+        for key in ["0123456789abcdef", "fedcba9876543210"] {
+            let dir = snapshots_root.join(key);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("index.db"), vec![0u8; 100]).unwrap();
+        }
+        // Plus a `.locks` dir and a `.gc-*` stub that must be ignored.
+        fs::create_dir_all(snapshots_root.join(".locks")).unwrap();
+        fs::create_dir_all(snapshots_root.join(".gc-stale")).unwrap();
+        fs::write(snapshots_root.join(".gc-stale").join("index.db"), b"x").unwrap();
+
+        let (count, bytes) = probe_snapshot_store(&snapshots_root);
+        assert_eq!(count, Some(2));
+        assert_eq!(bytes, Some(200));
     }
 }

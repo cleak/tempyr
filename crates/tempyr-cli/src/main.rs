@@ -248,6 +248,13 @@ pub enum Commands {
         action: IndexAction,
     },
 
+    /// Snapshot store management (the content-addressed shared index store
+    /// under `<git-common-dir>/tempyr/snapshots/`).
+    Snapshot {
+        #[command(subcommand)]
+        action: SnapshotAction,
+    },
+
     /// Linear integration
     Linear {
         #[command(subcommand)]
@@ -314,12 +321,47 @@ pub enum InterviewAction {
 }
 
 #[derive(Subcommand)]
+pub enum SnapshotAction {
+    /// Prune historical snapshots from the shared store. Pinned snapshots
+    /// (cited by any live worktree's `snapshot-key.txt`) are never evicted.
+    /// A configurable buffer of the most-recent snapshots is also kept;
+    /// beyond pinned + buffer, snapshots are evicted in LRU order until the
+    /// total snapshot-store size is under the cap.
+    Prune {
+        /// Keep at least this many of the most-recently-modified snapshots
+        /// even if they are not pinned.
+        #[arg(long, default_value_t = 20)]
+        keep_recent: usize,
+        /// Soft cap on the total bytes used by `<shared_root>/snapshots/`.
+        /// Accepts plain bytes or a suffix like `500M`, `2G`. The pruner
+        /// evicts unpinned, non-buffered snapshots in LRU order until the
+        /// total falls below this value. Pinned snapshots are never counted
+        /// against the cap.
+        #[arg(long, default_value = "500M")]
+        max_size: String,
+        /// Show what would be deleted without removing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List snapshots in the shared store with their pinned/buffer status.
+    List,
+}
+
+#[derive(Subcommand)]
 pub enum IndexAction {
     /// Full index rebuild from source files
     Rebuild {
         /// Refresh structural search data only; do not call embedding providers
         #[arg(long)]
         skip_embeddings: bool,
+        /// Rebuild from scratch even when the shared snapshot already exists.
+        /// Use this to recover from a corrupted snapshot index. Without this
+        /// flag, `rebuild` short-circuits to a free seed when the snapshot
+        /// for the current graph state has already been built (by this
+        /// worktree or another), since rebuilding would produce identical
+        /// output.
+        #[arg(long)]
+        force: bool,
     },
     /// Incremental update (changed files only)
     Update {
@@ -775,13 +817,36 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Index { action } => {
             let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
             match action {
-                IndexAction::Rebuild { skip_embeddings } => {
-                    commands::index_cmd::run_rebuild(&ctx, cli.json, skip_embeddings)
-                }
+                IndexAction::Rebuild {
+                    skip_embeddings,
+                    force,
+                } => commands::index_cmd::run_rebuild(&ctx, cli.json, skip_embeddings, force),
                 IndexAction::Update { skip_embeddings } => {
                     commands::index_cmd::run_update(&ctx, cli.json, skip_embeddings)
                 }
                 IndexAction::Stats => commands::index_cmd::run_stats(&ctx, cli.json),
+            }
+        }
+        Commands::Snapshot { action } => {
+            let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
+            match action {
+                SnapshotAction::Prune {
+                    keep_recent,
+                    max_size,
+                    dry_run,
+                } => {
+                    let opts = commands::snapshot_cmd::PruneOptions {
+                        keep_recent,
+                        max_size_bytes: commands::snapshot_cmd::parse_size(&max_size)?,
+                    };
+                    let output = if cli.json {
+                        commands::snapshot_cmd::PruneOutput::Json
+                    } else {
+                        commands::snapshot_cmd::PruneOutput::Human
+                    };
+                    commands::snapshot_cmd::run_prune(&ctx, &opts, dry_run, output).map(|_| ())
+                }
+                SnapshotAction::List => commands::snapshot_cmd::run_list(&ctx, cli.json),
             }
         }
         Commands::Linear { action } => {
