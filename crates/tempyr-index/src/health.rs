@@ -432,22 +432,29 @@ fn build_index_section(inputs: &HealthInputs<'_>, store_path: Option<&Path>) -> 
 /// Walk `<shared_root>/snapshots/` and return `(snapshot_dir_count, total_bytes)`.
 /// Uses [`project::is_snapshot_key`] so the count agrees with what
 /// `tempyr snapshot prune` would consider — the `.locks` coordination dir
-/// and any partial-prune `.gc-*` stubs are excluded. Returns `(None, None)`
-/// if the dir does not exist or cannot be read (snapshot store unused on
-/// this project yet).
+/// and any partial-prune `.gc-*` stubs are excluded.
+///
+/// Returns `(None, None)` for any IO failure rather than reporting
+/// partial totals: an undercount that hides a multi-GB store from the
+/// `tempyr doctor` prune hint is worse than a clear "unavailable" signal.
+/// `tempyr snapshot prune` running concurrently can briefly trigger this
+/// (rename-then-remove races with our walk); a re-run of doctor after
+/// the prune completes will succeed.
 fn probe_snapshot_store(snapshots_root: &Path) -> (Option<usize>, Option<u64>) {
     if !snapshots_root.is_dir() {
         return (None, None);
     }
-    let read = match std::fs::read_dir(snapshots_root) {
-        Ok(read) => read,
-        Err(_) => return (None, None),
+    let Ok(read) = std::fs::read_dir(snapshots_root) else {
+        return (None, None);
     };
     let mut count = 0usize;
     let mut bytes = 0u64;
-    for entry in read.flatten() {
+    for entry in read {
+        let Ok(entry) = entry else {
+            return (None, None);
+        };
         let Ok(file_type) = entry.file_type() else {
-            continue;
+            return (None, None);
         };
         if !file_type.is_dir() {
             continue;
@@ -459,10 +466,13 @@ fn probe_snapshot_store(snapshots_root: &Path) -> (Option<usize>, Option<u64>) {
         }
         count += 1;
         for sub in walkdir::WalkDir::new(entry.path()) {
-            let Ok(sub) = sub else { continue };
-            if let Ok(meta) = sub.metadata()
-                && meta.is_file()
-            {
+            let Ok(sub) = sub else {
+                return (None, None);
+            };
+            let Ok(meta) = sub.metadata() else {
+                return (None, None);
+            };
+            if meta.is_file() {
                 bytes = bytes.saturating_add(meta.len());
             }
         }

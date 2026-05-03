@@ -787,12 +787,21 @@ pub fn short_path_hash(path: &Path) -> String {
     hex[..12].to_string()
 }
 
-/// Snapshot keys are the first 16 hex chars of a BLAKE3 digest, see
-/// [`graph_snapshot_key`]. This predicate filters out the `.locks`
+/// Snapshot keys are the first 16 lowercase hex chars of a BLAKE3 digest,
+/// see [`graph_snapshot_key`]. This predicate filters out the `.locks`
 /// coordination dir and any partial-prune `.gc-*` stubs from a `read_dir`
 /// over `<shared_root>/snapshots/`.
+///
+/// Lowercase-only matters: BLAKE3's `to_hex()` always emits lowercase, so
+/// any uppercase-named directory under `snapshots/` was created by some
+/// foreign process, not by Tempyr. Treating it as a snapshot would let
+/// `tempyr snapshot prune` evict it — refusing to recognize it is the
+/// safer default.
 pub fn is_snapshot_key(name: &str) -> bool {
-    name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit())
+    name.len() == 16
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 #[cfg(test)]
@@ -1302,12 +1311,35 @@ mod tests {
     fn is_snapshot_key_accepts_only_canonical_form() {
         assert!(is_snapshot_key("12971a01c28ece80"));
         assert!(is_snapshot_key("0000000000000000"));
+        assert!(is_snapshot_key("abcdef0123456789"));
         assert!(!is_snapshot_key(""));
         assert!(!is_snapshot_key("12971a01c28ece8"));
         assert!(!is_snapshot_key("12971a01c28ece800"));
         assert!(!is_snapshot_key(".locks"));
         assert!(!is_snapshot_key(".gc-12971a01c28ece80"));
         assert!(!is_snapshot_key("ZZ971a01c28ece80"));
+        // Tightened: uppercase A-F is rejected (BLAKE3 to_hex emits lowercase).
+        assert!(!is_snapshot_key("ABCDEF0123456789"));
+        assert!(!is_snapshot_key("12971A01C28ECE80"));
+    }
+
+    #[test]
+    fn is_snapshot_key_matches_graph_snapshot_key_output() {
+        // Whatever real snapshot-key the producer emits must satisfy the
+        // predicate, otherwise prune/health would silently drop it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let graph_dir = root.join("graph");
+        let tempyr_dir = root.join(".tempyr");
+        fs::create_dir_all(&graph_dir).unwrap();
+        fs::create_dir_all(&tempyr_dir).unwrap();
+        fs::write(tempyr_dir.join("schema.toml"), "name = 'x'\n").unwrap();
+
+        let key = graph_snapshot_key(&graph_dir, &tempyr_dir).unwrap();
+        assert!(
+            is_snapshot_key(&key),
+            "graph_snapshot_key() output {key:?} must satisfy is_snapshot_key()"
+        );
     }
 
     #[test]

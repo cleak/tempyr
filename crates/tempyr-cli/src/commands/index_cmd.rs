@@ -214,6 +214,15 @@ fn seed_and_report(
     skip_embeddings: bool,
     waited_for_concurrent_builder: bool,
 ) -> anyhow::Result<()> {
+    // If a concurrent builder published the snapshot during our wait, the
+    // initial `ensure_active_index_seeded` (called at the top of `run_rebuild`)
+    // ran before the snapshot existed and so left the worktree's local index
+    // unrefreshed. Re-seed now so the local copy and cursor stay in sync with
+    // the shared snapshot — otherwise a later query that falls through to the
+    // active path (e.g. after the shared snapshot is pruned) would read stale
+    // bytes against a cursor that claims they're current.
+    let _ = ctx.ensure_active_index_seeded()?;
+
     let index_path = ctx.queryable_index_path()?;
     let index = Index::open(&index_path)?;
     let stats = index.stats()?;
@@ -584,6 +593,37 @@ mod tests {
             }
         ));
         publisher.join().unwrap();
+    }
+
+    /// Regression guard for the if-let drop semantics in `run_rebuild`:
+    /// `if let RebuildSlot::UseExisting { .. } = slot { return ... }` must
+    /// leave `slot` (and the `Build(SnapshotBuildLock)` it might carry)
+    /// alive for the rest of the function, so that the lock is held through
+    /// `rebuild_from_scratch`. If a future refactor changes this — e.g.
+    /// moves out of `slot` in the matched arm — the test would fail by
+    /// observing the lock as available to a second acquirer mid-rebuild.
+    #[test]
+    fn build_lock_survives_if_let_match_against_use_existing_arm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path());
+        let shared = ctx.shared_snapshot_index_path().unwrap();
+
+        // Snapshot doesn't exist → negotiate returns Build(lock).
+        let slot = negotiate_rebuild_slot(&ctx, &shared, false, Duration::from_millis(50)).unwrap();
+        assert!(matches!(slot, RebuildSlot::Build(_)));
+
+        // Mirror the exact pattern used in run_rebuild.
+        if let RebuildSlot::UseExisting { built_by_other: _ } = slot {
+            unreachable!("Build was constructed but UseExisting matched");
+        }
+
+        // After the if-let, `slot` (and its lock) must still be held —
+        // confirm by trying to acquire from a fresh ProjectContext.
+        let probe = ctx.try_acquire_snapshot_build_lock().unwrap();
+        assert!(
+            probe.is_none(),
+            "lock was released too early; if-let against UseExisting arm dropped Build(lock)"
+        );
     }
 
     #[test]
