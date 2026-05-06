@@ -1082,10 +1082,10 @@ fn test_status_agent_override_attributes_journal_entry() {
     );
 }
 
-/// `tempyr journal bootstrap` should create the journal layout
-/// idempotently. `tempyr journal finalize` should mark the active
-/// session as ready. Together these power the SessionStart /
-/// SessionEnd Claude Code hooks.
+/// `tempyr init` should create the journal layout for git repos.
+/// `tempyr journal bootstrap` should remain idempotent, and
+/// `tempyr journal finalize` should mark the active session as ready.
+/// Together these power the SessionStart / SessionEnd Claude Code hooks.
 #[test]
 fn test_journal_bootstrap_and_finalize_lifecycle() {
     let tmp = TempDir::new().unwrap();
@@ -1094,11 +1094,11 @@ fn test_journal_bootstrap_and_finalize_lifecycle() {
 
     let journals_dir = tmp.path().join(".git/tempyr/journals");
     assert!(
-        !journals_dir.exists(),
-        "journals dir should not exist before bootstrap"
+        journals_dir.exists(),
+        "git-backed init should bootstrap journals dir"
     );
 
-    // bootstrap: creates the layout, emits JSON when --json passed
+    // bootstrap remains idempotent and emits JSON when --json passed
     let output = tempyr()
         .current_dir(tmp.path())
         .args(["--json", "journal", "bootstrap"])

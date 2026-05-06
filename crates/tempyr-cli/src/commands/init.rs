@@ -13,11 +13,13 @@ use super::index_cmd;
 use super::journal_init::{self, Visibility};
 use super::managed::{self, ManagedArtifact, WriteOutcome};
 use super::onboarding::{
-    self, EmbeddingProviderChoice, ExistingDocMode, ExistingDocs, OnboardingSelections,
+    self, EmbeddingProviderChoice, ExistingDocMode, ExistingDocs, JournalSetupDefaults,
+    OnboardingSelections,
 };
 use super::process_utils::wait_for_child_exit;
 use tempyr_core::project;
 use tempyr_index::embeddings;
+use tempyr_journal::path as journal_path;
 
 const DEFAULT_SCHEMA: &str = include_str!("../../../../schema/default-schema.toml");
 const CLAUDE_DOC_TEMPLATE: &str = include_str!("../../assets/CLAUDE.template.md");
@@ -44,11 +46,12 @@ pub fn run(json_output: bool, force_wizard: bool, no_wizard: bool) -> anyhow::Re
     }
 
     let existing_docs = detect_existing_docs(&cwd);
+    let journal_defaults = journal_setup_defaults(&cwd);
     let selections = if should_launch_wizard(force_wizard, no_wizard) {
-        onboarding::run(existing_docs)?
+        onboarding::run(existing_docs, journal_defaults)?
             .ok_or_else(|| anyhow::anyhow!("Initialization cancelled."))?
     } else {
-        noninteractive_defaults(existing_docs)
+        noninteractive_defaults(existing_docs, journal_defaults)
     };
 
     initialize_project(&cwd, &selections)
@@ -66,7 +69,10 @@ fn should_launch_wizard(force_wizard: bool, no_wizard: bool) -> bool {
         && std::io::stderr().is_terminal()
 }
 
-fn noninteractive_defaults(existing_docs: ExistingDocs) -> OnboardingSelections {
+fn noninteractive_defaults(
+    existing_docs: ExistingDocs,
+    journal_defaults: JournalSetupDefaults,
+) -> OnboardingSelections {
     OnboardingSelections {
         provider: EmbeddingProviderChoice::Voyage,
         api_key: None,
@@ -74,6 +80,9 @@ fn noninteractive_defaults(existing_docs: ExistingDocs) -> OnboardingSelections 
         create_env_local_from_template: false,
         validate_provider_setup: false,
         run_index_rebuild: false,
+        enable_journal: journal_defaults.enable_journal,
+        configure_journal_fetch_refspec: journal_defaults.configure_journal_fetch_refspec,
+        bootstrap_journal_layout: journal_defaults.bootstrap_journal_layout,
         install_render_overrides: false,
         install_claude_hooks: true,
         install_claude_skill: true,
@@ -88,6 +97,25 @@ fn noninteractive_defaults(existing_docs: ExistingDocs) -> OnboardingSelections 
             ExistingDocMode::Append
         },
     }
+}
+
+fn journal_setup_defaults(root: &Path) -> JournalSetupDefaults {
+    let in_git = is_inside_git_repo(root);
+    JournalSetupDefaults {
+        enable_journal: !matches!(journal_init::detect_visibility(root), Visibility::Public),
+        configure_journal_fetch_refspec: in_git,
+        bootstrap_journal_layout: in_git,
+    }
+}
+
+fn is_inside_git_repo(root: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn detect_existing_docs(root: &Path) -> ExistingDocs {
@@ -107,15 +135,12 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
 
     fs::write(tempyr_dir.join("schema.toml"), DEFAULT_SCHEMA)?;
 
-    // Decide whether to ship `[journal] enabled = true`. If the project
-    // is a git repo whose `origin` looks public, default to disabled
-    // (with a clear warning) — agent reasoning shouldn't be world-
-    // readable by default. Anything else (private, undetermined, no
-    // git) gets `enabled = true`. The user can always flip the flag.
-    let journal_outcome = decide_journal_init(root);
+    // Apply the selected journal setup choices before writing config so the
+    // summary matches the final config and local git setup.
+    let journal_outcome = apply_journal_init(root, selections);
     let mut config_text = render_config(selections.provider);
     config_text.push_str(&journal_init::render_journal_config_block(
-        journal_outcome.enabled,
+        selections.enable_journal,
     ));
     fs::write(tempyr_dir.join("config.toml"), config_text)?;
 
@@ -281,88 +306,70 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
 
 /// Result of preparing the journal section during init.
 struct JournalInitOutcome {
-    /// Goes directly into `[journal] enabled` in config.toml.
-    enabled: bool,
     /// Lines to append to the init-summary printout.
     summary_lines: Vec<String>,
 }
 
-/// Decide whether to ship `[journal] enabled = true` and configure the
-/// auto-fetch refspec on `origin`. Best-effort throughout: any sub-step
-/// that fails just gets surfaced as a warning line in the summary; we
-/// never abort the whole init.
-fn decide_journal_init(root: &Path) -> JournalInitOutcome {
-    // If the project root isn't inside a git repo, journals can still
-    // be configured later. Note this in the summary and ship enabled =
-    // true (no public-repo concern without a remote).
-    let in_git = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(root)
-        .output()
-        .ok()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !in_git {
-        return JournalInitOutcome {
-            enabled: true,
-            summary_lines: vec![
-                "  .tempyr/config.toml  - [journal] enabled = true (no git repo detected; \
-configure remote later)"
-                    .to_string(),
-            ],
-        };
-    }
-
-    let visibility = journal_init::detect_visibility(root);
-    let mut summary_lines = Vec::new();
-    let enabled = match visibility {
-        Visibility::Public => {
-            summary_lines.push(
-                "  .tempyr/config.toml  - [journal] enabled = false (origin appears to be a \
-public GitHub repo; flip to true if you intentionally want world-readable \
-journal refs)"
-                    .to_string(),
-            );
-            false
-        }
-        Visibility::Private => {
-            summary_lines.push(
-                "  .tempyr/config.toml  - [journal] enabled = true (origin appears private)"
-                    .to_string(),
-            );
-            true
-        }
-        Visibility::Undetermined => {
-            summary_lines.push(
-                "  .tempyr/config.toml  - [journal] enabled = true (origin visibility \
-undetermined; install `gh` and re-run if you want a sharper default)"
-                    .to_string(),
-            );
-            true
-        }
-    };
+/// Apply the selected journal setup choices. Best-effort throughout:
+/// failures are surfaced in the init summary and never abort project setup.
+fn apply_journal_init(root: &Path, selections: &OnboardingSelections) -> JournalInitOutcome {
+    let mut summary_lines = vec![journal_config_summary(root, selections.enable_journal)];
 
     // Configure the auto-fetch refspec so a regular `git fetch origin`
     // also pulls journal refs. Failure is non-fatal — flip into a
     // warning line.
-    match journal_init::configure_auto_fetch_refspec(root, "origin") {
-        Ok(true) => summary_lines.push(
-            "  git config           - added remote.origin.fetch = +refs/tempyr/journals/*"
-                .to_string(),
-        ),
-        Ok(false) => {
-            // Already present — quiet success, no summary line needed.
+    if selections.configure_journal_fetch_refspec {
+        match journal_init::configure_auto_fetch_refspec(root, "origin") {
+            Ok(true) => summary_lines.push(
+                "  git config           - added remote.origin.fetch = +refs/tempyr/journals/*"
+                    .to_string(),
+            ),
+            Ok(false) => {
+                // Already present — quiet success, no summary line needed.
+            }
+            Err(e) => summary_lines.push(format!(
+                "  git config           - warning: could not add journal fetch refspec: {e}"
+            )),
         }
-        Err(e) => summary_lines.push(format!(
-            "  git config           - warning: could not add journal fetch refspec: {e}"
-        )),
     }
 
-    JournalInitOutcome {
-        enabled,
-        summary_lines,
+    if selections.bootstrap_journal_layout {
+        match journal_path::git_common_dir(root).and_then(|common_dir| {
+            journal_path::ensure_layout(&common_dir)?;
+            Ok(common_dir)
+        }) {
+            Ok(common_dir) => summary_lines.push(format!(
+                "  journal layout       - initialized under {}",
+                journal_path::journals_root(&common_dir).display()
+            )),
+            Err(e) => summary_lines.push(format!(
+                "  journal layout       - warning: could not initialize journal layout: {e}"
+            )),
+        }
     }
+
+    JournalInitOutcome { summary_lines }
+}
+
+fn journal_config_summary(root: &Path, enabled: bool) -> String {
+    let enabled_text = if enabled { "true" } else { "false" };
+    if !is_inside_git_repo(root) {
+        return format!(
+            "  .tempyr/config.toml  - [journal] enabled = {enabled_text} (no git repo detected; configure remote later)"
+        );
+    }
+
+    let suffix = match (journal_init::detect_visibility(root), enabled) {
+        (Visibility::Public, false) => {
+            "origin appears public; flip to true only if journal refs may be world-readable"
+        }
+        (Visibility::Public, true) => "selected during onboarding; warning: origin appears public",
+        (Visibility::Private, true) => "origin appears private",
+        (Visibility::Private, false) => "disabled during onboarding; origin appears private",
+        (Visibility::Undetermined, true) => "origin visibility undetermined",
+        (Visibility::Undetermined, false) => "disabled during onboarding",
+    };
+    format!("  .tempyr/config.toml  - [journal] enabled = {enabled_text} ({suffix})")
 }
 
 fn handle_doc_target(
@@ -1371,6 +1378,67 @@ mod tests {
         let message = validate_provider_setup(tmp.path()).unwrap();
 
         assert_eq!(message, "skipped (VOYAGE_API_KEY not set yet)");
+    }
+
+    #[test]
+    fn initialize_project_runs_initial_index_when_selected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let selections = OnboardingSelections {
+            run_index_rebuild: true,
+            validate_provider_setup: false,
+            install_claude_hooks: false,
+            install_claude_skill: false,
+            install_claude_agent: false,
+            install_claude_doc: false,
+            install_codex_skill: false,
+            install_codex_doc: false,
+            write_mcp_setup_notes: false,
+            configure_journal_fetch_refspec: false,
+            bootstrap_journal_layout: false,
+            ..OnboardingSelections::interactive_defaults(ExistingDocs {
+                claude_md: false,
+                agents_md: false,
+            })
+        };
+
+        initialize_project(tmp.path(), &selections).unwrap();
+
+        let graph_dir = tmp.path().join("graph");
+        let ctx = ProjectContext::find(Some(graph_dir.as_path())).unwrap();
+        let index_path = ctx.queryable_index_path().unwrap();
+        assert!(index_path.exists());
+    }
+
+    #[test]
+    fn initialize_project_bootstraps_journal_layout_when_selected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status = Command::new("git")
+            .arg("init")
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let selections = OnboardingSelections {
+            run_index_rebuild: false,
+            validate_provider_setup: false,
+            install_claude_hooks: false,
+            install_claude_skill: false,
+            install_claude_agent: false,
+            install_claude_doc: false,
+            install_codex_skill: false,
+            install_codex_doc: false,
+            write_mcp_setup_notes: false,
+            configure_journal_fetch_refspec: false,
+            bootstrap_journal_layout: true,
+            ..OnboardingSelections::interactive_defaults(ExistingDocs {
+                claude_md: false,
+                agents_md: false,
+            })
+        };
+
+        initialize_project(tmp.path(), &selections).unwrap();
+
+        assert!(tmp.path().join(".git/tempyr/journals/open").is_dir());
     }
 
     #[test]

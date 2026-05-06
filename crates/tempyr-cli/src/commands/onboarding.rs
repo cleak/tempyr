@@ -178,6 +178,9 @@ pub struct OnboardingSelections {
     pub create_env_local_from_template: bool,
     pub validate_provider_setup: bool,
     pub run_index_rebuild: bool,
+    pub enable_journal: bool,
+    pub configure_journal_fetch_refspec: bool,
+    pub bootstrap_journal_layout: bool,
     pub install_render_overrides: bool,
     pub install_claude_hooks: bool,
     pub install_claude_skill: bool,
@@ -189,15 +192,43 @@ pub struct OnboardingSelections {
     pub existing_doc_mode: ExistingDocMode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JournalSetupDefaults {
+    pub enable_journal: bool,
+    pub configure_journal_fetch_refspec: bool,
+    pub bootstrap_journal_layout: bool,
+}
+
+impl Default for JournalSetupDefaults {
+    fn default() -> Self {
+        Self {
+            enable_journal: true,
+            configure_journal_fetch_refspec: true,
+            bootstrap_journal_layout: true,
+        }
+    }
+}
+
 impl OnboardingSelections {
+    #[cfg(test)]
     pub fn interactive_defaults(existing_docs: ExistingDocs) -> Self {
+        Self::interactive_defaults_with_journal(existing_docs, JournalSetupDefaults::default())
+    }
+
+    pub fn interactive_defaults_with_journal(
+        existing_docs: ExistingDocs,
+        journal_defaults: JournalSetupDefaults,
+    ) -> Self {
         Self {
             provider: EmbeddingProviderChoice::Voyage,
             api_key: None,
             write_api_key_for_tempyr: true,
             create_env_local_from_template: true,
             validate_provider_setup: true,
-            run_index_rebuild: false,
+            run_index_rebuild: true,
+            enable_journal: journal_defaults.enable_journal,
+            configure_journal_fetch_refspec: journal_defaults.configure_journal_fetch_refspec,
+            bootstrap_journal_layout: journal_defaults.bootstrap_journal_layout,
             install_render_overrides: false,
             install_claude_hooks: true,
             install_claude_skill: true,
@@ -221,6 +252,7 @@ enum Page {
     Provider,
     CoreSetup,
     ApiKey,
+    JournalSetup,
     AgentIntegrations,
     ExistingDocs,
     Review,
@@ -233,6 +265,23 @@ enum CoreOption {
     ValidateProvider,
     RunIndexRebuild,
     InstallRenderOverrides,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalOption {
+    EnableJournal,
+    ConfigureFetchRefspec,
+    BootstrapLayout,
+}
+
+impl JournalOption {
+    fn all() -> [Self; 3] {
+        [
+            Self::EnableJournal,
+            Self::ConfigureFetchRefspec,
+            Self::BootstrapLayout,
+        ]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,18 +297,31 @@ struct WizardState {
     existing_docs: ExistingDocs,
     page_index: usize,
     core_index: usize,
+    journal_index: usize,
     agent_index: usize,
     existing_docs_index: usize,
     api_key_input: String,
 }
 
 impl WizardState {
+    #[cfg(test)]
     fn new(existing_docs: ExistingDocs) -> Self {
+        Self::new_with_journal_defaults(existing_docs, JournalSetupDefaults::default())
+    }
+
+    fn new_with_journal_defaults(
+        existing_docs: ExistingDocs,
+        journal_defaults: JournalSetupDefaults,
+    ) -> Self {
         Self {
-            selections: OnboardingSelections::interactive_defaults(existing_docs),
+            selections: OnboardingSelections::interactive_defaults_with_journal(
+                existing_docs,
+                journal_defaults,
+            ),
             existing_docs,
             page_index: 0,
             core_index: 0,
+            journal_index: 0,
             agent_index: 0,
             existing_docs_index: 0,
             api_key_input: String::new(),
@@ -271,6 +333,7 @@ impl WizardState {
         if self.should_show_api_key_page() {
             pages.push(Page::ApiKey);
         }
+        pages.push(Page::JournalSetup);
         pages.push(Page::AgentIntegrations);
         if self.selected_existing_docs() {
             pages.push(Page::ExistingDocs);
@@ -318,9 +381,12 @@ impl WizardState {
     }
 }
 
-pub fn run(existing_docs: ExistingDocs) -> anyhow::Result<Option<OnboardingSelections>> {
+pub fn run(
+    existing_docs: ExistingDocs,
+    journal_defaults: JournalSetupDefaults,
+) -> anyhow::Result<Option<OnboardingSelections>> {
     let mut guard = TerminalGuard::enter()?;
-    let mut state = WizardState::new(existing_docs);
+    let mut state = WizardState::new_with_journal_defaults(existing_docs, journal_defaults);
 
     loop {
         guard
@@ -347,6 +413,7 @@ pub fn run(existing_docs: ExistingDocs) -> anyhow::Result<Option<OnboardingSelec
                     Page::Provider => handle_provider(&mut state, key.code),
                     Page::CoreSetup => handle_core_setup(&mut state, key.code),
                     Page::ApiKey => handle_api_key(&mut state, key.code),
+                    Page::JournalSetup => handle_journal_setup(&mut state, key.code),
                     Page::AgentIntegrations => handle_agent_integrations(&mut state, key.code),
                     Page::ExistingDocs => handle_existing_docs(&mut state, key.code),
                     Page::Review => match key.code {
@@ -407,6 +474,24 @@ fn handle_core_setup(state: &mut WizardState, key: KeyCode) {
         KeyCode::Enter | KeyCode::Char('n') => state.next_page(),
         KeyCode::Left | KeyCode::Backspace | KeyCode::Char('b') => state.prev_page(),
         KeyCode::Right | KeyCode::Char('l') => state.next_page(),
+        _ => {}
+    }
+}
+
+fn handle_journal_setup(state: &mut WizardState, key: KeyCode) {
+    let max_index = JournalOption::all().len().saturating_sub(1);
+    state.journal_index = state.journal_index.min(max_index);
+
+    match key {
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.journal_index = state.journal_index.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.journal_index = (state.journal_index + 1).min(max_index);
+        }
+        KeyCode::Char(' ') => toggle_journal_option(state),
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('n') => state.next_page(),
+        KeyCode::Left | KeyCode::Backspace | KeyCode::Char('b') => state.prev_page(),
         _ => {}
     }
 }
@@ -511,6 +596,22 @@ fn toggle_core_option(state: &mut WizardState) {
     }
 }
 
+fn toggle_journal_option(state: &mut WizardState) {
+    match JournalOption::all().get(state.journal_index).copied() {
+        Some(JournalOption::EnableJournal) => {
+            state.selections.enable_journal = !state.selections.enable_journal;
+        }
+        Some(JournalOption::ConfigureFetchRefspec) => {
+            state.selections.configure_journal_fetch_refspec =
+                !state.selections.configure_journal_fetch_refspec;
+        }
+        Some(JournalOption::BootstrapLayout) => {
+            state.selections.bootstrap_journal_layout = !state.selections.bootstrap_journal_layout;
+        }
+        None => {}
+    }
+}
+
 fn toggle_agent_checkbox(state: &mut WizardState) {
     match state.agent_index {
         0 => state.selections.install_claude_hooks = !state.selections.install_claude_hooks,
@@ -584,6 +685,7 @@ fn render(area: Rect, frame: &mut ratatui::Frame<'_>, state: &WizardState) {
         Page::Provider => render_provider(frame, chunks[1], state),
         Page::CoreSetup => render_core_setup(frame, chunks[1], state),
         Page::ApiKey => render_api_key(frame, chunks[1], state),
+        Page::JournalSetup => render_journal_setup(frame, chunks[1], state),
         Page::AgentIntegrations => render_agent_integrations(frame, chunks[1], state),
         Page::ExistingDocs => render_existing_docs(frame, chunks[1], state),
         Page::Review => render_review(frame, chunks[1], state),
@@ -626,6 +728,12 @@ fn current_header(state: &WizardState) -> Vec<Line<'static>> {
                 "Tempyr validates it as you type and stores it in Tempyr's shared worktree env when available, falling back to .env.local.",
             ),
         ],
+        Page::JournalSetup => vec![
+            Line::from("Choose how Tempyr should set up the session journal."),
+            Line::from(
+                "Journals capture agent plans, findings, decisions, and dead ends as git refs.",
+            ),
+        ],
         Page::AgentIntegrations => vec![
             Line::from("Toggle the agent integrations you want Tempyr to scaffold."),
             Line::from("Hooks, skills, docs, and MCP notes can be managed independently."),
@@ -651,6 +759,9 @@ fn current_footer(state: &WizardState) -> &'static str {
         Page::ApiKey => {
             "Type or paste the key  Backspace: delete  Delete: clear  Enter: continue when valid  Left: back  Esc: cancel"
         }
+        Page::JournalSetup => {
+            "Up/Down: move  Space: toggle option  Enter: continue  Backspace/Left: back"
+        }
         Page::AgentIntegrations | Page::ExistingDocs => {
             "Up/Down: move  Space: toggle/select  Enter: continue  Backspace/Left: back"
         }
@@ -665,8 +776,9 @@ fn render_welcome(frame: &mut ratatui::Frame<'_>, area: Rect) {
         Line::from("1. Create .tempyr/, graph/, and the base project config."),
         Line::from("2. Ask which embedding provider this repo should use."),
         Line::from("3. Collect and validate an API key if you want Tempyr to store one."),
-        Line::from("4. Scaffold Claude Code and Codex integration files."),
-        Line::from("5. Review the plan before anything is written."),
+        Line::from("4. Configure the session journal and initial index."),
+        Line::from("5. Scaffold Claude Code and Codex integration files."),
+        Line::from("6. Review the plan before anything is written."),
     ];
     frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), area);
 }
@@ -865,6 +977,51 @@ fn render_api_key(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardStat
     frame.render_widget(help, sections[3]);
 }
 
+fn render_journal_setup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardState) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(area);
+
+    let options = JournalOption::all();
+    let items: Vec<ListItem<'_>> = options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            ListItem::new(checkbox_line(
+                state.journal_index == index,
+                journal_option_enabled(state, *option),
+                journal_option_label(*option),
+            ))
+        })
+        .collect();
+    let list = List::new(items)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Journal setup "),
+        );
+    let mut list_state = ListState::default();
+    list_state.select(Some(
+        state.journal_index.min(options.len().saturating_sub(1)),
+    ));
+    frame.render_stateful_widget(list, columns[0], &mut list_state);
+
+    let option = options
+        .get(state.journal_index.min(options.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(JournalOption::EnableJournal);
+    let detail = Paragraph::new(journal_option_detail_lines(option))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Option details "),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(detail, columns[1]);
+}
+
 fn render_agent_integrations(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardState) {
     let rows = [
         checkbox_line(
@@ -1052,6 +1209,17 @@ fn render_review(frame: &mut ratatui::Frame<'_>, area: Rect, state: &WizardState
             ])),
         ]),
         Line::from(vec![
+            Span::styled("Journal: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(enabled_list(&[
+                ("auto-publish", state.selections.enable_journal),
+                (
+                    "fetch refs",
+                    state.selections.configure_journal_fetch_refspec,
+                ),
+                ("bootstrap", state.selections.bootstrap_journal_layout),
+            ])),
+        ]),
+        Line::from(vec![
             Span::styled("MCP notes: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(if state.selections.write_mcp_setup_notes {
                 "write"
@@ -1202,6 +1370,62 @@ fn core_option_detail_lines(state: &WizardState, option: CoreOption) -> Vec<Line
     }
 }
 
+fn journal_option_enabled(state: &WizardState, option: JournalOption) -> bool {
+    match option {
+        JournalOption::EnableJournal => state.selections.enable_journal,
+        JournalOption::ConfigureFetchRefspec => state.selections.configure_journal_fetch_refspec,
+        JournalOption::BootstrapLayout => state.selections.bootstrap_journal_layout,
+    }
+}
+
+fn journal_option_label(option: JournalOption) -> &'static str {
+    match option {
+        JournalOption::EnableJournal => "Enable journal auto-publish",
+        JournalOption::ConfigureFetchRefspec => "Fetch journal refs with git fetch",
+        JournalOption::BootstrapLayout => "Initialize local journal layout now",
+    }
+}
+
+fn journal_option_detail_lines(option: JournalOption) -> Vec<Line<'static>> {
+    match option {
+        JournalOption::EnableJournal => vec![
+            Line::from(Span::styled(
+                "Journal auto-publish",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(
+                "Writes [journal] enabled = true so finalized sessions can be published to refs/tempyr/journals/*.",
+            ),
+            Line::from(
+                "Disable this for repos where agent reasoning should stay local unless you flush manually.",
+            ),
+        ],
+        JournalOption::ConfigureFetchRefspec => vec![
+            Line::from(Span::styled(
+                "Fetch journal refs",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(
+                "Adds a remote.origin.fetch refspec so regular git fetch also pulls journal refs from other machines.",
+            ),
+            Line::from("Tempyr skips this safely when the project is not inside a git repo."),
+        ],
+        JournalOption::BootstrapLayout => vec![
+            Line::from(Span::styled(
+                "Initialize journal layout",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(
+                "Creates the local <git-common-dir>/tempyr/journals/open directory now instead of waiting for the first agent session.",
+            ),
+            Line::from("This only touches git-private storage, not tracked project files."),
+        ],
+    }
+}
+
 fn api_key_validation(state: &WizardState) -> ApiKeyValidation {
     let Some(env_var) = state.selections.provider.env_var() else {
         return ApiKeyValidation::Valid;
@@ -1320,6 +1544,7 @@ mod tests {
                 Page::Provider,
                 Page::CoreSetup,
                 Page::ApiKey,
+                Page::JournalSetup,
                 Page::AgentIntegrations,
                 Page::Review,
             ]
@@ -1383,7 +1608,43 @@ mod tests {
         handle_api_key(&mut state, KeyCode::Enter);
 
         assert_eq!(state.api_key_input, "pa-1234567890abcdef");
-        assert_eq!(state.current_page(), Page::AgentIntegrations);
+        assert_eq!(state.current_page(), Page::JournalSetup);
+    }
+
+    #[test]
+    fn interactive_defaults_run_index_and_show_journal_setup() {
+        let selections = OnboardingSelections::interactive_defaults(ExistingDocs {
+            claude_md: false,
+            agents_md: false,
+        });
+
+        assert!(selections.run_index_rebuild);
+        assert!(selections.enable_journal);
+        assert!(selections.configure_journal_fetch_refspec);
+        assert!(selections.bootstrap_journal_layout);
+    }
+
+    #[test]
+    fn journal_setup_toggles_each_option() {
+        let mut state = WizardState::new(ExistingDocs {
+            claude_md: false,
+            agents_md: false,
+        });
+        state.page_index = state
+            .pages()
+            .iter()
+            .position(|page| *page == Page::JournalSetup)
+            .unwrap();
+
+        handle_journal_setup(&mut state, KeyCode::Char(' '));
+        handle_journal_setup(&mut state, KeyCode::Down);
+        handle_journal_setup(&mut state, KeyCode::Char(' '));
+        handle_journal_setup(&mut state, KeyCode::Down);
+        handle_journal_setup(&mut state, KeyCode::Char(' '));
+
+        assert!(!state.selections.enable_journal);
+        assert!(!state.selections.configure_journal_fetch_refspec);
+        assert!(!state.selections.bootstrap_journal_layout);
     }
 
     #[test]
