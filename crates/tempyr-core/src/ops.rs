@@ -102,15 +102,25 @@ pub fn rename_node_slug(graph_dir: &Path, old_id: &str, new_slug: &str) -> Resul
 pub fn resolve_node_id(graph_dir: &Path, query: &str) -> Result<String> {
     // Fast path: filename matches `{query}.md`. Walks at any depth >= 2 so we
     // stay consistent with `Graph::load_from_directory` and `find_node_file`.
+    // We still parse the file to canonicalize via frontmatter — `id:` is the
+    // source of truth, and a filename can drift from it.
     let exact_filename = format!("{query}.md");
     for entry in WalkDir::new(graph_dir)
         .min_depth(2)
         .into_iter()
         .filter_map(|e| e.ok())
     {
-        if entry.file_name().to_string_lossy() == exact_filename {
-            return Ok(query.to_string());
+        if entry.file_name().to_string_lossy() != exact_filename {
+            continue;
         }
+        let path = entry.path();
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(node) = parse_node(&content, path.to_path_buf()) else {
+            continue;
+        };
+        return Ok(node.id().to_string());
     }
 
     // Slow path: filename doesn't match — scan frontmatter, matching
@@ -138,9 +148,12 @@ pub fn resolve_node_id(graph_dir: &Path, query: &str) -> Result<String> {
 
     // Try suffix-only match if query looks like a valid 6-char suffix.
     // Walks unbounded (same as the paths above) so suffix lookups behave
-    // consistently with the rest of the graph traversals.
+    // consistently with the rest of the graph traversals. The filename
+    // pattern is the cheap prefilter; the actual match is on the parsed
+    // frontmatter `id:` so a drifted filename can't surface a wrong ID.
     if id::is_valid_suffix(query) {
         let suffix_pattern = format!("-{query}.md");
+        let suffix_id_pattern = format!("-{query}");
         let mut matches = Vec::new();
 
         for entry in WalkDir::new(graph_dir)
@@ -153,12 +166,22 @@ pub fn resolve_node_id(graph_dir: &Path, query: &str) -> Result<String> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy();
-            if name.ends_with(&suffix_pattern) {
-                let stem = name.strip_suffix(".md").unwrap();
-                matches.push(stem.to_string());
+            if !name.ends_with(&suffix_pattern) {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(node) = parse_node(&content, path.to_path_buf()) else {
+                continue;
+            };
+            if node.id().ends_with(&suffix_id_pattern) {
+                matches.push(node.id().to_string());
             }
         }
 
+        matches.sort();
+        matches.dedup();
         match matches.len() {
             0 => {}
             1 => return Ok(matches.into_iter().next().unwrap()),
@@ -1227,6 +1250,44 @@ mod tests {
 
         let result = resolve_node_id(&graph_dir, "nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_node_id_fast_path_canonicalizes_via_frontmatter() {
+        // Filename happens to match `{query}.md` but the canonical id in
+        // frontmatter differs. We return the frontmatter id so callers
+        // never get back a stem that no node actually answers to.
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        write_node(
+            &graph_dir,
+            "features",
+            "wrong-name",
+            "---\nid: real-name\ntype: feature\nstatus: draft\nowner: alice\n---\n# Real\n",
+        );
+
+        let resolved = resolve_node_id(&graph_dir, "wrong-name").unwrap();
+        assert_eq!(resolved, "real-name");
+    }
+
+    #[test]
+    fn test_resolve_node_id_suffix_canonicalizes_via_frontmatter() {
+        // Filename matches `*-{suffix}.md` but frontmatter id differs.
+        // The suffix loop must push the parsed `node.id()` (only when it
+        // also ends with `-{suffix}`), never the filename stem.
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        write_node(
+            &graph_dir,
+            "tasks",
+            "foo-abc123",
+            "---\nid: bar-abc123\ntype: task\nstatus: backlog\n---\n# Bar\n",
+        );
+
+        let resolved = resolve_node_id(&graph_dir, "abc123").unwrap();
+        assert_eq!(resolved, "bar-abc123");
     }
 
     #[test]
