@@ -136,17 +136,22 @@ pub fn resolve_node_id(graph_dir: &Path, query: &str) -> Result<String> {
         }
     }
 
-    // Try suffix-only match if query looks like a valid 6-char suffix
+    // Try suffix-only match if query looks like a valid 6-char suffix.
+    // Walks unbounded (same as the paths above) so suffix lookups behave
+    // consistently with the rest of the graph traversals.
     if id::is_valid_suffix(query) {
         let suffix_pattern = format!("-{query}.md");
         let mut matches = Vec::new();
 
         for entry in WalkDir::new(graph_dir)
             .min_depth(2)
-            .max_depth(2)
             .into_iter()
             .filter_map(|e| e.ok())
         {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "md") {
+                continue;
+            }
             let name = entry.file_name().to_string_lossy();
             if name.ends_with(&suffix_pattern) {
                 let stem = name.strip_suffix(".md").unwrap();
@@ -1222,6 +1227,28 @@ mod tests {
 
         let result = resolve_node_id(&graph_dir, "nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_node_id_by_suffix_in_nested_directory() {
+        // Suffix lookup must walk the same depth range as
+        // `Graph::load_from_directory` — a node nested below the type dir
+        // (e.g. `tasks/2026-q2/<id>.md`) is loaded by the graph and must be
+        // resolvable by its suffix as well.
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+        let nested = graph_dir.join("tasks").join("2026-q2");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        // Hand-write so we control the path (depth 3, below the type dir).
+        std::fs::write(
+            nested.join("ship-it-abc123.md"),
+            "---\nid: ship-it-abc123\ntype: task\nstatus: backlog\n---\n# Ship It\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_node_id(&graph_dir, "abc123").unwrap();
+        assert_eq!(resolved, "ship-it-abc123");
     }
 
     #[test]
