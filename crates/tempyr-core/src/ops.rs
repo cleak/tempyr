@@ -261,11 +261,17 @@ pub fn remove_edge(
 /// For every edge A->B (type X), checks that B has the reverse edge B->A (reverse(X)).
 /// Missing reverses are added and the affected files are written.
 /// Returns the list of (node_id, added_edge) pairs.
+///
+/// All path resolution and edge accumulation happens in-memory first, before
+/// any file writes. This way a misaligned node (filename != id, target not in
+/// the loaded graph, etc.) is caught up-front instead of partial-writing some
+/// files and then aborting mid-loop.
 pub fn repair_reverse_edges(
     graph_dir: &Path,
     schema: &Schema,
 ) -> Result<Vec<(String, String, String)>> {
     use crate::graph::Graph;
+    use std::collections::HashMap;
 
     let graph = Graph::load_from_directory(graph_dir, schema.clone())?;
     let mut repairs: Vec<(String, String, String)> = Vec::new();
@@ -300,14 +306,30 @@ pub fn repair_reverse_edges(
     repairs.sort();
     repairs.dedup();
 
-    // Apply repairs: add reverse edges to target files
+    // Build the set of file mutations in memory. Keyed by target_id so we
+    // accumulate multiple new reverse edges into a single in-memory copy of
+    // each target node before writing it. We rely on the file_path the graph
+    // captured at load — `find_node_file` would reconstruct it from the id
+    // and would miss files whose on-disk name doesn't match the id (e.g.
+    // `<dir>/README.md` with `id: hub-<dir>-readme`).
+    let mut pending: HashMap<String, Node> = HashMap::new();
     for (target_id, source_id, reverse_type) in &repairs {
-        let target_path = find_node_file(graph_dir, target_id)?;
-        let content = std::fs::read_to_string(&target_path)?;
-        let mut target_node = parse_node(&content, target_path.clone())?;
+        use std::collections::hash_map::Entry;
+        let target = match pending.entry(target_id.clone()) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(v) => {
+                let target_node = graph.get_node(target_id).ok_or_else(|| {
+                    TempyrError::NotFound(format!(
+                        "Cannot repair: target node '{target_id}' not in graph"
+                    ))
+                })?;
+                v.insert(target_node.clone())
+            }
+        };
 
-        // Skip if already present (may have been added by a prior repair in this batch)
-        let already_has = target_node
+        // Skip if already present (defensive — fixed-graph load wouldn't show
+        // it as missing, but a prior repair in this batch may have added it).
+        let already_has = target
             .frontmatter
             .edges
             .iter()
@@ -316,14 +338,18 @@ pub fn repair_reverse_edges(
             continue;
         }
 
-        target_node
+        target
             .frontmatter
             .edges
             .push(EdgeEntry::new(source_id, reverse_type));
-        sort_edges(&mut target_node.frontmatter.edges);
-        target_node.frontmatter.updated = Some(Utc::now());
+    }
 
-        atomic_write(&target_path, &serialize_node(&target_node)?)?;
+    // Commit: only now do we touch the filesystem.
+    let now = Utc::now();
+    for node in pending.values_mut() {
+        sort_edges(&mut node.frontmatter.edges);
+        node.frontmatter.updated = Some(now);
+        atomic_write(&node.file_path, &serialize_node(node)?)?;
     }
 
     Ok(repairs)
@@ -518,17 +544,46 @@ fn find_type_directory(graph_dir: &Path, node_type: &str) -> Result<PathBuf> {
 }
 
 /// Find a node file by its ID, searching all subdirectories.
+///
+/// Two-phase lookup so we don't require `filename == id`: most files do
+/// follow that convention (and we hit them in the fast path), but a node's
+/// `id:` in frontmatter is the source of truth, and files like
+/// `<dir>/README.md` with a non-matching id are legitimate.
 pub fn find_node_file(graph_dir: &Path, node_id: &str) -> Result<PathBuf> {
     let filename = format!("{node_id}.md");
 
+    // Fast path: filename matches `<id>.md`. Walks at any depth >= 2 so we
+    // stay consistent with `Graph::load_from_directory`.
     for entry in WalkDir::new(graph_dir)
         .min_depth(2)
-        .max_depth(2)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         if entry.file_name().to_string_lossy() == filename {
             return Ok(entry.path().to_path_buf());
+        }
+    }
+
+    // Slow path: filename doesn't match — fall back to scanning frontmatter.
+    // Only triggers when the fast path misses, so cost is bounded to graphs
+    // that actually have a misaligned file.
+    for entry in WalkDir::new(graph_dir)
+        .min_depth(2)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "md") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(node) = parse_node(&content, path.to_path_buf()) else {
+            continue;
+        };
+        if node.id() == node_id {
+            return Ok(path.to_path_buf());
         }
     }
 
@@ -1144,5 +1199,115 @@ mod tests {
 
         let result = resolve_node_id(&graph_dir, "nonexistent");
         assert!(result.is_err());
+    }
+
+    // Regression: nodes can legitimately live at paths where the filename does
+    // not match the id (e.g., `features/README.md` with `id: feat-overview`).
+    // `find_node_file` must fall back to parsing frontmatter, and
+    // `repair_reverse_edges` must use the loaded graph's path rather than
+    // re-deriving `<type-dir>/<id>.md` — otherwise it crashes mid-loop and
+    // leaves partial writes on disk.
+    #[test]
+    fn test_find_node_file_resolves_by_frontmatter_id_when_filename_differs() {
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        // File is named README.md but its id is something else.
+        std::fs::write(
+            graph_dir.join("features/README.md"),
+            "---\nid: feat-overview\ntype: feature\nstatus: draft\nowner: alice\n---\n# Overview\n",
+        )
+        .unwrap();
+
+        let path = find_node_file(&graph_dir, "feat-overview").unwrap();
+        assert_eq!(path, graph_dir.join("features/README.md"));
+    }
+
+    #[test]
+    fn test_repair_reverse_edges_writes_to_misaligned_target() {
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+        let schema = make_schema();
+
+        // Target file lives at features/README.md but its frontmatter id is
+        // `feat-overview` — i.e., filename != id, the shape the bug report
+        // describes (`<dir>/README.md` with `id: hub-<dir>-readme`).
+        std::fs::write(
+            graph_dir.join("features/README.md"),
+            "---\nid: feat-overview\ntype: feature\nstatus: draft\nowner: alice\n---\n# Overview\n",
+        )
+        .unwrap();
+
+        // Source has the forward edge; target is missing the reverse.
+        std::fs::write(
+            graph_dir.join("epics/epic-a.md"),
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\nedges:\n  - target: feat-overview\n    type: parent_of\n---\n# Epic A\n",
+        )
+        .unwrap();
+
+        let repairs = repair_reverse_edges(&graph_dir, &schema).unwrap();
+        assert_eq!(
+            repairs.len(),
+            1,
+            "expected one missing reverse: {repairs:?}"
+        );
+
+        // The reverse edge must be written to the file we actually loaded the
+        // target from (features/README.md), NOT to a phantom path derived from
+        // `<type-dir>/<id>.md`.
+        let updated = std::fs::read_to_string(graph_dir.join("features/README.md")).unwrap();
+        let node = parse_node(&updated, PathBuf::from("test")).unwrap();
+        assert!(
+            node.edges()
+                .iter()
+                .any(|e| e.target == "epic-a" && e.edge_type == "child_of"),
+            "expected reverse edge added to README.md, got edges: {:?}",
+            node.edges()
+        );
+
+        // The phantom path must not have been created.
+        assert!(
+            !graph_dir.join("features/feat-overview.md").exists(),
+            "repair must not create a phantom file at <type-dir>/<id>.md"
+        );
+    }
+
+    #[test]
+    fn test_repair_reverse_edges_is_atomic_when_target_absent() {
+        // If some other node references a target that's not on disk, the
+        // pre-fix code would write to a few targets and then crash on the
+        // missing one, leaving partial writes. With the fix, we resolve all
+        // targets through the loaded graph first; a target that isn't in the
+        // graph is simply skipped (it's a dangling edge, surfaced separately
+        // by `validate`), so no partial writes ever land.
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+        let schema = make_schema();
+
+        // Source references a target that exists on disk and one that doesn't.
+        std::fs::write(
+            graph_dir.join("epics/epic-a.md"),
+            "---\nid: epic-a\ntype: epic\nstatus: draft\nowner: alice\nedges:\n  - target: feat-real\n    type: parent_of\n  - target: feat-ghost\n    type: parent_of\n---\n# Epic A\n",
+        )
+        .unwrap();
+        std::fs::write(
+            graph_dir.join("features/feat-real.md"),
+            "---\nid: feat-real\ntype: feature\nstatus: draft\nowner: alice\n---\n# Real\n",
+        )
+        .unwrap();
+
+        let repairs = repair_reverse_edges(&graph_dir, &schema).unwrap();
+        // Only the existing target gets a repair entry; the dangling one is
+        // silently skipped during collection.
+        assert_eq!(repairs.len(), 1);
+        assert_eq!(repairs[0].0, "feat-real");
+
+        let updated = std::fs::read_to_string(graph_dir.join("features/feat-real.md")).unwrap();
+        let node = parse_node(&updated, PathBuf::from("test")).unwrap();
+        assert!(
+            node.edges()
+                .iter()
+                .any(|e| e.target == "epic-a" && e.edge_type == "child_of")
+        );
     }
 }
