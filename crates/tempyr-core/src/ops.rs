@@ -94,21 +94,44 @@ pub fn rename_node_slug(graph_dir: &Path, old_id: &str, new_slug: &str) -> Resul
 /// Resolve a node query to a full node ID.
 ///
 /// Accepts:
-/// - Full hybrid ID: `session-replay-a1b2c3` (exact filename match)
-/// - Legacy ID: `feat-session-replay` (exact filename match)
+/// - Full hybrid ID: `session-replay-a1b2c3` (matches filename, falls back to frontmatter id)
+/// - Legacy ID: `feat-session-replay` (matches filename, falls back to frontmatter id)
 /// - 6-char suffix only: `a1b2c3` (scans filenames for `-{suffix}.md`)
 ///
 /// Returns an error if no match or multiple matches found.
 pub fn resolve_node_id(graph_dir: &Path, query: &str) -> Result<String> {
-    // Try exact match first (fastest path)
+    // Fast path: filename matches `{query}.md`. Walks at any depth >= 2 so we
+    // stay consistent with `Graph::load_from_directory` and `find_node_file`.
     let exact_filename = format!("{query}.md");
     for entry in WalkDir::new(graph_dir)
         .min_depth(2)
-        .max_depth(2)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         if entry.file_name().to_string_lossy() == exact_filename {
+            return Ok(query.to_string());
+        }
+    }
+
+    // Slow path: filename doesn't match — scan frontmatter, matching
+    // `find_node_file`'s behavior. Required for legitimate files like
+    // `<dir>/README.md` whose on-disk name doesn't match their `id:`.
+    for entry in WalkDir::new(graph_dir)
+        .min_depth(2)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "md") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(node) = parse_node(&content, path.to_path_buf()) else {
+            continue;
+        };
+        if node.id() == query {
             return Ok(query.to_string());
         }
     }
@@ -1199,6 +1222,24 @@ mod tests {
 
         let result = resolve_node_id(&graph_dir, "nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_node_id_by_frontmatter_when_filename_differs() {
+        // Same shape as `find_node_file`'s misaligned-file regression: file
+        // at `<dir>/README.md` with a non-matching id must still be
+        // resolvable, so MCP/CLI lookups against such nodes don't fail.
+        let tmp = setup_graph_dir();
+        let graph_dir = tmp.path().join("graph");
+
+        std::fs::write(
+            graph_dir.join("features/README.md"),
+            "---\nid: feat-overview\ntype: feature\nstatus: draft\nowner: alice\n---\n# Overview\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_node_id(&graph_dir, "feat-overview").unwrap();
+        assert_eq!(resolved, "feat-overview");
     }
 
     // Regression: nodes can legitimately live at paths where the filename does
