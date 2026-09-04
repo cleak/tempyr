@@ -414,6 +414,13 @@ run_tempyr() {{\n\
     return $?\n\
   fi\n\
 \n\
+  for candidate in \"${{CARGO_HOME:-$HOME/.cargo}}/bin/tempyr\" \"${{CARGO_HOME:-$HOME/.cargo}}/bin/tempyr.exe\"; do\n\
+    if [ -x \"$candidate\" ]; then\n\
+      \"$candidate\" \"$@\"\n\
+      return $?\n\
+    fi\n\
+  done\n\
+\n\
   return 127\n\
 }}\n\
 if [ -d .tempyr ] || [ -f .tempyr-redirect ]; then\n\
@@ -685,6 +692,114 @@ mod tests {
         assert!(managed.contains("if [ -d .tempyr ] || [ -f .tempyr-redirect ]; then"));
         assert!(!managed.contains("exit 0"));
         assert!(!managed.contains("/tmp/tempyr"));
+    }
+
+    #[test]
+    fn managed_block_falls_back_to_the_cargo_bin_directory() {
+        // `cargo install tempyr` is the documented install path, but Git runs
+        // hooks with whatever PATH the invoking process had. A non-interactive
+        // SSH session or a CI step that never sources a shell profile does not
+        // have ~/.cargo/bin on PATH, and the hook then silently does nothing.
+        let managed = render_managed_block(&GIT_HOOKS[0]);
+
+        assert!(managed.contains("${CARGO_HOME:-$HOME/.cargo}/bin/tempyr"));
+        assert!(managed.contains("${CARGO_HOME:-$HOME/.cargo}/bin/tempyr.exe"));
+
+        // The fallback must come after the PATH lookup, so an explicitly
+        // installed or newer `tempyr` on PATH still wins.
+        let path_lookup = managed.find("command -v tempyr").unwrap();
+        let cargo_fallback = managed
+            .find("${CARGO_HOME:-$HOME/.cargo}/bin/tempyr")
+            .unwrap();
+        assert!(path_lookup < cargo_fallback);
+
+        // And it must still be possible to fail; 127 is how callers detect it.
+        assert!(managed.contains("return 127"));
+    }
+
+    /// Run the generated `run_tempyr` under `sh` with a controlled environment
+    /// and report its exit status. `home` supplies `$HOME`, `path` supplies
+    /// `$PATH`, and the working directory deliberately has no `.tempyr`, so the
+    /// hook body is skipped and only the resolver is exercised.
+    #[cfg(unix)]
+    fn probe_resolver(home: &std::path::Path, path: &str, cwd: &std::path::Path) -> i32 {
+        let script = format!(
+            "{}\nrun_tempyr --marker\n",
+            render_managed_block(&GIT_HOOKS[0])
+        );
+        let script_path = cwd.join("probe.sh");
+        fs::write(&script_path, script).unwrap();
+
+        std::process::Command::new("/bin/sh")
+            .arg(&script_path)
+            .current_dir(cwd)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", path)
+            .status()
+            .unwrap()
+            .code()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn write_stub(path: &std::path::Path, exit_code: i32) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("#!/bin/sh\nexit {exit_code}\n")).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generated_resolver_finds_tempyr_through_the_cargo_bin_fallback() {
+        // The string assertions above cannot catch a quoting or ordering
+        // mistake in the emitted shell, so actually execute it.
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let empty_path = "/nonexistent-bin";
+
+        // Nothing anywhere: the resolver must report 127 so callers can tell
+        // "not installed" apart from "ran and failed".
+        assert_eq!(probe_resolver(home.path(), empty_path, work.path()), 127);
+
+        // Only ~/.cargo/bin has it, and it is not on PATH. This is the case
+        // the fallback exists for; before it, this also returned 127.
+        write_stub(&home.path().join(".cargo/bin/tempyr"), 42);
+        assert_eq!(probe_resolver(home.path(), empty_path, work.path()), 42);
+
+        // A tempyr on PATH must still win over the cargo-bin copy.
+        let path_dir = tempfile::tempdir().unwrap();
+        write_stub(&path_dir.path().join("tempyr"), 7);
+        let with_path = path_dir.path().to_str().unwrap();
+        assert_eq!(probe_resolver(home.path(), with_path, work.path()), 7);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generated_hook_body_does_not_fail_the_commit_when_tempyr_is_absent() {
+        // The pre-commit body ends in `|| true`, so a missing tempyr must not
+        // block a commit even though the resolver itself reports 127.
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        fs::create_dir(work.path().join(".tempyr")).unwrap();
+
+        let pre_commit = GIT_HOOKS
+            .iter()
+            .find(|hook| hook.name == "pre-commit")
+            .expect("pre-commit hook is defined");
+        let hook = work.path().join("pre-commit.sh");
+        fs::write(&hook, render_managed_block(pre_commit)).unwrap();
+
+        let status = std::process::Command::new("/bin/sh")
+            .arg(&hook)
+            .current_dir(work.path())
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", "/nonexistent-bin")
+            .status()
+            .unwrap();
+
+        assert_eq!(status.code().unwrap(), 0);
     }
 
     #[test]
