@@ -29,8 +29,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           toolchain: "1.98.0"
-          # An explicit version installs the minimal profile, unlike the
-          # action's "stable" default, so ask for the components by name.
+          # The action always installs with --profile minimal, which omits
+          # rustfmt and clippy. That went unnoticed while the toolchain was
+          # "stable": the runner image ships it with both components already
+          # present, so the minimal install had nothing to strip. A version the
+          # image does not ship is installed fresh, so name them explicitly.
           components: rustfmt, clippy
       - name: Format
         run: cargo fmt --check
