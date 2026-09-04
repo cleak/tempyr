@@ -1122,6 +1122,12 @@ impl TempyrServer {
         Ok(session)
     }
 
+    // MCP SEP-2577 deprecates Roots, and rmcp marks list_roots and the
+    // ListRootsResult fields accordingly. Clients this server targets still
+    // advertise the capability and the replacement is not settled, so this
+    // path keeps using it until there is something to migrate to. The
+    // capability check below means nothing is sent to a client lacking it.
+    #[allow(deprecated)]
     pub(crate) async fn try_anchor_from_client_roots(&self, peer: Peer<RoleServer>) {
         if self.relative_project_root_fallback.is_none()
             && tempyr_core::project::find_project_roots().is_some()
@@ -1131,8 +1137,7 @@ impl TempyrServer {
 
         let supports_roots = peer
             .peer_info()
-            .and_then(|client| client.capabilities.roots.as_ref())
-            .is_some();
+            .is_some_and(|client| client.capabilities.roots.is_some());
         if !supports_roots {
             return;
         }
@@ -2795,7 +2800,7 @@ impl Default for TempyrServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for TempyrServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
