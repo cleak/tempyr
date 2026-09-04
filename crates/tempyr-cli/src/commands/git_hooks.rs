@@ -414,6 +414,13 @@ run_tempyr() {{\n\
     return $?\n\
   fi\n\
 \n\
+  for candidate in \"${{CARGO_HOME:-$HOME/.cargo}}/bin/tempyr\" \"${{CARGO_HOME:-$HOME/.cargo}}/bin/tempyr.exe\"; do\n\
+    if [ -x \"$candidate\" ]; then\n\
+      \"$candidate\" \"$@\"\n\
+      return $?\n\
+    fi\n\
+  done\n\
+\n\
   return 127\n\
 }}\n\
 if [ -d .tempyr ] || [ -f .tempyr-redirect ]; then\n\
@@ -685,6 +692,29 @@ mod tests {
         assert!(managed.contains("if [ -d .tempyr ] || [ -f .tempyr-redirect ]; then"));
         assert!(!managed.contains("exit 0"));
         assert!(!managed.contains("/tmp/tempyr"));
+    }
+
+    #[test]
+    fn managed_block_falls_back_to_the_cargo_bin_directory() {
+        // `cargo install tempyr` is the documented install path, but Git runs
+        // hooks with whatever PATH the invoking process had. A non-interactive
+        // SSH session or a CI step that never sources a shell profile does not
+        // have ~/.cargo/bin on PATH, and the hook then silently does nothing.
+        let managed = render_managed_block(&GIT_HOOKS[0]);
+
+        assert!(managed.contains("${CARGO_HOME:-$HOME/.cargo}/bin/tempyr"));
+        assert!(managed.contains("${CARGO_HOME:-$HOME/.cargo}/bin/tempyr.exe"));
+
+        // The fallback must come after the PATH lookup, so an explicitly
+        // installed or newer `tempyr` on PATH still wins.
+        let path_lookup = managed.find("command -v tempyr").unwrap();
+        let cargo_fallback = managed
+            .find("${CARGO_HOME:-$HOME/.cargo}/bin/tempyr")
+            .unwrap();
+        assert!(path_lookup < cargo_fallback);
+
+        // And it must still be possible to fail; 127 is how callers detect it.
+        assert!(managed.contains("return 127"));
     }
 
     #[test]
