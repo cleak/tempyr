@@ -1,0 +1,16 @@
+# cargo-audit configuration.
+#
+# Advisories listed here are reviewed and deliberately not actionable. Each
+# entry records why, so the next person does not have to re-derive it.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0189 - DNS rebinding in rmcp's Streamable HTTP server
+    # transport. tempyr does not build or use that transport: the workspace
+    # enables only `features = ["transport-io"]`, and tempyr-mcp serves over
+    # `rmcp::transport::stdio` exclusively. Upgrading past 1.3 is a separate
+    # API migration (1.4 removes `handler::server::common::schema_for_input`
+    # and 1.8 additionally breaks `list_roots`), so it is tracked on its own
+    # rather than folded into a dependency refresh.
+    "RUSTSEC-2026-0189",
+]

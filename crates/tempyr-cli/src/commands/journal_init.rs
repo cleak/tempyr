@@ -101,17 +101,15 @@ fn git_remote_url(repo_root: &Path, remote: &str) -> Option<String> {
 pub fn parse_owner_repo_from_url(url: &str) -> Option<(String, String)> {
     let lower = url.to_ascii_lowercase();
     // Strip the host marker; whatever's left should be `<owner>/<repo>`.
-    let after_host = if let Some(rest) = lower.strip_prefix("https://github.com/") {
-        rest.to_string()
-    } else if let Some(rest) = lower.strip_prefix("http://github.com/") {
-        rest.to_string()
-    } else if let Some(rest) = lower.strip_prefix("git@github.com:") {
-        rest.to_string()
-    } else if let Some(rest) = lower.strip_prefix("ssh://git@github.com/") {
-        rest.to_string()
-    } else {
-        return None;
-    };
+    let after_host = [
+        "https://github.com/",
+        "http://github.com/",
+        "git@github.com:",
+        "ssh://git@github.com/",
+    ]
+    .into_iter()
+    .find_map(|prefix| lower.strip_prefix(prefix))?
+    .to_string();
     // Drop trailing `.git` and any trailing slash.
     let trimmed = after_host
         .trim_end_matches('/')
