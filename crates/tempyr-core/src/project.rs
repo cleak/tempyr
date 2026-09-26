@@ -306,29 +306,42 @@ impl IndexLayout {
         Ok(None)
     }
 
+    /// Make the per-worktree active index the best available seed for the
+    /// current snapshot and return its path (which may not exist).
+    ///
+    /// When the active index is not already current, seeds are tried in order:
+    /// 1. the shared snapshot for the current key: an exact match, so the
+    ///    snapshot marker is updated to the current key;
+    /// 2. the existing stale active index, kept as-is: it usually differs from
+    ///    the current graph by the last mutation only, so an incremental
+    ///    update is far cheaper than a rebuild;
+    /// 3. the legacy `.tempyr/index.db`.
+    ///
+    /// Seeds 2 and 3 are not current. The marker keeps naming the snapshot
+    /// they were built for, so [`Self::current_index_path`] ignores them until
+    /// the caller refreshes the index and rewrites the marker.
     pub fn ensure_active_index_seeded(&self) -> io::Result<PathBuf> {
         let snapshot_key = self.snapshot_key()?;
         let active = self.active_index_path();
         let snapshot_matches = self.active_snapshot_key().as_deref() == Some(snapshot_key.as_str());
-        let needs_seed = !active.exists() || !snapshot_matches;
-
-        if !needs_seed {
+        if active.exists() && snapshot_matches {
             return Ok(active);
-        }
-
-        if active.exists() {
-            fs::remove_file(&active)?;
-        }
-
-        if let Some(parent) = active.parent() {
-            fs::create_dir_all(parent)?;
         }
 
         let shared = self.cache.snapshot_index_path(&snapshot_key);
         if shared.exists() {
+            if active.exists() {
+                fs::remove_file(&active)?;
+            }
+            if let Some(parent) = active.parent() {
+                fs::create_dir_all(parent)?;
+            }
             fs::copy(&shared, &active)?;
             self.write_active_snapshot_key()?;
-        } else if self.legacy_index_path.exists() {
+        } else if !active.exists() && self.legacy_index_path.exists() {
+            if let Some(parent) = active.parent() {
+                fs::create_dir_all(parent)?;
+            }
             fs::copy(&self.legacy_index_path, &active)?;
         }
 
@@ -1321,6 +1334,70 @@ mod tests {
                 .trim(),
             snapshot_key
         );
+    }
+
+    /// Build a one-node project and return its layout.
+    fn seeding_layout(root: &Path) -> IndexLayout {
+        let graph_dir = root.join("graph");
+        let features_dir = graph_dir.join("features");
+        let tempyr_dir = root.join(".tempyr");
+        fs::create_dir_all(&features_dir).unwrap();
+        fs::create_dir_all(&tempyr_dir).unwrap();
+        fs::write(tempyr_dir.join("schema.toml"), "name = 'x'\n").unwrap();
+        fs::write(features_dir.join("a.md"), "# A\n").unwrap();
+        IndexLayout::resolve(root, &graph_dir, &tempyr_dir).unwrap()
+    }
+
+    #[test]
+    fn stale_active_index_is_kept_as_seed_without_shared_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = seeding_layout(tmp.path());
+        let active = layout.active_index_path();
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        fs::write(&active, "stale-active-index").unwrap();
+        fs::write(layout.active_snapshot_path(), "outdated-snapshot").unwrap();
+        // A legacy index must not win over the more recent stale active one.
+        fs::write(&layout.legacy_index_path, "legacy-index").unwrap();
+
+        assert_eq!(layout.ensure_active_index_seeded().unwrap(), active);
+
+        assert_eq!(fs::read_to_string(&active).unwrap(), "stale-active-index");
+        // The seed is not current: the marker keeps naming its old snapshot,
+        // so readers do not pick the stale index up before it is refreshed.
+        assert_eq!(
+            fs::read_to_string(layout.active_snapshot_path()).unwrap(),
+            "outdated-snapshot"
+        );
+        assert_ne!(layout.current_index_path().unwrap(), Some(active));
+    }
+
+    #[test]
+    fn missing_active_index_is_seeded_from_legacy_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = seeding_layout(tmp.path());
+        fs::write(&layout.legacy_index_path, "legacy-index").unwrap();
+
+        let active = layout.ensure_active_index_seeded().unwrap();
+
+        assert_eq!(fs::read_to_string(&active).unwrap(), "legacy-index");
+        assert!(!layout.active_snapshot_path().exists());
+    }
+
+    #[test]
+    fn current_active_index_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = seeding_layout(tmp.path());
+        let active = layout.active_index_path();
+        let shared = layout.shared_snapshot_index_path().unwrap();
+        fs::create_dir_all(active.parent().unwrap()).unwrap();
+        fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        fs::write(&active, "current-active-index").unwrap();
+        layout.write_active_snapshot_key().unwrap();
+        fs::write(&shared, "shared-snapshot-index").unwrap();
+
+        layout.ensure_active_index_seeded().unwrap();
+
+        assert_eq!(fs::read_to_string(&active).unwrap(), "current-active-index");
     }
 
     #[test]

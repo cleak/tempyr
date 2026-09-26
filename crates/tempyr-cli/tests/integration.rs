@@ -1930,6 +1930,82 @@ fn test_add_edge_refreshes_index_for_follow_up_search() {
         .stdout(predicate::str::contains("feat-terrain"));
 }
 
+/// Frontmatter-only mutations must reach the index. Each mutation refreshes the
+/// index incrementally from the previous snapshot's index, so this fails if
+/// change detection only looks at node bodies (#52).
+#[test]
+fn test_frontmatter_mutations_keep_index_current() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+
+    write_node(
+        &tmp,
+        "features",
+        "feat-terrain",
+        "---\nid: feat-terrain\ntype: feature\nstatus: draft\nowner: alice\n---\n# Terrain Streaming\n\nLOD terrain streaming for large worlds.\n",
+    );
+    write_node(
+        &tmp,
+        "epics",
+        "epic-world",
+        "---\nid: epic-world\ntype: epic\nstatus: draft\nowner: alice\n---\n# World Streaming\n\nParent epic.\n",
+    );
+
+    let edge_count = || -> u64 {
+        let output = tempyr()
+            .current_dir(tmp.path())
+            .args(["--json", "index", "stats"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stats: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        stats["edge_count"].as_u64().unwrap()
+    };
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["index", "rebuild"])
+        .assert()
+        .success();
+    assert_eq!(edge_count(), 0);
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["add-edge", "feat-terrain", "epic-world", "child_of"])
+        .assert()
+        .success();
+    assert_eq!(
+        edge_count(),
+        2,
+        "both directions of the new edge are indexed"
+    );
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["remove-edge", "feat-terrain", "epic-world", "child_of"])
+        .assert()
+        .success();
+    assert_eq!(edge_count(), 0, "removed edge is dropped from the index");
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["status", "feat-terrain", "active"])
+        .assert()
+        .success();
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["search", "terrain", "--status", "draft"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feat-terrain").not());
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["search", "terrain", "--status", "active"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("feat-terrain"));
+}
+
 #[test]
 fn test_render_prd() {
     let tmp = TempDir::new().unwrap();

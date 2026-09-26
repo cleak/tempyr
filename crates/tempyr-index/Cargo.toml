@@ -36,5 +36,7 @@ workspace = true
 optional = true
 
 [dev-dependencies]
+# `hooks` lets tests count commits to pin down transaction boundaries.
+rusqlite = { workspace = true, features = ["hooks"] }
 tempfile = { workspace = true }
 serde_yaml = { workspace = true }

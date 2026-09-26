@@ -31,3 +31,24 @@ pub enum IndexError {
 }
 
 pub type Result<T> = std::result::Result<T, IndexError>;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rusqlite::Connection;
+
+    /// Count the transactions committed on `conn` from now on. Autocommit
+    /// statements count one each, which is what the batching tests guard
+    /// against.
+    pub(crate) fn commit_counter(conn: &Connection) -> Arc<AtomicUsize> {
+        let commits = Arc::new(AtomicUsize::new(0));
+        let hook_commits = Arc::clone(&commits);
+        conn.commit_hook(Some(move || {
+            hook_commits.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+        commits
+    }
+}
