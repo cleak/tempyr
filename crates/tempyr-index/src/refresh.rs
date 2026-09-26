@@ -25,16 +25,19 @@ pub fn refresh_index_for_graph(layout: &IndexLayout, graph: &Graph) -> Result<()
 /// An existing file (usually the previous snapshot's index) is updated
 /// incrementally. If it cannot be (not a SQLite database, corrupt, ...), it is
 /// discarded and rebuilt: the index is derived, so a rebuild is always a
-/// correct answer, only a slower one.
+/// correct answer, only a slower one. The discarded error is reported as a
+/// warning so a recurring failure stays visible even though the refresh
+/// succeeds.
 fn refresh_index_at_path(index_path: &Path, graph: &Graph) -> Result<()> {
     if index_path.exists() {
         // The connection is dropped at the end of the closure, before any
         // removal below (Windows cannot delete a file that is still open).
-        if Index::open(index_path)
-            .and_then(|index| index.incremental_update(graph))
-            .is_ok()
-        {
-            return Ok(());
+        match Index::open(index_path).and_then(|index| index.incremental_update(graph)) {
+            Ok(_) => return Ok(()),
+            Err(err) => eprintln!(
+                "Warning: rebuilding index from scratch; incremental update of {} failed: {err}",
+                index_path.display()
+            ),
         }
         fs::remove_file(index_path).map_err(|err| {
             IndexError::General(format!("Failed to discard unusable index: {err}"))
