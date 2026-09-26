@@ -491,7 +491,8 @@ CREATE TABLE nodes (
     created_at  TEXT,
     updated_at  TEXT,
     tags        TEXT,                 -- JSON array
-    content_hash TEXT NOT NULL        -- blake3 hash of body for cache invalidation
+    content_hash TEXT NOT NULL,       -- blake3 hash of body (embedding cache key)
+    index_hash  TEXT                  -- blake3 hash of every indexed value, incl. frontmatter and edges
 );
 
 CREATE TABLE edges (
@@ -534,6 +535,8 @@ CREATE TABLE embedding_cache (
     embedding    BLOB NOT NULL        -- raw float32 bytes
 );
 ```
+
+**Updates.** Every write to the index (full rebuild, incremental update, embedding batch) runs in a single SQLite transaction, so a failed update leaves the index unchanged and a rebuild costs one journal flush rather than one per row. An incremental update re-indexes exactly the nodes whose `index_hash` changed and removes nodes that left the graph; edge rows belong to their source node, so re-indexing a node never touches edges other nodes point at it. The result always matches a full rebuild of the same graph. After a graph mutation, the next snapshot's index is seeded from the previous snapshot's index and brought up to date incrementally. The structural layout version is stamped in `PRAGMA user_version`; an index with a different version is rebuilt from scratch on its next update.
 
 ### 3.6 Hybrid Retrieval Pipeline
 

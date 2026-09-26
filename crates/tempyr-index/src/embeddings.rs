@@ -740,11 +740,28 @@ impl EmbeddingStore {
     }
 
     pub fn store_embedding(&self, content_hash: &str, embedding: &[f32]) -> Result<()> {
-        let blob = embedding_to_blob(embedding);
-        self.conn.execute(
-            "INSERT OR REPLACE INTO embeddings (content_hash, embedding) VALUES (?1, ?2)",
-            rusqlite::params![content_hash, blob],
-        )?;
+        self.store_embeddings([(content_hash, embedding)])
+    }
+
+    /// Store several embeddings in one transaction: either all are written or
+    /// none are, and the batch costs one journal flush instead of one per row.
+    pub fn store_embeddings<'a>(
+        &self,
+        entries: impl IntoIterator<Item = (&'a str, &'a [f32])>,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = self.conn.prepare_cached(
+                "INSERT OR REPLACE INTO embeddings (content_hash, embedding) VALUES (?1, ?2)",
+            )?;
+            for (content_hash, embedding) in entries {
+                stmt.execute(rusqlite::params![
+                    content_hash,
+                    embedding_to_blob(embedding)
+                ])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -898,10 +915,12 @@ pub async fn embed_graph(
         )));
     }
 
-    // Store in cache
-    for ((_, hash, _), embedding) in to_embed.iter().zip(embeddings.iter()) {
-        store.store_embedding(hash, embedding)?;
-    }
+    store.store_embeddings(
+        to_embed
+            .iter()
+            .zip(embeddings.iter())
+            .map(|((_, hash, _), embedding)| (hash.as_str(), embedding.as_slice())),
+    )?;
 
     Ok(EmbedStats {
         embedded: texts.len(),
@@ -1024,6 +1043,44 @@ reverse = "dependency_of"
             err.to_string()
                 .contains("Embedding provider returned 0 vectors for 1 texts")
         );
+    }
+
+    #[test]
+    fn store_embeddings_writes_batch_in_one_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        let commits = crate::test_support::commit_counter(&store.conn);
+
+        store
+            .store_embeddings([
+                ("a", [1.0_f32, 0.0].as_slice()),
+                ("b", [0.0, 1.0].as_slice()),
+                ("c", [0.5, 0.5].as_slice()),
+            ])
+            .unwrap();
+
+        assert_eq!(commits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(store.count().unwrap(), 3);
+        assert_eq!(store.get_embedding("b").unwrap(), Some(vec![0.0, 1.0]));
+    }
+
+    #[test]
+    fn store_embeddings_is_all_or_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EmbeddingStore::open_or_create(&tmp.path().join("embeddings.db")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER reject_bad BEFORE INSERT ON embeddings WHEN NEW.content_hash = 'bad'
+                 BEGIN SELECT RAISE(ABORT, 'bad'); END;",
+            )
+            .unwrap();
+
+        let result =
+            store.store_embeddings([("good", [1.0_f32].as_slice()), ("bad", [0.0].as_slice())]);
+
+        assert!(result.is_err());
+        assert_eq!(store.count().unwrap(), 0);
     }
 
     #[test]
