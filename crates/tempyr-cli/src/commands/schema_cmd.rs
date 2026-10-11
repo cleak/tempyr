@@ -116,8 +116,18 @@ pub fn plan_upgrade(
     config_text: &str,
     deltas: &[SchemaDelta],
 ) -> anyhow::Result<UpgradePlan> {
-    let mut schema_doc: DocumentMut = schema_text.parse().context("parsing schema.toml")?;
-    let mut config_doc: DocumentMut = config_text.parse().context("parsing config.toml")?;
+    // toml_edit emits `\n` after every line it re-renders, so edit on LF text
+    // and restore CRLF afterwards (Windows checkouts with autocrlf).
+    let schema_crlf = schema_text.contains("\r\n");
+    let config_crlf = config_text.contains("\r\n");
+    let mut schema_doc: DocumentMut = schema_text
+        .replace("\r\n", "\n")
+        .parse()
+        .context("parsing schema.toml")?;
+    let mut config_doc: DocumentMut = config_text
+        .replace("\r\n", "\n")
+        .parse()
+        .context("parsing config.toml")?;
     let applied = applied_deltas(&config_doc)?;
 
     let mut reports = Vec::new();
@@ -142,7 +152,7 @@ pub fn plan_upgrade(
         reports.push(report);
     }
 
-    let new_schema = schema_doc.to_string();
+    let new_schema = restore_crlf(schema_doc.to_string(), schema_crlf);
     // The upgraded schema must still load and accept every edge we added.
     let parsed: Schema = new_schema
         .parse()
@@ -153,7 +163,7 @@ pub fn plan_upgrade(
             .context("upgraded schema.toml rejects an added edge")?;
     }
 
-    let new_config = config_doc.to_string();
+    let new_config = restore_crlf(config_doc.to_string(), config_crlf);
     Ok(UpgradePlan {
         schema_changed: new_schema != schema_text,
         config_changed: new_config != config_text,
@@ -161,6 +171,14 @@ pub fn plan_upgrade(
         config_text: new_config,
         deltas: reports,
     })
+}
+
+fn restore_crlf(text: String, crlf: bool) -> String {
+    if crlf {
+        text.replace('\n', "\r\n")
+    } else {
+        text
+    }
 }
 
 fn applied_deltas(config: &DocumentMut) -> anyhow::Result<Vec<String>> {
@@ -436,9 +454,11 @@ mod tests {
     /// A pre-delta schema: the shipped default with every delta edge removed.
     fn legacy_schema() -> String {
         let mut text = DEFAULT_SCHEMA.to_string();
+        // Windows checkouts may have CRLF line endings.
+        let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
         for delta in SCHEMA_DELTAS {
             for (node_type, edge_type, target) in delta.edges {
-                let line = format!("  {{ type = \"{edge_type}\", target = \"{target}\" }},\n");
+                let line = format!("  {{ type = \"{edge_type}\", target = \"{target}\" }},{eol}");
                 // Identical lines belong to other node types; strip the one
                 // inside the owning node type's section.
                 let section = text
@@ -484,9 +504,16 @@ mod tests {
         // Appended entries reuse the existing multi-line layout: upgrading the
         // pre-delta schema reproduces the shipped default byte for byte.
         assert_eq!(plan.schema_text, DEFAULT_SCHEMA);
-        assert!(
-            plan.schema_text
-                .contains("  { type = \"relates_to\", target = \"note\" },\n  { type = \"has_risk\", target = \"risk\" },\n")
+    }
+
+    #[test]
+    fn preserves_crlf_line_endings() {
+        let crlf = legacy_schema().replace("\r\n", "\n").replace('\n', "\r\n");
+        let plan = plan_upgrade(&crlf, "", SCHEMA_DELTAS).unwrap();
+        assert!(!plan.schema_text.replace("\r\n", "").contains('\n'));
+        assert_eq!(
+            plan.schema_text,
+            DEFAULT_SCHEMA.replace("\r\n", "\n").replace('\n', "\r\n")
         );
     }
 

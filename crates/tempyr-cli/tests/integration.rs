@@ -474,11 +474,21 @@ fn test_init_gitignores_interview_archives_and_records_schema_deltas() {
         .stdout(predicate::str::contains("Schema is up to date."));
 }
 
+/// The embedded default schema is CRLF on Windows checkouts with autocrlf.
+fn schema_eol(schema: &str) -> &'static str {
+    if schema.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
 /// Strip the `2026-10-interview-edges` additions from an initialized project to
 /// simulate one created before the delta existed.
 fn downgrade_to_pre_interview_edges(dir: &TempDir) {
     let schema_path = dir.path().join(".tempyr/schema.toml");
     let mut schema = fs::read_to_string(&schema_path).unwrap();
+    let eol = schema_eol(&schema);
     for (node_type, edge_type, target) in [
         ("epic", "has_risk", "risk"),
         ("epic", "has_question", "open_question"),
@@ -487,12 +497,12 @@ fn downgrade_to_pre_interview_edges(dir: &TempDir) {
         ("risk", "risk_for", "decision"),
         ("open_question", "question_for", "epic"),
     ] {
-        let line = format!("  {{ type = \"{edge_type}\", target = \"{target}\" }},\n");
+        let line = format!("  {{ type = \"{edge_type}\", target = \"{target}\" }},{eol}");
         let section = schema.find(&format!("[node_types.{node_type}]")).unwrap();
         let idx = section + schema[section..].find(&line).unwrap();
         schema.replace_range(idx..idx + line.len(), "");
     }
-    schema.insert_str(0, "# my schema notes\n");
+    schema.insert_str(0, &format!("# my schema notes{eol}"));
     fs::write(&schema_path, schema).unwrap();
 
     let config_path = dir.path().join(".tempyr/config.toml");
@@ -545,7 +555,14 @@ fn test_schema_upgrade_dry_run_then_apply() {
         .success()
         .stdout(predicate::str::contains("Applied."));
     let schema_after = fs::read_to_string(&schema_path).unwrap();
-    assert!(schema_after.starts_with("# my schema notes\n"));
+    let eol = schema_eol(&schema_after);
+    assert!(schema_after.starts_with(&format!("# my schema notes{eol}")));
+    // No mixed line endings after the edit.
+    if eol == "\r\n" {
+        assert!(!schema_after.replace("\r\n", "").contains('\n'));
+    } else {
+        assert!(!schema_after.contains('\r'));
+    }
     let parsed = tempyr_core::schema::Schema::load(&schema_path).unwrap();
     parsed.validate_edge("epic", "has_risk", "risk").unwrap();
     parsed
@@ -573,7 +590,7 @@ fn test_schema_upgrade_dry_run_then_apply() {
 
     // Recorded deltas are not re-applied, even after the user removes an edge.
     let trimmed = schema_after.replacen(
-        "  { type = \"has_question\", target = \"open_question\" },\n]",
+        &format!("  {{ type = \"has_question\", target = \"open_question\" }},{eol}]"),
         "]",
         1,
     );
