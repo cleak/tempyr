@@ -9,6 +9,7 @@ use crate::config::ProjectContext;
 use anyhow::Context;
 
 use super::git_hooks;
+use super::gitignore;
 use super::index_cmd;
 use super::journal_init::{self, Visibility};
 use super::managed::{self, ManagedArtifact, WriteOutcome};
@@ -17,6 +18,7 @@ use super::onboarding::{
     OnboardingSelections,
 };
 use super::process_utils::wait_for_child_exit;
+use super::schema_cmd;
 use tempyr_core::project;
 use tempyr_index::embeddings;
 use tempyr_journal::path as journal_path;
@@ -142,6 +144,9 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
     config_text.push_str(&journal_init::render_journal_config_block(
         selections.enable_journal,
     ));
+    // The default schema already contains every known schema delta; record them
+    // so `tempyr schema upgrade` never re-adds edges the user later removes.
+    config_text.push_str(&schema_cmd::render_applied_deltas_block());
     fs::write(tempyr_dir.join("config.toml"), config_text)?;
 
     let schema: tempyr_core::schema::Schema = DEFAULT_SCHEMA.parse()?;
@@ -169,6 +174,18 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
             ));
         }
         ensure_gitignore_contains(root, ".env.local")?;
+    }
+
+    let added_ignores = gitignore::ensure_entries(
+        root,
+        gitignore::INTERVIEW_ARCHIVE_HEADER,
+        gitignore::INTERVIEW_ARCHIVE_ENTRIES,
+    )?;
+    if !added_ignores.is_empty() {
+        summary.push(format!(
+            "  .gitignore           - ignore {}",
+            added_ignores.join(", ")
+        ));
     }
 
     if selections.write_api_key_for_tempyr
@@ -577,29 +594,7 @@ fn display_api_key_target(root: &Path, path: &Path) -> String {
 }
 
 fn ensure_gitignore_contains(root: &Path, entry: &str) -> anyhow::Result<()> {
-    let path = root.join(".gitignore");
-    let existing = if path.exists() {
-        fs::read_to_string(&path)?
-    } else {
-        String::new()
-    };
-
-    if existing.lines().any(|line| line.trim() == entry) {
-        return Ok(());
-    }
-
-    let mut output = existing;
-    if !output.is_empty() && !output.ends_with('\n') {
-        output.push('\n');
-    }
-    if !output.is_empty() {
-        output.push('\n');
-    }
-    output.push_str("# Tempyr local secrets\n");
-    output.push_str(entry);
-    output.push('\n');
-
-    fs::write(path, output)?;
+    gitignore::ensure_entries(root, "# Tempyr local secrets", &[entry])?;
     Ok(())
 }
 

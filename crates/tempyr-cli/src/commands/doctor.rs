@@ -5,6 +5,7 @@
 
 use std::io::{self, Write};
 
+use crate::commands::gitignore;
 use crate::commands::snapshot_cmd::{SNAPSHOT_STORE_HINT_BYTES, SNAPSHOT_STORE_HINT_DIRS};
 use crate::config::ProjectContext;
 use tempyr_index::health::{self, HealthInputs, HealthReport};
@@ -39,7 +40,19 @@ pub(crate) fn build_report(ctx: &ProjectContext) -> HealthReport {
         tempyr_version: env!("CARGO_PKG_VERSION"),
         journal_common_dir: journal_common_dir.as_deref(),
     };
-    health::build_report(&inputs)
+    let mut report = health::build_report(&inputs);
+    match gitignore::missing_entries(&ctx.root, gitignore::INTERVIEW_ARCHIVE_ENTRIES) {
+        Ok(missing) if !missing.is_empty() => report.warnings.push(format!(
+            ".gitignore does not cover {} (interview archives may contain raw answers); \
+             run `tempyr schema upgrade --apply` or add them manually",
+            missing.join(", ")
+        )),
+        Ok(_) => {}
+        Err(err) => report
+            .warnings
+            .push(format!("Failed to read .gitignore: {err}")),
+    }
+    report
 }
 
 /// Render the report as human-readable text. Tests can pass a `Vec<u8>`

@@ -454,6 +454,155 @@ fn test_init_json_is_rejected_until_supported() {
 }
 
 #[test]
+fn test_init_gitignores_interview_archives_and_records_schema_deltas() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join(".gitignore"), ".tempyr/sessions/\n").unwrap();
+    init_project(&tmp);
+
+    let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+    assert_eq!(gitignore.matches(".tempyr/sessions/").count(), 1);
+    assert!(gitignore.contains(".tempyr/spar/"));
+
+    let config = fs::read_to_string(tmp.path().join(".tempyr/config.toml")).unwrap();
+    assert!(config.contains("applied_deltas = [\"2026-10-interview-edges\"]"));
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["schema", "upgrade"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Schema is up to date."));
+}
+
+/// Strip the `2026-10-interview-edges` additions from an initialized project to
+/// simulate one created before the delta existed.
+fn downgrade_to_pre_interview_edges(dir: &TempDir) {
+    let schema_path = dir.path().join(".tempyr/schema.toml");
+    let mut schema = fs::read_to_string(&schema_path).unwrap();
+    for (node_type, edge_type, target) in [
+        ("epic", "has_risk", "risk"),
+        ("epic", "has_question", "open_question"),
+        ("decision", "has_risk", "risk"),
+        ("risk", "risk_for", "epic"),
+        ("risk", "risk_for", "decision"),
+        ("open_question", "question_for", "epic"),
+    ] {
+        let line = format!("  {{ type = \"{edge_type}\", target = \"{target}\" }},\n");
+        let section = schema.find(&format!("[node_types.{node_type}]")).unwrap();
+        let idx = section + schema[section..].find(&line).unwrap();
+        schema.replace_range(idx..idx + line.len(), "");
+    }
+    schema.insert_str(0, "# my schema notes\n");
+    fs::write(&schema_path, schema).unwrap();
+
+    let config_path = dir.path().join(".tempyr/config.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    let cut = config.find("\n[schema]").unwrap();
+    fs::write(&config_path, &config[..cut]).unwrap();
+
+    fs::remove_file(dir.path().join(".gitignore")).unwrap();
+}
+
+#[test]
+fn test_schema_upgrade_dry_run_then_apply() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+    downgrade_to_pre_interview_edges(&tmp);
+    let schema_path = tmp.path().join(".tempyr/schema.toml");
+    let config_path = tmp.path().join(".tempyr/config.toml");
+    let schema_before = fs::read_to_string(&schema_path).unwrap();
+    let config_before = fs::read_to_string(&config_path).unwrap();
+
+    tempyr()
+        .current_dir(tmp.path())
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            ".gitignore does not cover .tempyr/sessions/, .tempyr/spar/",
+        ));
+
+    // Default is a dry run: lists additions, writes nothing.
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["schema", "upgrade"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("+ 2026-10-interview-edges"))
+        .stdout(predicate::str::contains(
+            "[node_types.epic] + { type = \"has_risk\", target = \"risk\" }",
+        ))
+        .stdout(predicate::str::contains("+ .gitignore: .tempyr/spar/"))
+        .stdout(predicate::str::contains("Dry run: nothing written."));
+    assert_eq!(fs::read_to_string(&schema_path).unwrap(), schema_before);
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), config_before);
+    assert!(!tmp.path().join(".gitignore").exists());
+
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["schema", "upgrade", "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Applied."));
+    let schema_after = fs::read_to_string(&schema_path).unwrap();
+    assert!(schema_after.starts_with("# my schema notes\n"));
+    let parsed = tempyr_core::schema::Schema::load(&schema_path).unwrap();
+    parsed.validate_edge("epic", "has_risk", "risk").unwrap();
+    parsed
+        .validate_edge("open_question", "question_for", "epic")
+        .unwrap();
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("2026-10-interview-edges")
+    );
+    let gitignore = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+    assert!(gitignore.contains(".tempyr/sessions/") && gitignore.contains(".tempyr/spar/"));
+
+    tempyr()
+        .current_dir(tmp.path())
+        .arg("validate")
+        .assert()
+        .success();
+    tempyr()
+        .current_dir(tmp.path())
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".gitignore does not cover").not());
+
+    // Recorded deltas are not re-applied, even after the user removes an edge.
+    let trimmed = schema_after.replacen(
+        "  { type = \"has_question\", target = \"open_question\" },\n]",
+        "]",
+        1,
+    );
+    assert_ne!(trimmed, schema_after);
+    fs::write(&schema_path, &trimmed).unwrap();
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["schema", "upgrade", "--apply"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "= 2026-10-interview-edges (already applied)",
+        ))
+        .stdout(predicate::str::contains("Schema is up to date."));
+    assert_eq!(fs::read_to_string(&schema_path).unwrap(), trimmed);
+}
+
+#[test]
+fn test_schema_upgrade_rejects_apply_with_dry_run() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+    tempyr()
+        .current_dir(tmp.path())
+        .args(["schema", "upgrade", "--apply", "--dry-run"])
+        .assert()
+        .failure();
+}
+
+#[test]
 fn test_init_rejects_json_and_wizard_together() {
     let tmp = TempDir::new().unwrap();
 

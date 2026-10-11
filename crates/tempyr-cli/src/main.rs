@@ -248,6 +248,12 @@ pub enum Commands {
         action: IndexAction,
     },
 
+    /// Schema maintenance
+    Schema {
+        #[command(subcommand)]
+        action: SchemaAction,
+    },
+
     /// Snapshot store management (the content-addressed shared index store
     /// under `<git-common-dir>/tempyr/snapshots/`).
     Snapshot {
@@ -371,6 +377,24 @@ pub enum IndexAction {
     },
     /// Show index statistics
     Stats,
+}
+
+#[derive(Subcommand)]
+pub enum SchemaAction {
+    /// Apply named schema deltas (new default edges) to .tempyr/schema.toml.
+    ///
+    /// Each delta is applied at most once and recorded under
+    /// `[schema] applied_deltas` in .tempyr/config.toml, so edges you remove
+    /// later are not re-added. Comments and formatting are preserved. Also
+    /// ensures .gitignore covers local interview archives.
+    Upgrade {
+        /// Write the changes (default is a dry run that only lists them)
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+        /// List the changes without writing (the default)
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -825,6 +849,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     commands::index_cmd::run_update(&ctx, cli.json, skip_embeddings)
                 }
                 IndexAction::Stats => commands::index_cmd::run_stats(&ctx, cli.json),
+            }
+        }
+        Commands::Schema { action } => {
+            let ctx = config::ProjectContext::find(cli.graph_dir.as_deref())?;
+            match action {
+                SchemaAction::Upgrade { apply, dry_run: _ } => {
+                    commands::schema_cmd::run_upgrade(&ctx, apply, cli.json)
+                }
             }
         }
         Commands::Snapshot { action } => {

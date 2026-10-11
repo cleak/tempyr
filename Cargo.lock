@@ -3203,6 +3203,7 @@ dependencies = [
  "tempyr-render",
  "tokio",
  "toml",
+ "toml_edit",
  "walkdir",
  "windows-sys 0.61.2",
 ]
