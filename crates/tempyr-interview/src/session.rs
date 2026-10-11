@@ -470,8 +470,22 @@ impl InterviewSession {
             ));
         }
 
-        // Keep the committed session for baselines and replay.
-        self.archive(sessions_dir)?;
+        // Keep the committed session for baselines and replay. The graph is
+        // already written, so a failure here mustn't fail the commit; fall
+        // back to deleting the session so a retry can't commit it twice.
+        if let Err(archive_err) = self.archive(sessions_dir) {
+            match self.delete(sessions_dir) {
+                Ok(()) => warnings.push(format!(
+                    "Could not archive session {} ({archive_err}); deleted it instead",
+                    self.id
+                )),
+                Err(delete_err) => warnings.push(format!(
+                    "Could not archive or delete session {} ({archive_err}; {delete_err}); \
+                     remove it so it isn't committed again",
+                    self.id
+                )),
+            }
+        }
 
         modified_files.dedup();
 

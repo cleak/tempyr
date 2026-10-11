@@ -723,6 +723,9 @@ pub struct SearchArgs {
 }
 
 pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
+    if args.query.trim().is_empty() && args.tags.is_empty() && args.references.is_empty() {
+        return Err(anyhow!("provide a query, --tag, or --ref"));
+    }
     let cwd = std::env::current_dir().context("read current directory")?;
     let common_dir =
         jpath::git_common_dir(&cwd).map_err(|e| anyhow!("not in a git repository: {e}"))?;
