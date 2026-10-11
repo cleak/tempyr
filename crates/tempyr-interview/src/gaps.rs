@@ -135,11 +135,12 @@ pub fn detect_gaps_with_graph(
             edge_type_needed: None,
             context: format!("The {root_type} '{root_title}' needs a clear problem statement."),
             suggested_question: format!(
-                "What problem does '{root_title}' solve? Who experiences this problem and what \
-                 happens if it's not addressed?"
+                "Coverage: the problem '{root_title}' solves. Probe for the last time it \
+                 happened and what it cost, in the user's own words."
             ),
-            suggested_angle: "Ask what problem this solves and what happens if it's not addressed."
-                .to_string(),
+            suggested_angle:
+                "Ask when the problem last happened and what it cost — not why it matters in general."
+                    .to_string(),
             existing_related: vec![],
             question_type: QuestionType::Open,
             phase: InterviewPhase::Discovery,
@@ -352,46 +353,49 @@ fn build_suggested_angle(gap_type: &GapType, root_body: &str) -> String {
     }
 }
 
-/// Generate a contextual question for a gap.
+/// Generate a coverage hint for a gap. These describe *what* is missing so
+/// the interviewer can ask about it in terms of the user's own words; they
+/// are deliberately not ready-to-read questions (scripted questions pull
+/// the interview toward generic template-filling).
 fn generate_question(edge_type: &str, target_type: &str, root_title: &str) -> String {
     match (edge_type, target_type) {
         ("serves", "persona") => format!(
-            "Who is the target user for '{root_title}'? What role do they have and \
-             what are they trying to accomplish?"
+            "Coverage: who '{root_title}' is for. Probe for a specific role, their goal, \
+             and when they last hit this problem."
         ),
         ("measured_by", "metric") => format!(
-            "How will we measure the success of '{root_title}'? What specific metric \
-             would indicate this is working?"
+            "Coverage: how '{root_title}' will be judged a success. Probe for a number, \
+             threshold, or date tied to what the user already said."
         ),
         ("constrained_by", "constraint") => format!(
-            "Are there any constraints on '{root_title}'? Think about performance, \
-             budget, compliance, timeline, or technical limitations."
+            "Coverage: constraints on '{root_title}' (performance, budget, compliance, \
+             timeline). Ask only about ones the user's answers suggest."
         ),
         ("has_risk", "risk") => format!(
-            "What could go wrong with '{root_title}'? What are the biggest risks \
-             or unknowns?"
+            "Coverage: what could make '{root_title}' fail. Look for the load-bearing \
+             assumption, not a generic risk list."
         ),
         ("depends_on", "decision") => format!(
-            "What technical or product decisions need to be made for '{root_title}'? \
-             Are there architecture choices, technology selections, or trade-offs to consider?"
+            "Coverage: open decisions for '{root_title}'. Ask what was considered and why \
+             not before offering alternatives."
         ),
         ("uses", "component") => format!(
-            "What existing systems, modules, or components does '{root_title}' \
-             interact with or depend on?"
+            "Coverage: existing systems '{root_title}' touches. Look them up in the graph \
+             before asking."
         ),
         ("exposes", "api_surface") => format!(
-            "Does '{root_title}' expose any APIs, interfaces, or contracts that \
-             other systems will consume?"
+            "Coverage: interfaces or contracts '{root_title}' exposes to other systems, \
+             if any."
         ),
         ("decomposes_to", "task") => format!(
-            "What are the implementation tasks for '{root_title}'? Break it down \
-             into concrete work items."
+            "Coverage: the first concrete tasks for '{root_title}'. Propose a split from \
+             what's known and let the user correct it."
         ),
         ("has_question", "open_question") => format!(
-            "Are there any open questions or unknowns about '{root_title}' that \
-             need to be resolved before or during implementation?"
+            "Coverage: unknowns that must be resolved before or during work on \
+             '{root_title}'."
         ),
-        _ => format!("Is there a {target_type} related to '{root_title}' via {edge_type}?"),
+        _ => format!("Coverage: a {target_type} linked to '{root_title}' via {edge_type}."),
     }
 }
 
@@ -529,8 +533,10 @@ mod tests {
     #[test]
     fn test_generate_question_persona() {
         let q = generate_question("serves", "persona", "feat-replay");
-        assert!(q.contains("target user"));
+        assert!(q.starts_with("Coverage:"));
         assert!(q.contains("feat-replay"));
+        // A hint, not a scripted question.
+        assert!(!q.trim_end().ends_with('?'));
     }
 
     #[test]

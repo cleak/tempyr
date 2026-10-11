@@ -688,10 +688,18 @@ fn plural(n: u64) -> &'static str {
 #[derive(Args, Debug)]
 pub struct SearchArgs {
     /// Full-text query. FTS5 syntax: `"phrase"`, `term1 OR term2`, `prefix*`.
+    /// May be omitted when `--tag` or `--ref` is given (filter-only listing).
+    #[arg(default_value = "")]
     pub query: String,
     /// Restrict to one or more kinds (repeatable).
     #[arg(long = "kind")]
     pub kinds: Vec<String>,
+    /// Require this tag, e.g. `disposition:rebut` (repeatable; all must match).
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    /// Require a reference to this graph node id (repeatable; any may match).
+    #[arg(long = "ref")]
+    pub references: Vec<String>,
     /// Cap on returned hits (default 10).
     #[arg(long, default_value = "10")]
     pub limit: usize,
@@ -736,7 +744,8 @@ pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
     // `warn_query_embed_failure_once` helper gates the warning so
     // a hard "embedding always fails" environment doesn't emit one
     // log line per `journal search` invocation.
-    let query_vector = match embedder {
+    // A filter-only search (empty query) has nothing to embed.
+    let query_vector = match embedder.filter(|_| !args.query.trim().is_empty()) {
         Some(emb) => match emb.embed_one(&args.query) {
             Ok(v) => Some(v),
             Err(e) => {
@@ -753,6 +762,8 @@ pub fn run_search(args: SearchArgs, json_output: bool) -> Result<()> {
         kinds,
         limit: args.limit,
         since_days: args.since_days,
+        tags: args.tags.clone(),
+        references: args.references.clone(),
         token_budget: args
             .token_budget
             .unwrap_or(tempyr_journal_index::search::DEFAULT_TOKEN_BUDGET),

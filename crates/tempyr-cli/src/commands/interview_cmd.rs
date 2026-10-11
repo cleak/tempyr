@@ -105,6 +105,7 @@ pub fn run_answer(
         agent,
         &InterviewEvent::AnswerRecorded {
             session_id: &session.id,
+            question: None,
             answer,
             phase: session.phase.display_name(),
             filled_gap_count: result.filled_gaps.len(),

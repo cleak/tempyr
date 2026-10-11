@@ -17,6 +17,41 @@ pub fn bfs(
     max_depth: usize,
     edge_type_filter: Option<&str>,
 ) -> Vec<TraversalResult> {
+    bfs_with(graph, root_id, max_depth, |id| {
+        graph.neighbors(id, edge_type_filter)
+    })
+}
+
+/// BFS traversal following only edges whose type is in `edge_types`.
+/// An empty slice follows every edge, like `bfs(.., None)`.
+pub fn bfs_edge_types(
+    graph: &Graph,
+    root_id: &str,
+    max_depth: usize,
+    edge_types: &[String],
+) -> Vec<TraversalResult> {
+    if edge_types.is_empty() {
+        return bfs(graph, root_id, max_depth, None);
+    }
+    bfs_with(graph, root_id, max_depth, |id| {
+        let mut out: Vec<&str> = Vec::new();
+        for edge_type in edge_types {
+            for neighbor in graph.neighbors(id, Some(edge_type)) {
+                if !out.contains(&neighbor) {
+                    out.push(neighbor);
+                }
+            }
+        }
+        out
+    })
+}
+
+fn bfs_with<'g>(
+    graph: &'g Graph,
+    root_id: &str,
+    max_depth: usize,
+    neighbors: impl Fn(&str) -> Vec<&'g str>,
+) -> Vec<TraversalResult> {
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
     let mut results = Vec::new();
@@ -39,8 +74,7 @@ pub fn bfs(
             continue;
         }
 
-        let neighbors = graph.neighbors(&current.node_id, edge_type_filter);
-        for neighbor_id in neighbors {
+        for neighbor_id in neighbors(&current.node_id) {
             if visited.insert(neighbor_id.to_string()) {
                 let mut path = current.path.clone();
                 path.push(neighbor_id.to_string());
@@ -140,6 +174,30 @@ mod tests {
         let results = bfs(&graph, "a", 2, Some("depends_on"));
         assert_eq!(results.len(), 2); // a and b, not c
         assert_eq!(results[1].node_id, "b");
+    }
+
+    #[test]
+    fn test_bfs_edge_types_follows_any_listed_type() {
+        let mut graph = Graph::new(make_test_schema());
+        add_feature(
+            &mut graph,
+            "a",
+            "  - target: b\n    type: depends_on\n  - target: c\n    type: serves\n  - target: d\n    type: uses\n",
+        );
+        add_feature(&mut graph, "b", "");
+        let persona = "---\nid: c\ntype: persona\n---\n# Persona C\n";
+        graph.add_node(parse_node(persona, PathBuf::from("c.md")).unwrap());
+        add_feature(&mut graph, "d", "");
+
+        let types = vec!["depends_on".to_string(), "serves".to_string()];
+        let ids: Vec<String> = bfs_edge_types(&graph, "a", 2, &types)
+            .into_iter()
+            .map(|r| r.node_id)
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "c"]); // d is only reachable via `uses`
+
+        // Empty filter follows every edge.
+        assert_eq!(bfs_edge_types(&graph, "a", 2, &[]).len(), 4);
     }
 
     #[test]

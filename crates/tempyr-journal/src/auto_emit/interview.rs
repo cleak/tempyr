@@ -46,9 +46,13 @@ pub enum InterviewEvent<'a> {
         root_type: &'a str,
         phase: &'a str,
     },
-    /// The user answered a question; gap analysis re-ran.
+    /// The user answered a question; gap analysis re-ran. `question` is
+    /// the exact question the interviewer asked, when the caller knows it
+    /// (it lands in the entry's detail so later sessions can tell which
+    /// premise or push an answer settled).
     AnswerRecorded {
         session_id: &'a str,
+        question: Option<&'a str>,
         answer: &'a str,
         phase: &'a str,
         filled_gap_count: usize,
@@ -116,6 +120,7 @@ fn build_draft(e: &InterviewEvent<'_>) -> EntryDraft {
         }
         InterviewEvent::AnswerRecorded {
             session_id,
+            question,
             answer,
             phase,
             filled_gap_count,
@@ -124,6 +129,9 @@ fn build_draft(e: &InterviewEvent<'_>) -> EntryDraft {
                 "interview answer ({phase}, {filled_gap_count} gap(s) filled): {answer}"
             ));
             let mut d = EntryDraft::new(Kind::Finding, summary);
+            d.detail = question
+                .filter(|q| !q.trim().is_empty())
+                .map(|q| format!("Question: {q}\n\nAnswer: {answer}"));
             d.provisional = true;
             d.tags = vec!["interview".into(), session_id.to_string()];
             d
@@ -203,6 +211,7 @@ mod tests {
     fn answer_recorded_emits_provisional_finding() {
         let d = build_draft(&InterviewEvent::AnswerRecorded {
             session_id: "sess-abc",
+            question: None,
             answer: "the persona is mid-market PMs",
             phase: "Product",
             filled_gap_count: 2,
@@ -212,6 +221,21 @@ mod tests {
         assert!(!d.is_final);
         assert!(d.summary.contains("Product"));
         assert!(d.summary.contains("mid-market PMs"));
+        assert!(d.detail.is_none());
+    }
+
+    #[test]
+    fn answer_recorded_keeps_question_in_detail() {
+        let d = build_draft(&InterviewEvent::AnswerRecorded {
+            session_id: "sess-abc",
+            question: Some("1. Users lose recipes offline? 2. Read-only is enough?"),
+            answer: "1y 2n",
+            phase: "Discovery",
+            filled_gap_count: 0,
+        });
+        let detail = d.detail.expect("question recorded in detail");
+        assert!(detail.contains("Read-only is enough?"));
+        assert!(detail.contains("1y 2n"));
     }
 
     #[test]
@@ -260,6 +284,7 @@ mod tests {
         let answer = "x".repeat(500);
         let d = build_draft(&InterviewEvent::AnswerRecorded {
             session_id: "sess-abc",
+            question: None,
             answer: &answer,
             phase: "Discovery",
             filled_gap_count: 0,
@@ -281,6 +306,7 @@ mod tests {
             },
             InterviewEvent::AnswerRecorded {
                 session_id: "s",
+                question: None,
                 answer: "a",
                 phase: "Product",
                 filled_gap_count: 0,

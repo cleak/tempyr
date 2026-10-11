@@ -80,6 +80,12 @@ pub struct SearchOptions {
     pub limit: usize,
     /// Filter to entries newer than this many days. None = no filter.
     pub since_days: Option<u32>,
+    /// Require every listed tag (e.g. `disposition:rebut`), matched
+    /// exactly against `entry_tags`. Empty = no filter.
+    pub tags: Vec<String>,
+    /// Require a reference to any of these graph node ids, matched
+    /// against `entry_refs`. Empty = no filter.
+    pub references: Vec<String>,
     /// Token budget. Detail bodies are truncated to fit.
     pub token_budget: usize,
     /// Per-hit score breakdown in the response.
@@ -104,6 +110,8 @@ impl Default for SearchOptions {
             kinds: Vec::new(),
             limit: 10,
             since_days: None,
+            tags: Vec::new(),
+            references: Vec::new(),
             token_budget: DEFAULT_TOKEN_BUDGET,
             explain: false,
             rerank: false,
@@ -201,7 +209,11 @@ struct RawHit {
 /// instead of the raw bm25_norm.
 pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>> {
     let trimmed = opts.query.trim();
-    if trimmed.is_empty() {
+    // An empty query is only meaningful as a filter-only listing
+    // ("every rebuttal on node X"); without filters there is nothing
+    // to rank.
+    let filter_only = trimmed.is_empty();
+    if filter_only && opts.tags.is_empty() && opts.references.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -218,15 +230,20 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
     }
     let pull_i64 = i64::try_from(pull_usize).unwrap_or(i64::MAX);
 
-    // BM25 side — always runs.
-    let bm25_hits = run_bm25_query(conn, opts, trimmed, pull_i64)?;
-    // Vector side — only when caller passed a query vector.
-    let vec_hits = if let Some(qv) = opts.query_vector.as_deref() {
-        run_vector_query(conn, opts, qv, pull_i64)?
+    // BM25 side — always runs. A filter-only search substitutes a
+    // newest-first listing so the rest of the pipeline (boosts,
+    // dedup, budget) applies unchanged.
+    let bm25_hits = if filter_only {
+        run_filter_only_query(conn, opts, pull_i64)?
     } else {
-        Vec::new()
+        run_bm25_query(conn, opts, trimmed, pull_i64)?
     };
-    let hybrid_mode = opts.query_vector.is_some();
+    // Vector side — only when caller passed a query vector.
+    let vec_hits = match opts.query_vector.as_deref() {
+        Some(qv) if !filter_only => run_vector_query(conn, opts, qv, pull_i64)?,
+        _ => Vec::new(),
+    };
+    let hybrid_mode = opts.query_vector.is_some() && !filter_only;
 
     // Build a unified candidate map: rowid → raw entry data + ranks
     // from each side. We keep BM25's body_json/ts copy when both
@@ -386,7 +403,7 @@ pub fn search(conn: &Connection, opts: &SearchOptions) -> Result<Vec<SearchHit>>
     // load or run the reranker is non-fatal — we keep the existing
     // RRF order and continue. Recency and kind boosts stay in the
     // breakdown for inspection but don't drive the new ordering.
-    let deduped = if opts.rerank {
+    let deduped = if opts.rerank && !filter_only {
         maybe_apply_rerank(deduped, &opts.query)
     } else {
         deduped
@@ -529,6 +546,40 @@ fn run_bm25_query(
         .map_err(Into::into)
 }
 
+/// Filter-only listing for an empty query: every entry passing the
+/// filters, newest first. `bm25_raw` is 0, so scoring reduces to the
+/// recency + kind boosts.
+fn run_filter_only_query(
+    conn: &Connection,
+    opts: &SearchOptions,
+    pull: i64,
+) -> Result<Vec<RawHit>> {
+    let mut sql = String::from(
+        r#"
+        SELECT e.rowid, e.body_json, 0.0 AS bm25, e.ts AS ts
+        FROM entries e
+        WHERE 1 = 1
+        "#,
+    );
+    let mut bind: Vec<Value> = Vec::new();
+    push_filters(&mut sql, &mut bind, opts)?;
+    sql.push_str(" ORDER BY e.ts DESC LIMIT ?");
+    sql.push_str(&format!("{}", bind.len() + 1));
+    bind.push(Value::Integer(pull));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(bind.iter()), |r| {
+        Ok(RawHit {
+            rowid: r.get(0)?,
+            body_json: r.get(1)?,
+            bm25_raw: r.get(2)?,
+            ts: r.get(3)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 /// Run the vector side via sqlite-vec cosine distance. The query
 /// vector is bound as a little-endian f32 BLOB. Returns rows ordered
 /// best→worst (smaller distance = better).
@@ -617,7 +668,8 @@ fn run_vector_query(
         .map_err(Into::into)
 }
 
-/// Append `kinds` and `since_days` filters to a SQL fragment, binding
+/// Append `kinds`, `since_days`, `tags`, and `references` filters to a
+/// SQL fragment, binding
 /// values into `bind`. Shared between BM25 and vector queries so
 /// filtering semantics stay consistent.
 fn push_filters(sql: &mut String, bind: &mut Vec<Value>, opts: &SearchOptions) -> Result<()> {
@@ -641,6 +693,24 @@ fn push_filters(sql: &mut String, bind: &mut Vec<Value>, opts: &SearchOptions) -
         let cutoff = Utc::now() - duration;
         sql.push_str(&format!(" AND e.ts >= ?{}", bind.len() + 1));
         bind.push(Value::Text(cutoff.to_rfc3339()));
+    }
+    for tag in &opts.tags {
+        sql.push_str(&format!(
+            " AND e.id IN (SELECT entry_id FROM entry_tags WHERE tag = ?{})",
+            bind.len() + 1
+        ));
+        bind.push(Value::Text(tag.clone()));
+    }
+    if !opts.references.is_empty() {
+        sql.push_str(" AND e.id IN (SELECT entry_id FROM entry_refs WHERE node_id IN (");
+        for (i, node_id) in opts.references.iter().enumerate() {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push_str(&format!("?{}", bind.len() + 1));
+            bind.push(Value::Text(node_id.clone()));
+        }
+        sql.push_str("))");
     }
     Ok(())
 }
@@ -1025,6 +1095,75 @@ mod tests {
         for h in &hits {
             assert_eq!(h.entry.kind, Kind::DeadEnd);
         }
+    }
+
+    /// Seed three findings that differ only in tags / references, for the
+    /// tag + reference filter tests.
+    fn seed_tagged() -> (tempfile::TempDir, Connection) {
+        let (outer, repo, common) = fresh_repo();
+        let cases: [(&str, &[&str], &[&str]); 3] = [
+            (
+                "rebutted objection about offline sync conflicts",
+                &["disposition:rebut", "objection:o1"],
+                &["offline-mode-a1b2c3"],
+            ),
+            (
+                "accepted objection about offline storage quota",
+                &["disposition:accept", "objection:o2"],
+                &["offline-mode-a1b2c3"],
+            ),
+            (
+                "rebutted objection about rotation history retention",
+                &["disposition:rebut", "objection:o3"],
+                &["rotations-d4e5f6"],
+            ),
+        ];
+        for (summary, tags, refs) in cases {
+            let session = Session::open_at(&common, &repo, "claude", Utc::now()).unwrap();
+            let mut entry = Entry::for_session(Kind::Finding, summary.to_string(), &session);
+            entry.tags = tags.iter().map(|t| t.to_string()).collect();
+            entry.references = refs.iter().map(|r| r.to_string()).collect();
+            append_validated(&session.jsonl_path(), &entry).unwrap();
+        }
+        refresh_index(&common, &repo).unwrap();
+        let conn = schema::open(&crate::index_db_path(&common)).unwrap();
+        (outer, conn)
+    }
+
+    #[test]
+    fn filter_only_search_lists_tagged_entries_for_a_node() {
+        let (_o, conn) = seed_tagged();
+        let opts = SearchOptions {
+            tags: vec!["disposition:rebut".to_string()],
+            references: vec!["offline-mode-a1b2c3".to_string()],
+            ..Default::default()
+        };
+        let hits = search(&conn, &opts).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].entry.summary.contains("sync conflicts"));
+    }
+
+    #[test]
+    fn tag_filter_combines_with_text_query() {
+        let (_o, conn) = seed_tagged();
+        let opts = SearchOptions {
+            query: "objection".to_string(),
+            tags: vec!["disposition:rebut".to_string()],
+            ..Default::default()
+        };
+        let hits = search(&conn, &opts).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(
+            hits.iter()
+                .all(|h| h.entry.tags.iter().any(|t| t == "disposition:rebut"))
+        );
+    }
+
+    #[test]
+    fn empty_query_without_filters_returns_nothing() {
+        let (_o, conn) = seed_tagged();
+        let hits = search(&conn, &SearchOptions::default()).unwrap();
+        assert!(hits.is_empty());
     }
 
     #[test]
