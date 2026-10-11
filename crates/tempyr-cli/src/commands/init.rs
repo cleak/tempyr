@@ -26,6 +26,7 @@ const CLAUDE_DOC_TEMPLATE: &str = include_str!("../../assets/CLAUDE.template.md"
 const AGENTS_DOC_TEMPLATE: &str = include_str!("../../assets/AGENTS.template.md");
 const CODEX_CONFIG_TEMPLATE: &str = include_str!("../../assets/codex.config.toml");
 const CODEX_SKILL_TEMPLATE: &str = include_str!("../../assets/tempyr-interview.codex.SKILL.md");
+const CODEX_SPAR_SKILL_TEMPLATE: &str = include_str!("../../assets/tempyr-spar.codex.SKILL.md");
 const PRD_TEMPLATE: &str = include_str!("../../../../templates/prd.toml");
 const TDD_TEMPLATE: &str = include_str!("../../../../templates/tdd.toml");
 const TASK_PROMPT_TEMPLATE: &str = include_str!("../../../../templates/task-prompt.toml");
@@ -195,6 +196,14 @@ fn initialize_project(root: &Path, selections: &OnboardingSelections) -> anyhow:
         )?;
         summary.push(format!(
             "  .agents/skills/tempyr-interview/SKILL.md - {}",
+            outcome.label("repo-local Codex skill")
+        ));
+        let outcome = write_support_file(
+            &root.join(".agents/skills/tempyr-spar/SKILL.md"),
+            CODEX_SPAR_SKILL_TEMPLATE,
+        )?;
+        summary.push(format!(
+            "  .agents/skills/tempyr-spar/SKILL.md - {}",
             outcome.label("repo-local Codex skill")
         ));
     }

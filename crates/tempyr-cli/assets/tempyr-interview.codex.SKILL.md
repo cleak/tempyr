@@ -143,6 +143,23 @@ only if the user explicitly asks.
   reframe / subtraction now and name two others as optional next picks. It
   doesn't count as your push.
 
+## Kill-pass
+
+When `interview_answer` returns `phase_changed: true` into Technical, launch the
+`tempyr-critic` subagent **in the background** and keep interviewing.
+- Pass `lens: kill-pass`, plus `focus: mandate` in mandate focus.
+- Build the packet from `interview_show {full: true}`: the root problem, personas,
+  metrics, and constraints. Leave out decisions, components, and tasks.
+- Pass as `settled`: premise answers, decided decisions, and rebuttals.
+- Never pass the conversation.
+
+When the result returns, drop any objection whose quote isn't in its target node. Make
+a surviving one your next push: "An independent red-team pass flagged one thing: …".
+The user accepts it as a risk or open question, rebuts it, or dismisses it. If the
+result is still pending at Review, wait up to ~30s, then list it there. At hard,
+also run an announced pre-Review sweep ("running a red-team pass, ~30s") with
+`/tempyr-spar`'s panel lenses.
+
 ## Phase transitions
 
 The server advances the phase only when you record an answer. When the

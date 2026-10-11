@@ -96,7 +96,12 @@ Return ONLY valid JSON, no markdown fences, no preamble:
       "existing_id": "platform-eng-a1b2c3",
       "similarity_reason": "Both describe on-call engineers focused on reliability"
     }
-  ]
+  ],
+  "weakest_claim": {
+    "quote": "faster debugging for everyone",
+    "kind": "vague_metric",
+    "why": "No threshold or baseline; can't tell if it worked"
+  }
 }
 ```
 
@@ -116,6 +121,14 @@ Return ONLY valid JSON, no markdown fences, no preamble:
   (e.g., "yes", "sounds good", "skip"), return all arrays empty
 - **One concept per node**: if a user describes multiple things, create
   multiple nodes. A node should be independently linkable.
+- **weakest_claim**: the single claim in the answer that the plan leans on
+  most with the least support, quoted verbatim from the answer, with a `kind`
+  (`vague_metric`, `unevidenced`, `assumption`, `solution_first`,
+  `contradiction`) and a one-line `why`. The interviewer may use it as the
+  turn's push. Use `null` if nothing in the answer is weak; don't invent one.
+- **Weak answers**: if a node fails the bar (metric without a threshold,
+  persona without a goal, decision with nothing considered), still propose it
+  and add a line `needs: <what's missing>` to its body.
 - Use `graph_search` or `graph_context` to check for existing nodes before
   proposing new ones that might be duplicates
 - Your JSON output will be applied by the interview skill using

@@ -10,6 +10,8 @@ const TEMPYR_HOOKS_JSON: &str = include_str!("../../assets/claude.settings.json"
 const SKILL_INTERVIEW_MD: &str =
     include_str!("../../../../.claude/skills/tempyr-interview/SKILL.md");
 const AGENT_EXTRACTOR_MD: &str = include_str!("../../../../.claude/agents/tempyr-extractor.md");
+const SKILL_SPAR_MD: &str = include_str!("../../../../.claude/skills/tempyr-spar/SKILL.md");
+const AGENT_CRITIC_MD: &str = include_str!("../../../../.claude/agents/tempyr-critic.md");
 const TEMPYR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ---------------------------------------------------------------------------
@@ -30,6 +32,23 @@ pub enum ManagedArtifact {
     Hooks,
     Skill,
     Agent,
+    /// The `/tempyr-spar` skill; installed whenever `Skill` is selected.
+    SparSkill,
+    /// The `tempyr-critic` subagent; installed whenever `Agent` is selected.
+    CriticAgent,
+}
+
+impl ManagedArtifact {
+    /// The user-facing artifact this one is installed alongside, if it isn't
+    /// selected on its own. Implied artifacts are never written to the
+    /// manifest's `managed_artifacts`, so older binaries can still read it.
+    fn implied_by(self) -> Option<ManagedArtifact> {
+        match self {
+            Self::SparSkill => Some(Self::Skill),
+            Self::CriticAgent => Some(Self::Agent),
+            Self::Hooks | Self::Skill | Self::Agent => None,
+        }
+    }
 }
 
 const MANAGED_FILES: &[ManagedFileDef] = &[
@@ -53,6 +72,20 @@ const MANAGED_FILES: &[ManagedFileDef] = &[
         content: AGENT_EXTRACTOR_MD,
         strategy: Strategy::Overwrite,
         description: "extraction agent definition",
+    },
+    ManagedFileDef {
+        artifact: ManagedArtifact::SparSkill,
+        path: ".claude/skills/tempyr-spar/SKILL.md",
+        content: SKILL_SPAR_MD,
+        strategy: Strategy::Overwrite,
+        description: "spar (red-team) skill definition",
+    },
+    ManagedFileDef {
+        artifact: ManagedArtifact::CriticAgent,
+        path: ".claude/agents/tempyr-critic.md",
+        content: AGENT_CRITIC_MD,
+        strategy: Strategy::Overwrite,
+        description: "critic agent definition",
     },
 ];
 
@@ -208,7 +241,12 @@ pub fn install_selected(
 
     let new_manifest = Manifest {
         tempyr_version: TEMPYR_VERSION.to_string(),
-        managed_artifacts: Some(selected_artifacts),
+        managed_artifacts: Some(
+            selected_artifacts
+                .into_iter()
+                .filter(|artifact| artifact.implied_by().is_none())
+                .collect(),
+        ),
         files: new_manifest_files,
     };
     save_manifest(root, &new_manifest)?;
@@ -245,7 +283,14 @@ fn all_artifacts() -> Vec<ManagedArtifact> {
 fn canonical_artifacts(artifacts: &[ManagedArtifact]) -> Vec<ManagedArtifact> {
     MANAGED_FILES
         .iter()
-        .filter_map(|def| artifacts.contains(&def.artifact).then_some(def.artifact))
+        .filter_map(|def| {
+            let selected = artifacts.contains(&def.artifact)
+                || def
+                    .artifact
+                    .implied_by()
+                    .is_some_and(|parent| artifacts.contains(&parent));
+            selected.then_some(def.artifact)
+        })
         .collect()
 }
 
@@ -818,7 +863,7 @@ mod tests {
 
         let results = install_all(dir.path(), false).unwrap();
 
-        assert_eq!(results.len(), 3);
+        assert_eq!(results.len(), MANAGED_FILES.len());
         for r in &results {
             assert!(
                 r.outcome == WriteOutcome::Created || r.outcome == WriteOutcome::Merged,
@@ -843,8 +888,16 @@ mod tests {
             );
         }
 
+        // Implied artifacts (spar skill, critic agent) aren't recorded.
         let manifest = load_manifest(dir.path()).unwrap().unwrap();
-        assert_eq!(manifest.managed_artifacts, Some(all_artifacts()));
+        assert_eq!(
+            manifest.managed_artifacts,
+            Some(vec![
+                ManagedArtifact::Hooks,
+                ManagedArtifact::Skill,
+                ManagedArtifact::Agent
+            ])
+        );
     }
 
     #[test]
@@ -866,8 +919,8 @@ mod tests {
         std::fs::write(&file_path, "user edited this").unwrap();
 
         let results = install_selected(dir.path(), false, &[ManagedArtifact::Skill]).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].outcome, WriteOutcome::Skipped);
+        let skill_result = results.iter().find(|r| r.path == def.path).unwrap();
+        assert_eq!(skill_result.outcome, WriteOutcome::Skipped);
 
         let after_manifest = load_manifest(dir.path()).unwrap().unwrap();
         let after_entry = after_manifest
@@ -882,6 +935,42 @@ mod tests {
         assert_eq!(
             check_file(dir.path(), def, &after_manifest).unwrap(),
             FileStatus::UserModified
+        );
+    }
+
+    #[test]
+    fn test_skill_and_agent_imply_spar_and_critic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".tempyr")).unwrap();
+
+        let results = install_selected(
+            dir.path(),
+            false,
+            &[ManagedArtifact::Skill, ManagedArtifact::Agent],
+        )
+        .unwrap();
+        let paths: Vec<&str> = results.iter().map(|r| r.path).collect();
+        assert!(paths.contains(&".claude/skills/tempyr-spar/SKILL.md"));
+        assert!(paths.contains(&".claude/agents/tempyr-critic.md"));
+        assert!(
+            dir.path()
+                .join(".claude/skills/tempyr-spar/SKILL.md")
+                .exists()
+        );
+        assert!(dir.path().join(".claude/agents/tempyr-critic.md").exists());
+
+        // The manifest only records user-facing artifacts, so binaries that
+        // predate the implied ones can still parse it.
+        let manifest = load_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            manifest.managed_artifacts,
+            Some(vec![ManagedArtifact::Skill, ManagedArtifact::Agent])
+        );
+        assert!(
+            manifest
+                .files
+                .iter()
+                .any(|f| f.path == ".claude/agents/tempyr-critic.md")
         );
     }
 

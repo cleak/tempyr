@@ -70,6 +70,10 @@ cp "$repo/schema/default-schema.toml" "$sandbox/.tempyr/schema.toml"
 
 cp -R "$here/scenarios" "$harness/scenarios"
 cp "$here/rubric.md" "$here/workflow.js" "$harness/"
+# The kill-pass critic's instructions; the harness runs it for arms whose skill has a kill-pass.
+if [[ -f "$repo/.claude/agents/tempyr-critic.md" ]]; then
+  cp "$repo/.claude/agents/tempyr-critic.md" "$harness/critic.md"
+fi
 
 show_skill "$baseline_ref" > "$harness/arms/baseline/SKILL.md"
 (cd "$repo" && MSYS_NO_PATHCONV=1 git rev-parse "$baseline_ref") > "$harness/arms/baseline/SOURCE"

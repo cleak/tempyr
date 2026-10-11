@@ -41,8 +41,9 @@ For each scenario, read `meta.json` only. Build the args with **absolute** paths
 ```json
 {
   "rubricPath": "<abs>/harness/rubric.md",
+  "criticPath": "<abs>/harness/critic.md",
   "maxUserTurns": 16,
-  "arms": [{ "name": "baseline", "skillPath": "<abs>/harness/arms/baseline/SKILL.md" }],
+  "arms": [{ "name": "baseline", "skillPath": "<abs>/harness/arms/baseline/SKILL.md", "killPass": false }],
   "scenarios": [{
     "id": "D1", "title": "...", "k": 3, "plantedFlaws": 3, "scores": ["..."],
     "brainDump": "<meta.brain_dump>",
@@ -52,9 +53,13 @@ For each scenario, read `meta.json` only. Build the args with **absolute** paths
 }
 ```
 
-`plantedFlaws` is `meta.planted_flaws`; omit it when the scenario has none. Never read
-`persona.md` or `judge.md` yourself, and never put their contents in the args. The
-isolation between interviewer, simulated user and judge depends on it.
+`plantedFlaws` is `meta.planted_flaws`; omit it when the scenario has none. Set an
+arm's `killPass` to true when its `SKILL.md` has a "Kill-pass" section and
+`../harness/critic.md` exists; the harness then runs the critic at the Technical
+transition. Omit `criticPath` if `critic.md` is missing.
+
+Never read `persona.md` or `judge.md` yourself, and never put their contents in the
+args. The isolation between interviewer, simulated user and judge depends on it.
 
 Tell the user how many runs that is and roughly how long it will take. Each run takes
 about 1–3 minutes, and several run in parallel. Then call the **Workflow** tool once
@@ -87,6 +92,7 @@ Create `../results/<YYYYMMDD-HHMMSS>/` (get the timestamp from the shell) contai
   | median_user_turns_to_approval | light (D1) ≤ 7, D2 ≤ 8, others ≤ 12 |
   | proxy_abandonment | ≤ baseline + 0.15 |
   | contradiction_surfaced_D5 | true |
+  | kill_pass_surfaced (arms with a kill-pass) | ≥ 8/9 of runs where it returned an objection |
 
   Below the table, add the diagnostics, labelled as diagnostics rather than targets:
   push-or-no-push compliance, no-push rate by scenario, premise n/unsure rate, and end
