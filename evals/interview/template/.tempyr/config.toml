@@ -1,0 +1,30 @@
+# Eval sandbox config. The sandbox is its own git repo (created by setup.sh) so
+# interview journal events never land in the tempyr repo's journal.
+[general]
+graph_dir = "graph"
+schema_path = ".tempyr/schema.toml"
+
+[embedding]
+provider = "voyage"
+model = "voyage-4"
+dimensions = 1024
+# No key needed: setup.sh builds the index with --skip-embeddings, so search is
+# structural + full-text only. That's enough for the fixture graph.
+
+[retrieval]
+default_token_budget = 8000
+structural_weight = 0.5
+bm25_weight = 0.25
+vector_weight = 0.25
+recency_boost_days = 7
+recency_boost_value = 0.1
+
+[interview]
+max_questions_per_turn = 3
+session_timeout_hours = 168
+
+[mcp]
+transport = "stdio"
+
+[journal]
+enabled = false

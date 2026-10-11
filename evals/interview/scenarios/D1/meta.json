@@ -1,0 +1,8 @@
+{
+  "id": "D1",
+  "title": "Vague hobby idea, solution-first",
+  "expected_level": "light",
+  "k": 3,
+  "scores": ["recall", "go_wilder_precision", "turns", "abandonment"],
+  "brain_dump": "I want to build a little CLI that reads my git history every Friday and uses an LLM to write my weekly update for me. It's a side project, just for me. Mostly I want updates to be easier."
+}

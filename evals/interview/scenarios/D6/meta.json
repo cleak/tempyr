@@ -1,0 +1,8 @@
+{
+  "id": "D6",
+  "title": "Overlaps committed fixture nodes (graph lens)",
+  "expected_level": "standard",
+  "k": 3,
+  "scores": ["divergence", "divergence_precision", "turns", "abandonment"],
+  "brain_dump": "Users get too many emails from us. Let's build a new email digest settings page where each user can choose a daily or weekly digest instead of individual notification emails."
+}

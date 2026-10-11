@@ -1,0 +1,8 @@
+{
+  "id": "D5",
+  "title": "Contradicts a constraint in the fixture graph",
+  "expected_level": "standard",
+  "k": 1,
+  "scores": ["contradiction", "turns"],
+  "brain_dump": "US customers complain our analytics dashboards are slow. Let's stand up a read replica of the analytics warehouse in us-east-1 and serve US users from it. Should cut load times in half."
+}

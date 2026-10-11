@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "tempyr": {
+      "command": "tempyr",
+      "args": ["--mcp"],
+      "env": {}
+    }
+  }
+}
