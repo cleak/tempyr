@@ -1,0 +1,4 @@
+# Generated while running evals; keeps the sandbox tree clean between runs.
+.tempyr/sessions/
+.tempyr/spar/
+.fastembed_cache/

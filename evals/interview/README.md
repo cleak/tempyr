@@ -30,15 +30,18 @@ Its layout:
 
 | Path | Contents | On rebuild |
 |---|---|---|
-| `sandbox/` | A tempyr project and its own git repo; start Claude Code here | Rebuilt |
-| `harness/` | `workflow.js`, `rubric.md`, the critic, `scenarios/`, `arms/` | Rebuilt |
-| `results/<timestamp>/` | `summary.md`, `transcripts/`, and the blind `pairs/` | Kept |
+| `sandbox/` | A tempyr project and its own git repo, plus the workflow script at `.claude/workflows/tempyr-interview-eval.js` (the Workflow tool only loads scripts from the working directory); start Claude Code here | Rebuilt |
+| `harness/` | `rubric.md`, the critic, `scenarios/`, `arms/` | Rebuilt |
+| `results/<timestamp>/` | `summary.md`, `transcripts/`, and the paired `pairs/` | Kept |
 
 Answer the pairs before you open `pairs/KEY.md`.
 
-A full run is 32 runs: 2 arms × D1–D4 and D6 at k=3, plus D5 at k=1. The eval skill runs one
-workflow per arm, which keeps each under the Workflow tool's 1000-agent limit. Expect
-roughly 30–60 minutes.
+**Cost.** Measured runs took 9–13 minutes and 0.6–1M subagent tokens each. Runs within a
+workflow go in parallel. `/tempyr-eval` defaults to a quick pass at k=1, which is 6 runs per
+arm. Ask for the **full** suite to use each scenario's k: D1–D4 and D6 at k=3 plus D5 at k=1,
+for 16 runs per arm and 32 in total. The full suite is what the paired-test gate (8 pairs)
+needs. The skill runs one workflow per arm, which keeps each one under the Workflow tool's
+1000-agent limit.
 
 ## How it works
 

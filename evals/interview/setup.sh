@@ -10,7 +10,9 @@
 #
 # Layout:
 #   <dir>/sandbox  tempyr project + its own git repo; start Claude Code here. Rebuilt.
-#   <dir>/harness  workflow.js, rubric, critic, scenarios, skill arms. Rebuilt.
+#   <dir>/harness  rubric, critic, scenarios, skill arms. Rebuilt. (The workflow
+#                  script goes in the sandbox: the Workflow tool only loads
+#                  scripts from the session's working directory.)
 #   <dir>/results  eval results. Kept across rebuilds.
 # The workspace lives outside the repo so agents don't pick up this repo's CLAUDE.md
 # or skills, journal events stay out of its journal, and the scenario files sit
@@ -28,7 +30,7 @@ while [[ $# -gt 0 ]]; do
     --dir) root="$2"; shift 2 ;;
     --baseline) baseline_ref="$2"; shift 2 ;;
     --candidate) candidate_ref="$2"; shift 2 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -69,7 +71,9 @@ cp -R "$here/template/." "$sandbox/"
 cp "$repo/schema/default-schema.toml" "$sandbox/.tempyr/schema.toml"
 
 cp -R "$here/scenarios" "$harness/scenarios"
-cp "$here/rubric.md" "$here/workflow.js" "$harness/"
+cp "$here/rubric.md" "$harness/"
+mkdir -p "$sandbox/.claude/workflows"
+cp "$here/workflow.js" "$sandbox/.claude/workflows/tempyr-interview-eval.js"
 # The kill-pass critic's instructions; the harness runs it for arms whose skill has a kill-pass.
 if [[ -f "$repo/.claude/agents/tempyr-critic.md" ]]; then
   cp "$repo/.claude/agents/tempyr-critic.md" "$harness/critic.md"
