@@ -116,7 +116,8 @@ Create `../results/<YYYYMMDD-HHMMSS>/` (get the timestamp from the shell) contai
     - Delete any sentence that starts with "No push" (including variants like "No push
       on X: …").
     - Delete the opener's level line ("I'll push at <level> …") and the "(proposed — answer
-      or ignore …)" note, and replace `[pN]` tags with nothing.
+      or ignore …)" note. Rewrite `[pN]` references as plain words ("the first
+      proposal", "the proposals") so no empty brackets or "(, , )" fragments remain.
   - The pairs are formatting-normalized, not blind: the arms differ in substance (e.g.
     numbered premises), which is what the owner is judging. Say so in the pair file.
   - End each pair file with:
