@@ -9,10 +9,13 @@ export const meta = {
 }
 
 // args: {
-//   rubricPath, arms: [{name, skillPath}],
+//   rubricPath, criticPath, arms: [{name, skillPath, killPass}],
 //   scenarios: [{id, title, k, brainDump, personaPath, judgePath, plantedFlaws, scores: [..]}],
 //   maxUserTurns
 // }
+// For arms with killPass, the harness runs the critic itself when the interview
+// first reaches Technical (workflow subagents can't launch their own) and hands the
+// result to the next interviewer turn, mirroring the skill's background kill-pass.
 const A = args || {}
 const ARMS = A.arms || []
 const SCENARIOS = A.scenarios || []
@@ -52,6 +55,31 @@ const USER_SCHEMA = {
     gave_up: { type: 'boolean' },
   },
   required: ['reply', 'gave_up'],
+}
+
+const CRITIC_SCHEMA = {
+  type: 'object',
+  properties: {
+    objections: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          target_node: { type: 'string' },
+          quoted_claim: { type: 'string' },
+          kind: { type: 'string' },
+          severity: { type: 'string' },
+          confidence: { type: 'number' },
+          fails_if: { type: 'string' },
+          cheapest_test: { type: 'string' },
+          proposed_graph_change: { type: 'string' },
+        },
+        required: ['target_node', 'quoted_claim', 'kind', 'severity', 'fails_if'],
+      },
+    },
+    well_reasoned: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['objections', 'well_reasoned'],
 }
 
 const INT = { type: 'integer', minimum: 0 }
@@ -102,6 +130,7 @@ const JUDGE_SCHEMA = {
       required: ['count', 'n_or_unsure'],
     },
     contradiction_surfaced: { type: ['boolean', 'null'] },
+    kill_pass_surfaced: { type: ['boolean', 'null'] },
     reached_review: { type: 'boolean' },
     scenario_checks: {
       type: 'array',
@@ -120,7 +149,7 @@ const JUDGE_SCHEMA = {
   required: [
     'flaws', 'pushes', 'invented_major_objections', 'self_answer_incidents',
     'relitigation_incidents', 'repeat_question_incidents', 'divergence', 'premises',
-    'contradiction_surfaced', 'reached_review', 'scenario_checks', 'notes',
+    'contradiction_surfaced', 'kill_pass_surfaced', 'reached_review', 'scenario_checks', 'notes',
   ],
 }
 
@@ -146,7 +175,10 @@ const MCP_TOOLS =
   'mcp__tempyr__graph_search,mcp__tempyr__graph_list,' +
   'mcp__tempyr__graph_traverse,mcp__tempyr__graph_get_node,mcp__tempyr__journal_search'
 
-function interviewerPrompt(arm, sc, seed, sessionId, transcript) {
+function interviewerPrompt(arm, sc, seed, sessionId, transcript, killPassResult) {
+  const killPass = killPassResult
+    ? `\n\nKill-pass result (the background tempyr-critic just returned; handle it as the skill says):\n\n${JSON.stringify(killPassResult, null, 2)}\n`
+    : ''
   const start = sessionId
     ? `The interview is in progress with session_id \`${sessionId}\`. The user's latest reply is the last USER message below. Handle it exactly as the skill says (record it with interview_answer first, extract, then write your reply).`
     : `This is the very first turn. The user's brain dump is:\n\n"""\n${sc.brainDump}\n"""\n\nStart the interview as the skill says (interview_start with the brain dump, then your opening message).`
@@ -158,10 +190,10 @@ Tools: load the tempyr MCP tools with ToolSearch, query "select:${MCP_TOOLS}".
 
 Evaluation rules (these override the skill only where they conflict):
 - Never call \`interview_commit\`. When the user approves committing and you have given your final review, return \`done: true\` instead.
-- Don't spawn subagents and don't use the Skill tool; do any extraction yourself.
+- Don't spawn subagents and don't use the Skill tool; do any extraction yourself. If the skill says to launch the kill-pass critic, don't — the harness runs it and shows you its result in a "Kill-pass result" block when it arrives.
 - Don't read files other than the skill file. Don't mention that this is an evaluation.
 
-${start}
+${start}${killPass}
 
 Conversation so far:
 
@@ -186,12 +218,26 @@ Conversation so far (you are USER):
 ${renderTranscript(transcript)}`
 }
 
+function criticPrompt(sessionId) {
+  return `You are the tempyr-critic subagent. Read your instructions at \`${A.criticPath}\` and follow them with \`lens: kill-pass\`.
+
+Build your own packet: load \`mcp__tempyr__interview_show\` with ToolSearch ("select:mcp__tempyr__interview_show") and call it with session_id \`${sessionId}\` and \`full: true\`. Use only the root's problem statement and the persona, metric, and constraint nodes; ignore decisions, components, tasks, and api surfaces. From \`qa_history\`, use only the answer to the opening premises (as settled items); ignore every other recorded answer, as the real kill-pass never sees the conversation. Decisions with status \`decided\` are settled too. Set \`focus: mandate\` if the root describes a compliance, audit, or policy requirement.`
+}
+
 function judgePrompt(sc, run) {
+  // Only grade the kill-pass when its result actually reached the interviewer;
+  // a run that ended right after the critic returned says nothing about it.
+  const killPass =
+    run.killPass && run.killPass.delivered
+      ? `A background kill-pass ran after user turn ${run.killPass.afterUserTurn} and returned:\n${JSON.stringify(run.killPass.result, null, 2)}\nSet kill_pass_surfaced to whether the interviewer surfaced a returned objection to the user (true/false).`
+      : 'No kill-pass result reached the interviewer in this run; set kill_pass_surfaced to null.'
   return `Grade one interview transcript. Read the rubric at \`${A.rubricPath}\` and this scenario's judge notes at \`${sc.judgePath}\`. In \`flaws\`, list every planted flaw from the judge notes (by id), surfaced or not.
 
 Then load \`mcp__tempyr__interview_show\` with ToolSearch ("select:mcp__tempyr__interview_show") and call it with session_id \`${run.sessionId || '(none)'}\` and \`full: true\` to see recorded answers and tentative nodes. If the session id is missing or the call fails, grade from the transcript alone and say so in notes.
 
 Run ended by: ${run.endReason}.
+
+${killPass}
 
 Transcript:
 
@@ -206,6 +252,20 @@ async function runInterview(item) {
   let endReason = 'turn_cap'
   let lastPhase = null
   let userTurns = 0
+  let killPass = null // {afterUserTurn, result}
+  let pendingKillPass = null
+
+  async function maybeRunKillPass() {
+    if (!arm.killPass || killPass || lastPhase !== 'Technical' || !sessionId) return
+    const result = await agent(criticPrompt(sessionId), {
+      label: `${tag} kill-pass`,
+      phase: 'Interview',
+      schema: CRITIC_SCHEMA,
+    })
+    if (!result) return
+    killPass = { afterUserTurn: userTurns, result }
+    if (result.objections.length) pendingKillPass = result
+  }
 
   let turn = await agent(interviewerPrompt(arm, sc, seed, null, transcript), {
     label: `${tag} interviewer t0`,
@@ -240,7 +300,7 @@ async function runInterview(item) {
       break
     }
 
-    turn = await agent(interviewerPrompt(arm, sc, seed, sessionId, transcript), {
+    turn = await agent(interviewerPrompt(arm, sc, seed, sessionId, transcript, pendingKillPass), {
       label: `${tag} interviewer t${userTurns}`,
       phase: 'Interview',
       schema: INTERVIEWER_SCHEMA,
@@ -249,6 +309,8 @@ async function runInterview(item) {
       endReason = 'interviewer_failed'
       break
     }
+    if (pendingKillPass) killPass.delivered = true
+    pendingKillPass = null
     sessionId = turn.session_id || sessionId
     lastPhase = turn.phase
     transcript.push({ who: 'interviewer', text: turn.message })
@@ -256,10 +318,11 @@ async function runInterview(item) {
       endReason = 'approved'
       break
     }
+    await maybeRunKillPass()
   }
 
   log(`${tag}: ${endReason} after ${userTurns} user turn(s)`)
-  return { ...item, transcript, sessionId, endReason, userTurns, lastPhase }
+  return { ...item, transcript, sessionId, endReason, userTurns, lastPhase, killPass }
 }
 
 async function judgeRun(run) {
@@ -338,6 +401,12 @@ function summarize(runs) {
       ),
       repeat_question_incidents: sum(judged, (r) => r.judge.repeat_question_incidents),
       contradiction_surfaced_D5: scored('contradiction').map((r) => r.judge.contradiction_surfaced),
+      kill_pass_surfaced: (() => {
+        const ran = judged.filter((r) => typeof r.judge.kill_pass_surfaced === 'boolean')
+        return ran.length
+          ? `${ran.filter((r) => r.judge.kill_pass_surfaced).length}/${ran.length}`
+          : null
+      })(),
       median_user_turns_to_approval: turnsByScenario,
       proxy_abandonment: ratio(
         abandonRuns.filter((r) => r.endReason === 'gave_up').length,
@@ -398,6 +467,7 @@ return {
     end_reason: r.endReason,
     user_turns: r.userTurns,
     last_phase: r.lastPhase,
+    kill_pass: r.killPass,
     transcript: r.transcript,
     judge: r.judge,
   })),

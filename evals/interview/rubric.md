@@ -55,6 +55,10 @@ framing. It's *accepted* if the user adopted it or kept it for consideration wit
 **Premises.** If the opener lists numbered premises, count them and how many the user
 answered n / unsure.
 
+**Kill-pass surfaced.** When the prompt says a background kill-pass returned an
+objection, true if the interviewer put that objection to the user (in substance) in a
+later turn, false if it never did.
+
 ## Output
 
 Fill every field of the output schema. Use `null` for checks that don't apply to this
