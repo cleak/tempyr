@@ -110,6 +110,13 @@ Inspect project health:
 tempyr doctor
 ```
 
+Pick up new default schema edges in an existing project (dry run unless
+`--apply`; comments in `.tempyr/schema.toml` are preserved):
+
+```sh
+tempyr schema upgrade --apply
+```
+
 Start an interview from a brain dump:
 
 ```sh

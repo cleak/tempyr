@@ -14,6 +14,8 @@ allowed_edges = [
   { type = "serves", target = "persona" },
   { type = "measured_by", target = "metric" },
   { type = "relates_to", target = "note" },
+  { type = "has_risk", target = "risk" },
+  { type = "has_question", target = "open_question" },
 ]
 
 [node_types.feature]
@@ -77,6 +79,7 @@ allowed_edges = [
   { type = "answers", target = "open_question" },
   { type = "relates_to", target = "insight" },
   { type = "relates_to", target = "note" },
+  { type = "has_risk", target = "risk" },
 ]
 
 [node_types.constraint]
@@ -123,6 +126,8 @@ allowed_edges = [
   { type = "risk_for", target = "feature" },
   { type = "mitigated_by", target = "task" },
   { type = "relates_to", target = "note" },
+  { type = "risk_for", target = "epic" },
+  { type = "risk_for", target = "decision" },
 ]
 
 [node_types.open_question]
@@ -137,6 +142,7 @@ allowed_edges = [
   { type = "answered_by", target = "decision" },
   { type = "question_for", target = "task" },
   { type = "relates_to", target = "note" },
+  { type = "question_for", target = "epic" },
 ]
 
 [node_types.component]

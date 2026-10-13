@@ -1,0 +1,255 @@
+//! Helpers for keeping the project `.gitignore` covering Tempyr's local-only paths.
+
+use std::fs;
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+/// Interview session archives may contain raw user answers, so they must never
+/// be committed. `tempyr init`, `tempyr schema upgrade --apply`, and
+/// `tempyr doctor` all keep these covered.
+pub const INTERVIEW_ARCHIVE_ENTRIES: &[&str] = &[".tempyr/sessions/", ".tempyr/spar/"];
+pub const INTERVIEW_ARCHIVE_HEADER: &str = "# Tempyr interview archives (may contain raw answers)";
+
+/// Return the entries from `entries` that are not ignored under `root`.
+///
+/// Inside a git work tree git itself decides (`git check-ignore`), so nested
+/// `.gitignore` files, `.git/info/exclude`, global excludes, `**` patterns and
+/// `!` negations all count. Without git, falls back to a textual check of the
+/// project `.gitignore`.
+pub fn missing_entries<'a>(root: &Path, entries: &[&'a str]) -> anyhow::Result<Vec<&'a str>> {
+    let mut gitignore_text: Option<String> = None;
+    let mut missing = Vec::new();
+    for entry in entries.iter().copied() {
+        let covered = match git_ignores(root, entry) {
+            Some(ignored) => ignored,
+            None => {
+                if gitignore_text.is_none() {
+                    let path = root.join(".gitignore");
+                    gitignore_text = Some(if path.exists() {
+                        fs::read_to_string(&path)?
+                    } else {
+                        String::new()
+                    });
+                }
+                is_covered(gitignore_text.as_deref().unwrap_or_default(), entry)
+            }
+        };
+        if !covered {
+            missing.push(entry);
+        }
+    }
+    Ok(missing)
+}
+
+/// Ask git whether `entry` (a `.gitignore`-style path relative to `root`) is
+/// ignored. Directory entries are probed through a file inside them. Returns
+/// `None` when git is unavailable or `root` is not inside a work tree.
+fn git_ignores(root: &Path, entry: &str) -> Option<bool> {
+    let entry = entry.strip_prefix('/').unwrap_or(entry);
+    let probe = if entry.ends_with('/') {
+        format!("{entry}probe")
+    } else {
+        entry.to_string()
+    };
+    let status = Command::new("git")
+        .args(["check-ignore", "-q", "--no-index", "--"])
+        .arg(&probe)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    // 0 = ignored, 1 = not ignored, anything else (128) = not a repo or error.
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Append any of `entries` that are not already ignored (see
+/// [`missing_entries`]) to the project `.gitignore`, under `header`. Returns
+/// the entries that were added.
+pub fn ensure_entries<'a>(
+    root: &Path,
+    header: &str,
+    entries: &[&'a str],
+) -> anyhow::Result<Vec<&'a str>> {
+    let missing = missing_entries(root, entries)?;
+    if missing.is_empty() {
+        return Ok(missing);
+    }
+
+    let path = root.join(".gitignore");
+    let mut output = if path.exists() {
+        fs::read_to_string(&path)?
+    } else {
+        String::new()
+    };
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(header);
+    output.push('\n');
+    for entry in &missing {
+        output.push_str(entry);
+        output.push('\n');
+    }
+
+    fs::write(path, output)?;
+    Ok(missing)
+}
+
+/// Whether a `.gitignore` body already ignores `entry`, either by an equivalent
+/// line (leading `/` and trailing `/` are not significant here) or by ignoring
+/// one of its parent directories.
+fn is_covered(gitignore: &str, entry: &str) -> bool {
+    let wanted = normalize(entry);
+    gitignore
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('!'))
+        .map(normalize)
+        .any(|line| {
+            let line = line.strip_suffix("/*").unwrap_or(line);
+            wanted == line
+                || wanted
+                    .strip_prefix(line)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+}
+
+fn normalize(pattern: &str) -> &str {
+    let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
+    pattern.strip_suffix('/').unwrap_or(pattern)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_entries_appends_missing_entries_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join(".gitignore"), "/target").unwrap();
+
+        let added = ensure_entries(
+            tmp.path(),
+            INTERVIEW_ARCHIVE_HEADER,
+            INTERVIEW_ARCHIVE_ENTRIES,
+        )
+        .unwrap();
+        assert_eq!(added, INTERVIEW_ARCHIVE_ENTRIES);
+
+        let again = ensure_entries(
+            tmp.path(),
+            INTERVIEW_ARCHIVE_HEADER,
+            INTERVIEW_ARCHIVE_ENTRIES,
+        )
+        .unwrap();
+        assert!(again.is_empty());
+
+        let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert_eq!(
+            content,
+            format!("/target\n\n{INTERVIEW_ARCHIVE_HEADER}\n.tempyr/sessions/\n.tempyr/spar/\n")
+        );
+    }
+
+    #[test]
+    fn ensure_entries_only_adds_uncovered_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join(".gitignore"), ".tempyr/sessions/\n").unwrap();
+
+        let added = ensure_entries(
+            tmp.path(),
+            INTERVIEW_ARCHIVE_HEADER,
+            INTERVIEW_ARCHIVE_ENTRIES,
+        )
+        .unwrap();
+        assert_eq!(added, vec![".tempyr/spar/"]);
+        let content = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert_eq!(content.matches(".tempyr/sessions/").count(), 1);
+    }
+
+    #[test]
+    fn creates_gitignore_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_entries(tmp.path(), "# header", &[".env.local"]).unwrap();
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(".gitignore")).unwrap(),
+            "# header\n.env.local\n"
+        );
+    }
+
+    fn git_init(dir: &Path) {
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .status()
+            .expect("git is required for these tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn git_decides_coverage_from_nested_gitignore_and_info_exclude() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_init(tmp.path());
+        fs::create_dir_all(tmp.path().join(".tempyr")).unwrap();
+        // Neither of these is visible to a textual check of the root file.
+        fs::write(tmp.path().join(".tempyr/.gitignore"), "sessions/\n").unwrap();
+        fs::write(tmp.path().join(".git/info/exclude"), "**/spar/\n").unwrap();
+
+        let missing = missing_entries(tmp.path(), INTERVIEW_ARCHIVE_ENTRIES).unwrap();
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let added = ensure_entries(
+            tmp.path(),
+            INTERVIEW_ARCHIVE_HEADER,
+            INTERVIEW_ARCHIVE_ENTRIES,
+        )
+        .unwrap();
+        assert!(added.is_empty());
+        assert!(!tmp.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn git_honours_negations() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_init(tmp.path());
+        let body = ".tempyr/*\n!.tempyr/spar/\n";
+        fs::write(tmp.path().join(".gitignore"), body).unwrap();
+        // The textual fallback would treat `.tempyr/*` as covering both.
+        assert!(is_covered(body, ".tempyr/spar/"));
+
+        let missing = missing_entries(tmp.path(), INTERVIEW_ARCHIVE_ENTRIES).unwrap();
+        assert_eq!(missing, vec![".tempyr/spar/"]);
+
+        let added = ensure_entries(
+            tmp.path(),
+            INTERVIEW_ARCHIVE_HEADER,
+            INTERVIEW_ARCHIVE_ENTRIES,
+        )
+        .unwrap();
+        assert_eq!(added, vec![".tempyr/spar/"]);
+        assert!(
+            missing_entries(tmp.path(), INTERVIEW_ARCHIVE_ENTRIES)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn coverage_accepts_equivalent_and_parent_patterns() {
+        assert!(is_covered("/.tempyr/sessions\n", ".tempyr/sessions/"));
+        assert!(is_covered(".tempyr/\n", ".tempyr/spar/"));
+        assert!(is_covered(".tempyr/*\n", ".tempyr/spar/"));
+        assert!(!is_covered("# .tempyr/spar/\n", ".tempyr/spar/"));
+        assert!(!is_covered(".tempyr/sessions-old/\n", ".tempyr/sessions/"));
+        assert!(!is_covered(".tempyr/index.db\n", ".tempyr/spar/"));
+    }
+}
