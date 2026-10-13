@@ -189,7 +189,7 @@ Read the skill file at \`${arm.skillPath}\` and follow it exactly, as if it had 
 Tools: load the tempyr MCP tools with ToolSearch, query "select:${MCP_TOOLS}".
 
 Evaluation rules (these override the skill only where they conflict):
-- Never call \`interview_commit\`. When the user approves committing and you have given your final review, return \`done: true\` instead.
+- Never call \`interview_commit\`. Write your final review exactly as you would just before committing; once the user approves it, return \`done: true\` with a brief closing message. Never tell the user that you are not committing or that a commit is pending.
 - Don't spawn subagents and don't use the Skill tool; do any extraction yourself. If the skill says to launch the kill-pass critic, don't — the harness runs it and shows you its result in a "Kill-pass result" block when it arrives.
 - Don't read files other than the skill file. Don't mention that this is an evaluation.
 
@@ -343,6 +343,12 @@ function median(xs) {
   return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2
 }
 
+// Count runs matching `pred`; null (not 0) when no run was scored for the
+// metric, so "not measured" can't be mistaken for a real zero.
+function countOrNull(list, pred) {
+  return list.length ? list.filter(pred).length : null
+}
+
 function ratio(num, den) {
   return den ? Math.round((num / den) * 1000) / 1000 : null
 }
@@ -385,22 +391,25 @@ function summarize(runs) {
         sum(pushRuns, (r) => r.judge.pushes.load_bearing),
         sum(pushRuns, (r) => r.judge.pushes.count),
       ),
-      invented_objection_runs_D2: scored('invented_objections').filter(
+      invented_objection_runs_D2: countOrNull(
+        scored('invented_objections'),
         (r) => r.judge.invented_major_objections > 0,
-      ).length,
-      self_answer_runs_D3: scored('self_answer').filter((r) => r.judge.self_answer_incidents > 0)
-        .length,
-      relitigation_runs: scored('relitigation').filter((r) => r.judge.relitigation_incidents > 0)
-        .length,
-      divergence_runs_with_accept: divRuns.filter((r) => r.judge.divergence.accepted_non_obvious > 0)
-        .length,
+      ),
+      self_answer_runs_D3: countOrNull(scored('self_answer'), (r) => r.judge.self_answer_incidents > 0),
+      relitigation_runs: countOrNull(scored('relitigation'), (r) => r.judge.relitigation_incidents > 0),
+      divergence_runs_with_accept: countOrNull(
+        divRuns,
+        (r) => r.judge.divergence.accepted_non_obvious > 0,
+      ),
       divergence_runs: divRuns.length,
       divergence_precision: ratio(
         sum(precisionRuns, (r) => r.judge.divergence.relevant_non_obvious),
         sum(precisionRuns, (r) => r.judge.divergence.shown),
       ),
       repeat_question_incidents: sum(judged, (r) => r.judge.repeat_question_incidents),
-      contradiction_surfaced_D5: scored('contradiction').map((r) => r.judge.contradiction_surfaced),
+      contradiction_surfaced_D5: scored('contradiction').length
+        ? scored('contradiction').map((r) => r.judge.contradiction_surfaced)
+        : null,
       kill_pass_surfaced: (() => {
         const ran = judged.filter((r) => typeof r.judge.kill_pass_surfaced === 'boolean')
         return ran.length

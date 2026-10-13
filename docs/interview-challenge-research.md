@@ -395,7 +395,7 @@ This is safe without provenance: S1 adds no quality gates, so there is nothing t
 - Interview integration through `challenge_slot`.
 - Provenance-weighted ranking only if S2o exists.
 - **Gate → S4.** Evaluated on the full harness: all dumps, k=5, and a cross-family judge where available. Go to S4 if any of these hold:
-  - recall below max(baseline + 30pp, 60%)
+  - recall below min(95%, max(baseline + 30pp, 60%))
   - divergence misses its target
   - the paired test scores below 6/8
 
@@ -457,7 +457,7 @@ All targets are provisional and reset after S0. N = dumps × k.
 | Metric | Dumps | N (k=3 / k=5) | Provisional pass |
 |---|---|---|---|
 | **Load-bearing push rate**: the judge rates whether a push targets a load-bearing claim *and* leads to a changed, confirmed, or deferred node | D1, D3, D4, D6 | all pushes | ≥50% of pushes |
-| Planted-flaw recall | D1, D3, D4 (9 flaws) | 27 / 45 opportunities | ≥ max(baseline + 30pp, 60%) |
+| Planted-flaw recall | D1, D3, D4 (9 flaws) | 27 / 45 opportunities | ≥ min(95%, max(baseline + 30pp, 60%)) |
 | Contradiction surfaced | D5 | 1 / 5 runs | surfaced in ≥ (N−1) runs |
 | Invented major objections | D2 | 3 / 5 runs | ≤1 run |
 | Self-answer / self-fill incidents | D3 | 3 / 5 runs | ≤ baseline and ≤1 run |
