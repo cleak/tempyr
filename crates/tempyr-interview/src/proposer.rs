@@ -61,8 +61,8 @@ pub fn interview_start(
         session.graph_context.push(id.clone());
     }
 
-    // Try to advance from Discovery if we have context
-    phases::try_advance_phase(&mut session);
+    // No phase advance here: Discovery ends only after the user has
+    // answered the opener (see `phases::check_phase_transition`).
 
     // Detect gaps and initialize gap tracking
     let gaps = detect_gaps(&session, schema);
@@ -112,7 +112,9 @@ pub fn add_proposed_node(
         fields: HashMap::new(),
         body: body.to_string(),
         confidence,
-        source_qa: vec![session.answered.len()],
+        // The answer this node was extracted from is the latest one
+        // recorded (callers record the answer before adding nodes).
+        source_qa: session.answered.len().checked_sub(1).into_iter().collect(),
     });
 
     let mut result = reanalyze(session, schema);
@@ -153,23 +155,45 @@ pub fn record_answer(
     schema: &Schema,
 ) -> InterviewUpdateResult {
     session.record_answer(question, answer, proposed_node_ids);
-    reanalyze(session, schema)
+    advance_and_reanalyze_with_graph(session, schema, None)
 }
 
-/// Re-run gap analysis and phase transition checks.
+/// Re-run gap analysis without changing the phase.
 /// Public so MCP tools can trigger reanalysis without recording a phantom QA pair.
-/// Pass a Graph for context-aware gap detection (populates existing_related, question_type).
 pub fn reanalyze(session: &mut InterviewSession, schema: &Schema) -> InterviewUpdateResult {
     reanalyze_with_graph(session, schema, None)
 }
 
-/// Re-run gap analysis with optional graph context.
+/// Re-run gap analysis with optional graph context, without changing the
+/// phase. Used after mid-turn mutations (add node/edge, adjust) so a phase
+/// can't flip before the user has answered the push on the new nodes.
+/// Pass a Graph for context-aware gap detection (populates existing_related, question_type).
 pub fn reanalyze_with_graph(
     session: &mut InterviewSession,
     schema: &Schema,
     graph: Option<&Graph>,
 ) -> InterviewUpdateResult {
-    let phase_changed = phases::try_advance_phase(session);
+    reanalyze_inner(session, schema, graph, false)
+}
+
+/// Check for a phase transition, then re-run gap analysis. Call this only
+/// right after recording an answer — the one point where the interview
+/// may move forward.
+pub fn advance_and_reanalyze_with_graph(
+    session: &mut InterviewSession,
+    schema: &Schema,
+    graph: Option<&Graph>,
+) -> InterviewUpdateResult {
+    reanalyze_inner(session, schema, graph, true)
+}
+
+fn reanalyze_inner(
+    session: &mut InterviewSession,
+    schema: &Schema,
+    graph: Option<&Graph>,
+    advance_phase: bool,
+) -> InterviewUpdateResult {
+    let phase_changed = advance_phase && phases::try_advance_phase(session);
 
     let gaps = detect_gaps_with_graph(session, schema, graph);
     let filled_gaps: Vec<String> = session
@@ -377,8 +401,8 @@ mod tests {
                 .graph_context
                 .contains(&"epic-observability".to_string())
         );
-        // Should advance past Discovery since we have context and a body
-        assert_eq!(result.session.phase, InterviewPhase::Product);
+        // Starting never advances: Discovery waits for the user's first reply.
+        assert_eq!(result.session.phase, InterviewPhase::Discovery);
     }
 
     #[test]
@@ -493,8 +517,11 @@ mod tests {
         )
         .unwrap();
         let mut session = result.session;
+        assert_eq!(session.phase, InterviewPhase::Discovery);
 
-        // Should be in Product phase (has context + body)
+        // Answering the opener moves Discovery → Product.
+        let update = record_answer(&mut session, "Premises?", "1y 2y 3n", vec![], &schema);
+        assert!(update.phase_changed);
         assert_eq!(session.phase, InterviewPhase::Product);
 
         // Add persona + edge
@@ -511,8 +538,8 @@ mod tests {
         let persona_id = persona_update.new_nodes[0].clone();
         add_proposed_edge(&mut session, &root_id, &persona_id, "serves", &schema);
 
-        // Add metric — this should trigger Product → Technical since we now have
-        // persona + metric + substantive body
+        // Add metric. Adding nodes mid-turn never moves the phase, even
+        // once persona + metric + substantive body are all present.
         let update = add_proposed_node(
             &mut session,
             "metric-mttr",
@@ -524,10 +551,28 @@ mod tests {
         );
         let metric_id = update.new_nodes[0].clone();
         add_proposed_edge(&mut session, &root_id, &metric_id, "measured_by", &schema);
+        assert!(!update.phase_changed);
+        assert_eq!(session.phase, InterviewPhase::Product);
 
-        // Should now be in Technical phase (transition happened when metric was added)
+        // The next answer in Product is what advances to Technical.
+        let update = record_answer(&mut session, "Anything else?", "No", vec![], &schema);
         assert!(update.phase_changed);
         assert_eq!(session.phase, InterviewPhase::Technical);
+    }
+
+    #[test]
+    fn test_add_proposed_node_links_latest_answer() {
+        let schema = make_schema();
+        let mut session = interview_start("An idea", "feature", &schema, &[], &HashSet::new())
+            .unwrap()
+            .session;
+        record_answer(&mut session, "Premises?", "1y", vec![], &schema);
+        record_answer(&mut session, "Who?", "SREs", vec![], &schema);
+
+        let update = add_proposed_node(&mut session, "sre", "persona", "", "# SRE\n", 0.9, &schema);
+        let node = session.get_tentative_node(&update.new_nodes[0]).unwrap();
+        assert_eq!(node.source_qa, vec![1]);
+        assert_eq!(session.answered[1].answer, "SREs");
     }
 
     #[test]

@@ -105,6 +105,7 @@ pub fn run_answer(
         agent,
         &InterviewEvent::AnswerRecorded {
             session_id: &session.id,
+            question: None,
             answer,
             phase: session.phase.display_name(),
             filled_gap_count: result.filled_gaps.len(),
@@ -236,6 +237,9 @@ pub fn run_commit(ctx: &ProjectContext, session_id: &str, agent: &str) -> anyhow
         for path in &result.modified_files {
             println!("  {}", path.display());
         }
+    }
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
     }
     super::warn_if_index_refresh_fails(ctx);
 

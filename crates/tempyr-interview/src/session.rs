@@ -51,6 +51,19 @@ pub struct TentativeNode {
     pub source_qa: Vec<usize>,
 }
 
+impl TentativeNode {
+    /// True when the body has a line starting with `needs:` — the
+    /// interviewer's marker for an answer that doesn't yet meet the bar
+    /// (e.g. a metric without a threshold).
+    pub fn has_needs_marker(&self) -> bool {
+        self.body.lines().any(|line| {
+            line.trim_start()
+                .get(..6)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("needs:"))
+        })
+    }
+}
+
 /// A proposed edge not yet committed to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TentativeEdge {
@@ -213,6 +226,20 @@ impl InterviewSession {
         Ok(())
     }
 
+    /// Move the session file into `<sessions_dir>/archive/` so committed
+    /// sessions stay available for baselines and replay without showing
+    /// up in `list_sessions` (which only reads the top level).
+    pub fn archive(&self, sessions_dir: &Path) -> Result<()> {
+        let path = sessions_dir.join(format!("session-{}.json", self.id));
+        if !path.exists() {
+            return Ok(());
+        }
+        let archive_dir = sessions_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir)?;
+        std::fs::rename(&path, archive_dir.join(format!("session-{}.json", self.id)))?;
+        Ok(())
+    }
+
     /// Add a tentative node to the session.
     pub fn add_tentative_node(&mut self, node: TentativeNode) {
         // Check for duplicates
@@ -306,6 +333,47 @@ impl InterviewSession {
             .any(|e| e.source == self.root_node.id && e.edge_type == edge_type)
     }
 
+    /// Like [`has_node_of_type`](Self::has_node_of_type), but ignores
+    /// tentative nodes still carrying a `needs:` marker — a weak answer
+    /// the interviewer is pushing on shouldn't move the phase forward.
+    pub fn has_ready_node_of_type(&self, node_type: &str) -> bool {
+        if self.root_node.node_type == node_type && !self.root_node.has_needs_marker() {
+            return true;
+        }
+        self.tentative_nodes
+            .iter()
+            .any(|n| n.node_type == node_type && !n.has_needs_marker())
+    }
+
+    /// Like [`has_edge_type_from_root`](Self::has_edge_type_from_root), but
+    /// ignores edges whose target is a tentative node with a `needs:`
+    /// marker. Edges to existing graph nodes always count.
+    pub fn has_ready_edge_type_from_root(&self, edge_type: &str) -> bool {
+        self.tentative_edges.iter().any(|e| {
+            e.source == self.root_node.id
+                && e.edge_type == edge_type
+                && self
+                    .tentative_nodes
+                    .iter()
+                    .find(|n| n.id == e.target)
+                    .is_none_or(|n| !n.has_needs_marker())
+        })
+    }
+
+    /// Number of answers recorded while the session was in `phase`.
+    pub fn answers_in_phase(&self, phase: InterviewPhase) -> usize {
+        self.answered.iter().filter(|qa| qa.phase == phase).count()
+    }
+
+    /// Tentative nodes (including the root) whose body still has a
+    /// `needs:` line.
+    pub fn nodes_with_needs_marker(&self) -> Vec<&TentativeNode> {
+        std::iter::once(&self.root_node)
+            .chain(self.tentative_nodes.iter())
+            .filter(|n| n.has_needs_marker())
+            .collect()
+    }
+
     /// Count tentative nodes of a given type.
     pub fn count_nodes_of_type(&self, node_type: &str) -> usize {
         let root = if self.root_node.node_type == node_type {
@@ -395,8 +463,29 @@ impl InterviewSession {
             }
         }
 
-        // Delete session file
-        self.delete(sessions_dir)?;
+        for node in self.nodes_with_needs_marker() {
+            warnings.push(format!(
+                "Node '{}' still has a `needs:` line; resolve it or convert it to an open question",
+                node.id
+            ));
+        }
+
+        // Keep the committed session for baselines and replay. The graph is
+        // already written, so a failure here mustn't fail the commit; fall
+        // back to deleting the session so a retry can't commit it twice.
+        if let Err(archive_err) = self.archive(sessions_dir) {
+            match self.delete(sessions_dir) {
+                Ok(()) => warnings.push(format!(
+                    "Could not archive session {} ({archive_err}); deleted it instead",
+                    self.id
+                )),
+                Err(delete_err) => warnings.push(format!(
+                    "Could not archive or delete session {} ({archive_err}; {delete_err}); \
+                     remove it so it isn't committed again",
+                    self.id
+                )),
+            }
+        }
 
         modified_files.dedup();
 
@@ -725,12 +814,74 @@ mod tests {
         assert!(graph_dir.join("features/feat-test.md").exists());
         assert!(graph_dir.join("personas/persona-dev.md").exists());
 
-        // Session file should be deleted
+        // Session leaves the active list but is kept in the archive
         assert!(
             InterviewSession::list_sessions(&sessions_dir)
                 .unwrap()
                 .is_empty()
         );
+        assert!(
+            sessions_dir
+                .join(format!("archive/session-{}.json", session.id))
+                .exists()
+        );
+        assert!(result.warnings.iter().all(|w| !w.contains("needs:")));
+    }
+
+    #[test]
+    fn test_commit_warns_on_needs_marker() {
+        let tmp = TempDir::new().unwrap();
+        let graph_dir = tmp.path().join("graph");
+        let sessions_dir = tmp.path().join("sessions");
+        for dir in &["features", "metrics"] {
+            std::fs::create_dir_all(graph_dir.join(dir)).unwrap();
+        }
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("schema/default-schema.toml");
+        let schema = tempyr_core::schema::Schema::load(&schema_path).unwrap();
+
+        let mut session = InterviewSession::new("feature", "feat-x", "# X\n\nA test.\n");
+        session
+            .root_node
+            .fields
+            .insert("owner".to_string(), "alice".to_string());
+        session.add_tentative_node(TentativeNode {
+            id: "metric-fast".to_string(),
+            node_type: "metric".to_string(),
+            status: "proposed".to_string(),
+            fields: HashMap::new(),
+            body: "# Faster\n\nneeds: a threshold\n".to_string(),
+            confidence: 0.6,
+            source_qa: vec![],
+        });
+
+        let result = session.commit(&graph_dir, &schema, &sessions_dir).unwrap();
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("metric-fast") && w.contains("needs:"))
+        );
+    }
+
+    #[test]
+    fn test_has_needs_marker() {
+        let mut node = TentativeNode {
+            id: "m".to_string(),
+            node_type: "metric".to_string(),
+            status: "".to_string(),
+            fields: HashMap::new(),
+            body: "# M\n\n  Needs: a threshold\n".to_string(),
+            confidence: 0.6,
+            source_qa: vec![],
+        };
+        assert!(node.has_needs_marker());
+        node.body = "# M\n\nThis needs: nothing at line start.\n".to_string();
+        assert!(!node.has_needs_marker());
     }
 
     #[test]

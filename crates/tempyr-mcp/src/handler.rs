@@ -18,7 +18,7 @@ use tempyr_core::id;
 use tempyr_core::ops;
 use tempyr_core::schema::Schema;
 use tempyr_core::temporal::TemporalFilter;
-use tempyr_core::traverse::bfs;
+use tempyr_core::traverse::bfs_edge_types;
 use tempyr_core::validate::validate_graph;
 use tempyr_index::embeddings::{self, EmbeddingStore};
 use tempyr_index::fts::MetadataFilter;
@@ -92,9 +92,11 @@ pub struct GraphTraverseParams {
     /// Maximum traversal depth (default: 2)
     #[schemars(default = "default_2")]
     pub depth: Option<u64>,
-    /// Filter by edge types
-    #[allow(dead_code)]
+    /// Only follow edges of these types (any of). Absent/empty = all edges.
     pub edge_types: Option<Vec<String>>,
+    /// Include each node's status, full markdown body, and outgoing edges
+    /// (default: false — id, depth, type, and title only)
+    pub include_body: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -169,14 +171,26 @@ pub struct InterviewStartParams {
 pub struct InterviewAnswerParams {
     /// Interview session ID
     pub session_id: String,
-    /// The user's answer text
+    /// The user's answer text — only what the user actually wrote
     pub answer: String,
+    /// The exact question (or premise list) you asked. Recorded with the
+    /// answer and in the journal. Defaults to the server's top gap hints.
+    pub question: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct InterviewSessionParams {
     /// Interview session ID
     pub session_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InterviewShowParams {
+    /// Interview session ID
+    pub session_id: String,
+    /// Return every node's full body and fields instead of a 3-line
+    /// preview (default: false)
+    pub full: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -736,30 +750,48 @@ fn attach_warnings(state: &mut Value, warnings: Vec<String>) {
     }
 }
 
-fn session_state_json(session: &InterviewSession, _schema: &Schema) -> Value {
+fn session_state_json(session: &InterviewSession, schema: &Schema) -> Value {
+    session_state_json_with(session, schema, false)
+}
+
+/// Session state for MCP responses. `full` swaps each node's 3-line
+/// `body_preview` for its complete `body` and `fields`, which reviewers and
+/// critics need to quote claims accurately.
+fn session_state_json_with(session: &InterviewSession, _schema: &Schema, full: bool) -> Value {
     let questions = next_questions(session, 3);
     let progress = proposer::compute_progress(session);
+
+    let node_json = |node: &TentativeNode| -> Value {
+        let mut entry = json!({
+            "id": node.id,
+            "status": node.status,
+            "confidence": node.confidence,
+            "needs": node.has_needs_marker(),
+        });
+        if let Value::Object(map) = &mut entry {
+            if full {
+                map.insert("body".to_string(), json!(node.body));
+                map.insert("fields".to_string(), json!(node.fields));
+            } else {
+                map.insert(
+                    "body_preview".to_string(),
+                    json!(node.body.lines().take(3).collect::<Vec<_>>().join("\n")),
+                );
+            }
+        }
+        entry
+    };
 
     let mut nodes_by_type: HashMap<String, Vec<Value>> = HashMap::new();
     nodes_by_type
         .entry(session.root_node.node_type.clone())
         .or_default()
-        .push(json!({
-            "id": session.root_node.id,
-            "status": session.root_node.status,
-            "body_preview": session.root_node.body.lines().take(3).collect::<Vec<_>>().join("\n"),
-            "confidence": session.root_node.confidence,
-        }));
+        .push(node_json(&session.root_node));
     for node in &session.tentative_nodes {
         nodes_by_type
             .entry(node.node_type.clone())
             .or_default()
-            .push(json!({
-                "id": node.id,
-                "status": node.status,
-                "body_preview": node.body.lines().take(3).collect::<Vec<_>>().join("\n"),
-                "confidence": node.confidence,
-            }));
+            .push(node_json(node));
     }
 
     json!({
@@ -924,8 +956,16 @@ pub struct JournalGetParams {
 pub struct JournalSearchParams {
     /// FTS5 query string. Supports `"phrase"`, `term1 OR term2`, and
     /// `prefix*`. Snake-case identifiers (e.g. `parse_and_insert`)
-    /// match as regular tokens.
+    /// match as regular tokens. May be empty when `tags` or `references`
+    /// is given, for a filter-only listing ranked by recency + kind.
+    #[serde(default)]
     pub query: String,
+    /// Require every listed tag, e.g. `disposition:rebut`. Empty/absent =
+    /// no filter.
+    pub tags: Option<Vec<String>>,
+    /// Require a reference to any of these graph node ids. Empty/absent =
+    /// no filter.
+    pub references: Option<Vec<String>>,
     /// Restrict to one or more kinds. Snake_case strings (`plan`,
     /// `finding`, `decision`, `dead_end`, `assumption`, `question`,
     /// `risk`, `outcome`). Empty/absent = no filter.
@@ -1314,17 +1354,25 @@ impl TempyrServer {
         let resolved = ops::resolve_node_id(&graph_dir, &p.node_id).map_err(|e| e.to_string())?;
         let graph = Graph::load_from_directory(&graph_dir, schema).map_err(|e| e.to_string())?;
 
-        let results = bfs(&graph, &resolved, depth, None);
+        let edge_types = p.edge_types.unwrap_or_default();
+        let include_body = p.include_body.unwrap_or(false);
+        let results = bfs_edge_types(&graph, &resolved, depth, &edge_types);
         let output: Vec<Value> = results
             .iter()
             .map(|r| {
                 let node = graph.get_node(&r.node_id);
-                json!({
+                let mut entry = json!({
                     "node_id": r.node_id,
                     "depth": r.depth,
                     "type": node.map(|n| n.node_type()),
                     "title": node.map(|n| n.title()),
-                })
+                });
+                if include_body && let (Some(n), Value::Object(map)) = (node, &mut entry) {
+                    map.insert("status".to_string(), json!(n.status()));
+                    map.insert("body".to_string(), json!(n.body));
+                    map.insert("edges".to_string(), json!(n.edges()));
+                }
+                entry
             })
             .collect();
 
@@ -1730,7 +1778,7 @@ impl TempyrServer {
 
     #[tool(
         name = "interview_answer",
-        description = "Process a user's answer during an interview. Updates session state, fills gaps, may advance the interview phase.",
+        description = "Record the user's answer during an interview (only text the user wrote; pass the question you asked as `question`). Updates session state and gaps. This is the only call that can advance the interview phase.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1750,14 +1798,17 @@ impl TempyrServer {
             InterviewSession::load_by_id(&sessions, &p.session_id).map_err(|e| e.to_string())?;
 
         let prior_phase = session.phase;
-        let question_context: String = next_questions(&session, 3)
-            .iter()
-            .map(|g| g.suggested_question.as_str())
-            .collect::<Vec<_>>()
-            .join(" | ");
+        let question = p.question.clone().unwrap_or_else(|| {
+            next_questions(&session, 3)
+                .iter()
+                .map(|g| g.suggested_question.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        });
 
-        session.record_answer(&question_context, &p.answer, vec![]);
-        let update = proposer::reanalyze_with_graph(&mut session, &schema, graph.as_ref());
+        session.record_answer(&question, &p.answer, vec![]);
+        let update =
+            proposer::advance_and_reanalyze_with_graph(&mut session, &schema, graph.as_ref());
 
         session.save(&sessions).map_err(|e| e.to_string())?;
 
@@ -1769,6 +1820,7 @@ impl TempyrServer {
             &graph_dir,
             &InterviewEvent::AnswerRecorded {
                 session_id: &session.id,
+                question: p.question.as_deref(),
                 answer: &p.answer,
                 phase: session.phase.display_name(),
                 filled_gap_count: update.filled_gaps.len(),
@@ -1809,7 +1861,7 @@ impl TempyrServer {
 
     #[tool(
         name = "interview_show",
-        description = "Return the full tentative graph state for review. Shows all proposed nodes grouped by type, edges, remaining gaps, and Q&A history.",
+        description = "Return the full tentative graph state for review. Shows all proposed nodes grouped by type (with a `needs` flag for nodes still marked `needs:`), edges, remaining gaps, and Q&A history. Pass `full: true` for complete node bodies and fields.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1819,20 +1871,20 @@ impl TempyrServer {
     )]
     fn interview_show(
         &self,
-        Parameters(p): Parameters<InterviewSessionParams>,
+        Parameters(p): Parameters<InterviewShowParams>,
     ) -> Result<String, String> {
         let (_, gf_dir, schema) = self.find_project()?;
         let sessions = sessions_dir(&gf_dir);
         let session =
             InterviewSession::load_by_id(&sessions, &p.session_id).map_err(|e| e.to_string())?;
 
-        let state = session_state_json(&session, &schema);
+        let state = session_state_json_with(&session, &schema, p.full.unwrap_or(false));
         serde_json::to_string_pretty(&state).map_err(|e| e.to_string())
     }
 
     #[tool(
         name = "interview_commit",
-        description = "Write all tentative nodes and edges to disk, creating graph files. Validates the resulting graph. Deletes the session on success.",
+        description = "Write all tentative nodes and edges to disk, creating graph files. Validates the resulting graph and warns about nodes still marked `needs:`. Archives the session on success.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1934,7 +1986,8 @@ impl TempyrServer {
             }
         }
 
-        let update = proposer::reanalyze(&mut session, &schema);
+        let graph = Graph::load_from_directory(&graph_dir, schema.clone()).ok();
+        let update = proposer::reanalyze_with_graph(&mut session, &schema, graph.as_ref());
         session.save(&sessions).map_err(|e| e.to_string())?;
 
         // Phase 4b: emit Adjusted; if reanalysis advanced the phase,
@@ -1995,7 +2048,7 @@ impl TempyrServer {
 
     #[tool(
         name = "interview_add_node",
-        description = "Add a tentative node to an active interview session. The node is stored in session state (not written to disk) until interview_commit. Automatically re-analyzes gaps and may advance the interview phase.",
+        description = "Add a tentative node to an active interview session. The node is stored in session state (not written to disk) until interview_commit. Re-analyzes gaps; never advances the phase (only interview_answer does). Put a `needs: <what's missing>` line in the body for an answer that doesn't meet the bar yet — such nodes don't count toward phase readiness.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2035,11 +2088,24 @@ impl TempyrServer {
             fields: HashMap::new(),
             body: p.body,
             confidence,
-            source_qa: vec![session.answered.len()],
+            // The answer this node came from is the latest one recorded.
+            source_qa: session.answered.len().checked_sub(1).into_iter().collect(),
         });
 
         let update = proposer::reanalyze_with_graph(&mut session, &schema, graph.as_ref());
         session.save(&sessions).map_err(|e| e.to_string())?;
+
+        let mut warnings: Vec<String> = Vec::new();
+        if let Some(w) = self.emit_interview_event(
+            &graph_dir,
+            &InterviewEvent::Adjusted {
+                session_id: &session.id,
+                operation: "add_node",
+                target: &node_id,
+            },
+        ) {
+            warnings.push(w);
+        }
 
         serde_json::to_string_pretty(&json!({
             "session_id": session.id,
@@ -2056,13 +2122,14 @@ impl TempyrServer {
             },
             "tentative_nodes_count": session.tentative_nodes.len() + 1,
             "tentative_edges_count": session.tentative_edges.len(),
+            "warnings": warnings,
         }))
         .map_err(|e| e.to_string())
     }
 
     #[tool(
         name = "interview_add_edge",
-        description = "Add a tentative edge to an active interview session. Both source and target can be tentative node IDs (from interview_add_node) or existing graph node IDs. Stored in session state until interview_commit.",
+        description = "Add a tentative edge to an active interview session. Both source and target can be tentative node IDs (from interview_add_node) or existing graph node IDs. Stored in session state until interview_commit. Never advances the phase.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2094,9 +2161,22 @@ impl TempyrServer {
         let update = proposer::reanalyze_with_graph(&mut session, &schema, graph.as_ref());
         session.save(&sessions).map_err(|e| e.to_string())?;
 
+        let edge_label = format!("{resolved_source} --{}--> {resolved_target}", p.edge_type);
+        let mut warnings: Vec<String> = Vec::new();
+        if let Some(w) = self.emit_interview_event(
+            &graph_dir,
+            &InterviewEvent::Adjusted {
+                session_id: &session.id,
+                operation: "add_edge",
+                target: &edge_label,
+            },
+        ) {
+            warnings.push(w);
+        }
+
         serde_json::to_string_pretty(&json!({
             "session_id": session.id,
-            "edge": format!("{resolved_source} --{}--> {resolved_target}", p.edge_type),
+            "edge": edge_label,
             "filled_gaps": update.filled_gaps,
             "next_questions": update.questions,
             "phase": session.phase,
@@ -2108,6 +2188,7 @@ impl TempyrServer {
             },
             "tentative_nodes_count": session.tentative_nodes.len() + 1,
             "tentative_edges_count": session.tentative_edges.len(),
+            "warnings": warnings,
         }))
         .map_err(|e| e.to_string())
     }
@@ -2513,13 +2594,18 @@ impl TempyrServer {
 
     #[tool(
         name = "journal_search",
-        description = "Search journal entries by full-text query, ranked by BM25 + recency boost (14-day half-life) + kind boost (decisions/dead-ends weighted higher than plans/questions). Use this to find what past sessions know about a topic — e.g., to look up dead-ends another agent (or a past version of yourself) hit when tackling something similar. Filter by kind (e.g., `[\"dead_end\", \"decision\"]`) to focus on the high-value entries. The `explain` flag breaks the score into BM25 / recency / kind components — useful when ranking surprises you. Returns hits with full Entry JSON; detail bodies may be truncated to fit `token_budget`.",
+        description = "Search journal entries by full-text query, ranked by BM25 + recency boost (14-day half-life) + kind boost (decisions/dead-ends weighted higher than plans/questions). Use this to find what past sessions know about a topic — e.g., to look up dead-ends another agent (or a past version of yourself) hit when tackling something similar. Filter by kind (e.g., `[\"dead_end\", \"decision\"]`) to focus on the high-value entries, by `tags` (all must match, e.g. `[\"disposition:rebut\"]`), or by `references` (graph node ids, any may match). With `tags` or `references`, the query may be empty for a filter-only listing ranked by recency + kind. The `explain` flag breaks the score into BM25 / recency / kind components — useful when ranking surprises you. Returns hits with full Entry JSON; detail bodies may be truncated to fit `token_budget`.",
         annotations(read_only_hint = true, idempotent_hint = true)
     )]
     fn journal_search(
         &self,
         Parameters(p): Parameters<JournalSearchParams>,
     ) -> Result<String, String> {
+        let no_filters = p.tags.as_ref().is_none_or(|t| t.is_empty())
+            && p.references.as_ref().is_none_or(|r| r.is_empty());
+        if p.query.trim().is_empty() && no_filters {
+            return Err("provide a query, tags, or references".to_string());
+        }
         let (graph_dir, _gf_dir, _schema) = self.find_project()?;
         let project_root = graph_dir
             .parent()
@@ -2550,8 +2636,9 @@ impl TempyrServer {
         // exactly one stderr warning per process across both the
         // CLI and the MCP path — a long-running MCP server doesn't
         // log per-search noise when embedding is consistently
-        // unavailable.
-        let query_vector = match embedder {
+        // unavailable. A filter-only search (empty query) has nothing
+        // to embed.
+        let query_vector = match embedder.filter(|_| !p.query.trim().is_empty()) {
             Some(emb) => match emb.embed_one(&p.query) {
                 Ok(v) => Some(v),
                 Err(e) => {
@@ -2568,6 +2655,8 @@ impl TempyrServer {
             kinds,
             limit: p.limit.unwrap_or(10),
             since_days: p.since_days,
+            tags: p.tags.unwrap_or_default(),
+            references: p.references.unwrap_or_default(),
             token_budget: p
                 .token_budget
                 .unwrap_or(tempyr_journal_index::search::DEFAULT_TOKEN_BUDGET),

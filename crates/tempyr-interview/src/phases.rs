@@ -53,82 +53,58 @@ impl InterviewPhase {
 
 /// Check if the session is ready to transition to the next phase.
 /// Returns the next phase if a transition should happen, None otherwise.
+///
+/// Every transition needs at least one answer recorded in the current
+/// phase *and* that phase's node condition, or else `N` answers in the
+/// phase as a fallback so no answer is ever forced. Node conditions
+/// ignore tentative nodes still marked `needs:`, so a weak answer the
+/// interviewer is pushing on can't carry the interview forward.
+///
+/// Callers should only evaluate this after recording an answer (see
+/// `proposer::record_answer`); adding nodes or edges mid-turn must not
+/// move the phase before the user has responded to the push.
 pub fn check_phase_transition(session: &InterviewSession) -> Option<InterviewPhase> {
-    let answers_in_phase = |phase: InterviewPhase| -> usize {
-        session
-            .answered
-            .iter()
-            .filter(|qa| qa.phase == phase)
-            .count()
+    let answers = session.answers_in_phase(session.phase);
+    let ready = |nodes_ready: bool, fallback: usize| -> bool {
+        (answers >= 1 && nodes_ready) || answers >= fallback
     };
 
     match session.phase {
         InterviewPhase::Discovery => {
-            // Discovery → Product: root has a body (problem statement) and at least
-            // one existing graph node is linked for context
-            let has_body =
-                !session.root_node.body.trim().is_empty() && session.root_node.body.len() > 20; // more than just a title
-            let has_context = !session.graph_context.is_empty() || !session.answered.is_empty(); // at least one interaction
-
-            // Fallback: if no existing context found after 2 turns, advance anyway
-            // (the graph is probably empty / this is a new domain)
-            let fallback = session.answered.len() >= 2 && session.graph_context.is_empty();
-
-            if (has_body && has_context) || fallback {
-                Some(InterviewPhase::Product)
-            } else {
-                None
-            }
+            // Discovery → Product: the user has replied once (the opener's
+            // premise list). No node condition.
+            ready(true, 1).then_some(InterviewPhase::Product)
         }
 
         InterviewPhase::Product => {
-            // Product → Technical: at least one persona, one success metric, and a clear
-            // problem statement exist
-            let has_persona =
-                session.has_node_of_type("persona") || session.has_edge_type_from_root("serves");
-            let has_metric = session.has_node_of_type("metric")
-                || session.has_edge_type_from_root("measured_by");
-            let has_problem = session.root_node.body.len() > 50; // substantive body
+            // Product → Technical: a persona, a success metric, and a
+            // substantive problem statement.
+            let has_persona = session.has_ready_node_of_type("persona")
+                || session.has_ready_edge_type_from_root("serves");
+            let has_metric = session.has_ready_node_of_type("metric")
+                || session.has_ready_edge_type_from_root("measured_by");
+            let has_problem = session.root_node.body.len() > 50;
 
-            if has_persona && has_metric && has_problem {
-                Some(InterviewPhase::Technical)
-            } else {
-                None
-            }
+            ready(has_persona && has_metric && has_problem, 4).then_some(InterviewPhase::Technical)
         }
 
         InterviewPhase::Technical => {
-            // Technical → Decomposition: at least one component or architecture decision
-            let has_component =
-                session.has_node_of_type("component") || session.has_edge_type_from_root("uses");
-            let has_decision = session.has_node_of_type("decision")
-                || session.has_edge_type_from_root("depends_on");
+            // Technical → Decomposition: a component or an architecture
+            // decision.
+            let has_component = session.has_ready_node_of_type("component")
+                || session.has_ready_edge_type_from_root("uses");
+            let has_decision = session.has_ready_node_of_type("decision")
+                || session.has_ready_edge_type_from_root("depends_on");
 
-            // Fallback: if user answers 3+ technical questions, advance
-            // (some features don't have complex architecture)
-            let fallback = answers_in_phase(InterviewPhase::Technical) >= 3;
-
-            if has_component || has_decision || fallback {
-                Some(InterviewPhase::Decomposition)
-            } else {
-                None
-            }
+            ready(has_component || has_decision, 3).then_some(InterviewPhase::Decomposition)
         }
 
         InterviewPhase::Decomposition => {
-            // Decomposition → Review: at least one task exists
-            let has_task = session.has_node_of_type("task")
-                || session.has_edge_type_from_root("decomposes_to");
+            // Decomposition → Review: at least one task.
+            let has_task = session.has_ready_node_of_type("task")
+                || session.has_ready_edge_type_from_root("decomposes_to");
 
-            // Fallback: auto-advance after 2 turns in this phase
-            // (task decomposition can always be refined later)
-            let fallback = answers_in_phase(InterviewPhase::Decomposition) >= 2;
-
-            if has_task || fallback {
-                Some(InterviewPhase::Review)
-            } else {
-                None
-            }
+            ready(has_task, 2).then_some(InterviewPhase::Review)
         }
 
         InterviewPhase::Review => {
@@ -199,11 +175,12 @@ mod tests {
             "# Session Replay\n\n## Problem\n\nEngineers need to see what happened during sessions to debug funnel issues.\n",
         );
 
-        // Not yet: no context
+        // Graph context alone no longer advances: the user hasn't replied yet.
+        session.graph_context.push("epic-observability".to_string());
         assert!(check_phase_transition(&session).is_none());
 
-        // Add some context
-        session.graph_context.push("epic-observability".to_string());
+        // The premise reply is the one Discovery answer needed.
+        session.record_answer("Premises 1-3?", "1y 2n 3y", vec![]);
 
         assert_eq!(
             check_phase_transition(&session),
@@ -248,6 +225,74 @@ mod tests {
             source_qa: vec![],
         });
 
+        // Nodes alone aren't enough: no answer recorded in Product yet.
+        assert!(check_phase_transition(&session).is_none());
+
+        session.record_answer("Who and how measured?", "SREs; MTTR < 30m", vec![]);
+
+        assert_eq!(
+            check_phase_transition(&session),
+            Some(InterviewPhase::Technical)
+        );
+    }
+
+    #[test]
+    fn test_needs_marked_node_does_not_satisfy_phase() {
+        let mut session = InterviewSession::new(
+            "feature",
+            "feat-a",
+            "# Feature\n\n## Problem\n\nA real problem statement that is long enough to pass the threshold check.\n",
+        );
+        session.phase = InterviewPhase::Product;
+        session.record_answer("Who and how measured?", "SREs, faster debugging", vec![]);
+
+        session.add_tentative_node(TentativeNode {
+            id: "persona-sre".to_string(),
+            node_type: "persona".to_string(),
+            status: "".to_string(),
+            fields: HashMap::new(),
+            body: "# SRE\n\nGoal: fix incidents fast.\n".to_string(),
+            confidence: 0.9,
+            source_qa: vec![],
+        });
+        session.add_tentative_node(TentativeNode {
+            id: "metric-faster".to_string(),
+            node_type: "metric".to_string(),
+            status: "proposed".to_string(),
+            fields: HashMap::new(),
+            body: "# Faster debugging\n\nneeds: a threshold\n".to_string(),
+            confidence: 0.6,
+            source_qa: vec![],
+        });
+
+        // The metric is still being pushed on, so Product holds.
+        assert!(check_phase_transition(&session).is_none());
+
+        // Resolving the push clears the marker.
+        session
+            .adjust_node(
+                "metric-faster",
+                crate::session::NodePatch {
+                    body: Some("# Faster debugging\n\nMTTR under 30 minutes.\n".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            check_phase_transition(&session),
+            Some(InterviewPhase::Technical)
+        );
+    }
+
+    #[test]
+    fn test_product_fallback_after_four_answers() {
+        let mut session = InterviewSession::new("feature", "feat-a", "# A\n");
+        session.phase = InterviewPhase::Product;
+        for i in 0..3 {
+            session.record_answer("q", &format!("answer {i}"), vec![]);
+            assert!(check_phase_transition(&session).is_none());
+        }
+        session.record_answer("q", "answer 3", vec![]);
         assert_eq!(
             check_phase_transition(&session),
             Some(InterviewPhase::Technical)
@@ -273,6 +318,9 @@ mod tests {
             source_qa: vec![],
         });
 
+        assert!(check_phase_transition(&session).is_none());
+        session.record_answer("Storage?", "SQLite, considered Postgres", vec![]);
+
         assert_eq!(
             check_phase_transition(&session),
             Some(InterviewPhase::Decomposition)
@@ -297,6 +345,9 @@ mod tests {
             source_qa: vec![],
         });
 
+        assert!(check_phase_transition(&session).is_none());
+        session.record_answer("Tasks?", "Implement it", vec![]);
+
         assert_eq!(
             check_phase_transition(&session),
             Some(InterviewPhase::Review)
@@ -313,6 +364,8 @@ mod tests {
         session.graph_context.push("existing-node".to_string());
 
         assert_eq!(session.phase, InterviewPhase::Discovery);
+        assert!(!try_advance_phase(&mut session));
+        session.record_answer("Premises?", "1y 2y", vec![]);
         assert!(try_advance_phase(&mut session));
         assert_eq!(session.phase, InterviewPhase::Product);
 
@@ -331,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn test_discovery_fallback_after_two_answers() {
+    fn test_discovery_advances_after_one_answer_without_context() {
         let mut session = InterviewSession::new(
             "feature",
             "feat-a",
@@ -339,16 +392,10 @@ mod tests {
         );
         // No graph_context — simulates empty/new graph
         assert!(session.graph_context.is_empty());
+        assert!(check_phase_transition(&session).is_none());
 
-        // Record 2 answers in Discovery phase (session starts in Discovery)
-        session.record_answer(
-            "What is the problem?",
-            "Users can't debug sessions.",
-            vec![],
-        );
-        session.record_answer("Any prior art?", "Nothing in the graph yet.", vec![]);
+        session.record_answer("Premises?", "1y 2n", vec![]);
 
-        // Fallback should trigger: 2 answers + empty graph_context → advance to Product
         assert_eq!(
             check_phase_transition(&session),
             Some(InterviewPhase::Product)
