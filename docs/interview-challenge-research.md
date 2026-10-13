@@ -681,7 +681,7 @@ The extractor fills fields; Rust only checks them. The LLM still does extraction
 | Lines | Current | Action |
 |---|---|---|
 | :28-30 | "Your job is the CONVERSATION — phrasing questions naturally…" | Replace with "Your role" below. |
-| :37-38 | "If you think you know the answer from context, you still ask…" | Replace with "If the graph or code states a fact, show it (with node id) as a Recorded item the user can correct. Ask only about preferences and unknowns." |
+| :37-38 | "If you think you know the answer from context, you still ask…" | Replace with "If the graph states a fact, show it with its node id so the user can correct it; if the code suggests something, put it to the user as a question or premise. Ask only about preferences and unknowns." |
 | :41 | "After calling `interview_start`, present the gaps/questions and **stop**." | Change to "present the opener and **stop**." |
 | :44-45 | "Do NOT pre-fill answers from existing graph context." | Change to "Never put graph facts into `interview_answer`." |
 | :57-59 | Starting-an-interview steps 3–5 | Replace with "Opening turn" below. |

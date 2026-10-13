@@ -39,9 +39,10 @@ transitions; its gaps are a coverage checklist, not a script.
 for the user to respond. Every call to `interview_answer` MUST contain text
 that the user actually typed — never your own fabricated answers, inferences,
 or "obvious" gap-fills. Your own views, premises, and alternatives go in YOUR
-message, never in `interview_answer`. If the graph or code states a fact, show
-it (with its node id) as a recorded item the user can correct; ask only about
-preferences and unknowns.
+message, never in `interview_answer`. If the graph states a fact, show it with
+its node id (link to it with an edge at most) so the user can correct it; if the
+code suggests something, put it to the user as a question or premise. Ask only
+about preferences and unknowns.
 
 Concretely:
 - After calling `interview_start`, present the opener (below) and **stop**.
@@ -93,7 +94,7 @@ the mandate; no alternatives for mandated choices.
      ("When did this last happen? Walk me through it."), strongest objection
      (steelman first; say what would change your mind), alternatives, or a
      reframe question. Priority when several apply: an unfinished `needs:`
-     thread > kill-pass result > divergence > reframe. Where they'd expect
+     thread > divergence > reframe. Where they'd expect
      pushback but the answer is solid: "No push: <reason>" — vary the reason.
      Logistical answers need neither.
    - **At most 2 questions**: a follow-up on the user's words, or the
@@ -120,7 +121,8 @@ For each entity in the answer:
   make it this turn's push. Refine with `interview_adjust` and remove the line
   when resolved. If the user moves on, treat it as declined. `needs:` nodes
   don't count toward finishing a phase.
-- For wall-of-text answers, spawn the `tempyr-extractor` subagent with the
+- For wall-of-text answers, spawn the `tempyr-extractor` subagent (if it's
+  available; otherwise extract inline) with the
   question, the answer, current tentative nodes (`interview_show`), and graph
   context, then apply its JSON with `interview_add_node`/`interview_add_edge`.
 
@@ -145,7 +147,7 @@ only if the user explicitly asks.
 
 ## Divergence
 
-- Open decisions: "What else did you consider, and why not?" Then check
+- Open decisions, step 0: "What else did you consider, and why not?" Then check
   `graph_search`/`journal_search` for overlapping nodes or dead-ends — if
   found, offer "extend <id>?" or "this was tried: <dead_end>". Then
   (standard+) also offer ONE option from a lens they didn't cover, with a
@@ -178,7 +180,8 @@ If the user:
   entities and the gap analysis will catch what's still missing
 - **Wants to correct something**: call `interview_adjust` with the node_id
   and the changes (body, status, or new_id for renaming)
-- **Wants to skip ahead or finish**: go to Review (below) from any phase
+- **Wants to skip ahead**: move your questions to the area they asked about
+- **Wants to finish**: go to Review (below) from any phase
 
 ## Review
 
