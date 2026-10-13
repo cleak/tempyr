@@ -8,8 +8,8 @@ schema_path = ".tempyr/schema.toml"
 provider = "voyage"
 model = "voyage-4"
 dimensions = 1024
-# No key needed: setup.sh builds the index with --skip-embeddings, so search is
-# structural + full-text only. That's enough for the fixture graph.
+# No key: setup.sh builds the index with --skip-embeddings. graph_search and
+# graph_list work full-text/structurally; graph_context (always embeds) will fail.
 
 [retrieval]
 default_token_budget = 8000

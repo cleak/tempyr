@@ -1,25 +1,34 @@
 #!/usr/bin/env bash
-# Build the interview-eval sandbox at evals/interview/.run/sandbox.
+# Build the interview-eval workspace (outside the repo).
 #
-# Usage: evals/interview/setup.sh [--baseline <git-ref>] [--candidate <git-ref>]
-#   --baseline   ref whose interview skill is the "baseline" arm (default: origin/master)
+# Usage: evals/interview/setup.sh [--dir <path>] [--baseline <git-ref>] [--candidate <git-ref>]
+#   --dir        workspace root (default: $TEMPYR_EVAL_DIR or ~/.tempyr-eval/interview)
+#   --baseline   ref whose interview skill is the "baseline" arm
+#                (default: the commit before the "skeptical design partner" rewrite)
 #   --candidate  ref whose interview skill is the "candidate" arm
 #                (default: the working tree's .claude/skills/tempyr-interview/SKILL.md)
 #
-# The sandbox is its own git repo so interview journal events stay out of the tempyr
-# repo's journal, and its own tempyr project so eval sessions never touch a real graph.
+# Layout:
+#   <dir>/sandbox  tempyr project + its own git repo; start Claude Code here. Rebuilt.
+#   <dir>/harness  workflow.js, rubric, critic, scenarios, skill arms. Rebuilt.
+#   <dir>/results  eval results. Kept across rebuilds.
+# The workspace lives outside the repo so agents don't pick up this repo's CLAUDE.md
+# or skills, journal events stay out of its journal, and the scenario files sit
+# outside the interviewer's working directory.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(git -C "$here" rev-parse --show-toplevel)"
-baseline_ref="origin/master"
+root="${TEMPYR_EVAL_DIR:-$HOME/.tempyr-eval/interview}"
+baseline_ref=""
 candidate_ref=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --dir) root="$2"; shift 2 ;;
     --baseline) baseline_ref="$2"; shift 2 ;;
     --candidate) candidate_ref="$2"; shift 2 ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -31,6 +40,12 @@ skill_path=".claude/skills/tempyr-interview/SKILL.md"
 show_skill() {
   (cd "$repo" && MSYS_NO_PATHCONV=1 git show "$1:$skill_path")
 }
+
+if [[ -z "$baseline_ref" ]]; then
+  rewrite="$(cd "$repo" && git log --reverse --format=%H -S"skeptical design partner" -- "$skill_path" | head -n1)"
+  baseline_ref="${rewrite:+$rewrite^}"
+  baseline_ref="${baseline_ref:-origin/master}"
+fi
 
 if ! command -v tempyr >/dev/null 2>&1; then
   echo "tempyr is not on PATH. Build it from this repo first, e.g.:" >&2
@@ -45,31 +60,32 @@ if ! tempyr journal search --help 2>/dev/null | grep -q -- "--tag"; then
   exit 1
 fi
 
-run="$here/.run/sandbox"
-rm -rf "$run"
-mkdir -p "$run"
+sandbox="$root/sandbox"
+harness="$root/harness"
+rm -rf "$sandbox" "$harness"
+mkdir -p "$sandbox" "$harness/arms/baseline" "$harness/arms/candidate" "$root/results"
 
-cp -R "$here/template/." "$run/"
-cp -R "$here/scenarios" "$run/scenarios"
-cp "$here/rubric.md" "$here/workflow.js" "$run/"
-cp "$repo/schema/default-schema.toml" "$run/.tempyr/schema.toml"
+cp -R "$here/template/." "$sandbox/"
+cp "$repo/schema/default-schema.toml" "$sandbox/.tempyr/schema.toml"
 
-mkdir -p "$run/arms/baseline" "$run/arms/candidate"
-show_skill "$baseline_ref" > "$run/arms/baseline/SKILL.md"
-git -C "$repo" rev-parse "$baseline_ref" > "$run/arms/baseline/SOURCE"
+cp -R "$here/scenarios" "$harness/scenarios"
+cp "$here/rubric.md" "$here/workflow.js" "$harness/"
+
+show_skill "$baseline_ref" > "$harness/arms/baseline/SKILL.md"
+(cd "$repo" && MSYS_NO_PATHCONV=1 git rev-parse "$baseline_ref") > "$harness/arms/baseline/SOURCE"
 if [[ -n "$candidate_ref" ]]; then
-  show_skill "$candidate_ref" > "$run/arms/candidate/SKILL.md"
-  git -C "$repo" rev-parse "$candidate_ref" > "$run/arms/candidate/SOURCE"
+  show_skill "$candidate_ref" > "$harness/arms/candidate/SKILL.md"
+  (cd "$repo" && MSYS_NO_PATHCONV=1 git rev-parse "$candidate_ref") > "$harness/arms/candidate/SOURCE"
 else
-  cp "$repo/$skill_path" "$run/arms/candidate/SKILL.md"
+  cp "$repo/$skill_path" "$harness/arms/candidate/SKILL.md"
   {
     git -C "$repo" rev-parse HEAD
     git -C "$repo" diff --quiet HEAD -- "$skill_path" || echo "(plus uncommitted changes)"
-  } > "$run/arms/candidate/SOURCE"
+  } > "$harness/arms/candidate/SOURCE"
 fi
 
 (
-  cd "$run"
+  cd "$sandbox"
   git init -q
   git config core.autocrlf false
   git add -A
@@ -79,10 +95,10 @@ fi
 )
 
 echo
-echo "Sandbox ready: $run"
-echo "  baseline:  $(head -n1 "$run/arms/baseline/SOURCE")"
-echo "  candidate: $(tr '\n' ' ' < "$run/arms/candidate/SOURCE")"
+echo "Eval workspace ready: $root"
+echo "  baseline:  $(head -n1 "$harness/arms/baseline/SOURCE")"
+echo "  candidate: $(tr '\n' ' ' < "$harness/arms/candidate/SOURCE")"
 echo
 echo "Next:"
-echo "  cd \"$run\" && claude"
+echo "  cd \"$sandbox\" && claude"
 echo "  then run /tempyr-eval"

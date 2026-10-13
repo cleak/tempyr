@@ -10,13 +10,26 @@ export const meta = {
 
 // args: {
 //   rubricPath, arms: [{name, skillPath}],
-//   scenarios: [{id, title, k, brainDump, personaPath, judgePath, scores: [..]}],
+//   scenarios: [{id, title, k, brainDump, personaPath, judgePath, plantedFlaws, scores: [..]}],
 //   maxUserTurns
 // }
 const A = args || {}
 const ARMS = A.arms || []
 const SCENARIOS = A.scenarios || []
-const MAX_USER_TURNS = A.maxUserTurns || 16
+
+// A workflow may spawn at most 1000 agents. Each run uses up to
+// 2 * maxUserTurns + 3 (opening turn, kill-pass, judge); shrink the turn cap
+// rather than let the longest runs be dropped mid-way.
+const AGENT_CAP = 990
+const RUN_COUNT = ARMS.length * SCENARIOS.reduce((n, sc) => n + (sc.k || 1), 0)
+const REQUESTED_TURNS = A.maxUserTurns || 16
+const MAX_USER_TURNS = Math.max(
+  4,
+  Math.min(REQUESTED_TURNS, Math.floor((AGENT_CAP / Math.max(RUN_COUNT, 1) - 3) / 2)),
+)
+if (MAX_USER_TURNS < REQUESTED_TURNS) {
+  log(`Lowered max user turns from ${REQUESTED_TURNS} to ${MAX_USER_TURNS} to stay under the workflow's agent cap; run one arm per workflow to avoid this`)
+}
 
 const INTERVIEWER_SCHEMA = {
   type: 'object',
@@ -128,14 +141,16 @@ function renderTranscript(transcript) {
 const MCP_TOOLS =
   'mcp__tempyr__interview_start,mcp__tempyr__interview_answer,mcp__tempyr__interview_show,' +
   'mcp__tempyr__interview_adjust,mcp__tempyr__interview_add_node,mcp__tempyr__interview_add_edge,' +
-  'mcp__tempyr__graph_search,mcp__tempyr__graph_list,mcp__tempyr__graph_context,' +
+  // graph_context is left out: it always embeds the query, and the sandbox has no
+  // embedding key.
+  'mcp__tempyr__graph_search,mcp__tempyr__graph_list,' +
   'mcp__tempyr__graph_traverse,mcp__tempyr__graph_get_node,mcp__tempyr__journal_search'
 
 function interviewerPrompt(arm, sc, seed, sessionId, transcript) {
   const start = sessionId
     ? `The interview is in progress with session_id \`${sessionId}\`. The user's latest reply is the last USER message below. Handle it exactly as the skill says (record it with interview_answer first, extract, then write your reply).`
     : `This is the very first turn. The user's brain dump is:\n\n"""\n${sc.brainDump}\n"""\n\nStart the interview as the skill says (interview_start with the brain dump, then your opening message).`
-  return `You are the main Claude Code agent running an interview skill, inside an automated evaluation (scenario ${sc.id}, run ${seed + 1}).
+  return `You are the main Claude Code agent running an interview skill, inside an automated evaluation.
 
 Read the skill file at \`${arm.skillPath}\` and follow it exactly, as if it had been loaded for this conversation. You can't talk to the user directly: you see the conversation so far below, and your return value's \`message\` is shown to them.
 
@@ -143,7 +158,7 @@ Tools: load the tempyr MCP tools with ToolSearch, query "select:${MCP_TOOLS}".
 
 Evaluation rules (these override the skill only where they conflict):
 - Never call \`interview_commit\`. When the user approves committing and you have given your final review, return \`done: true\` instead.
-- Don't spawn subagents; do any extraction yourself.
+- Don't spawn subagents and don't use the Skill tool; do any extraction yourself.
 - Don't read files other than the skill file. Don't mention that this is an evaluation.
 
 ${start}
@@ -172,7 +187,7 @@ ${renderTranscript(transcript)}`
 }
 
 function judgePrompt(sc, run) {
-  return `Grade one interview transcript. Read the rubric at \`${A.rubricPath}\` and this scenario's judge notes at \`${sc.judgePath}\`.
+  return `Grade one interview transcript. Read the rubric at \`${A.rubricPath}\` and this scenario's judge notes at \`${sc.judgePath}\`. In \`flaws\`, list every planted flaw from the judge notes (by id), surfaced or not.
 
 Then load \`mcp__tempyr__interview_show\` with ToolSearch ("select:mcp__tempyr__interview_show") and call it with session_id \`${run.sessionId || '(none)'}\` and \`full: true\` to see recorded answers and tentative nodes. If the session id is missing or the call fails, grade from the transcript alone and say so in notes.
 
@@ -201,6 +216,11 @@ async function runInterview(item) {
   sessionId = turn.session_id
   lastPhase = turn.phase
   transcript.push({ who: 'interviewer', text: turn.message })
+  if (!sessionId) {
+    // Without a session every later turn would look like the first one.
+    log(`${tag}: no session id after the opening turn`)
+    return { ...item, transcript, sessionId, endReason: 'no_session', userTurns, lastPhase }
+  }
 
   while (userTurns < MAX_USER_TURNS) {
     const user = await agent(userPrompt(sc, transcript), {
@@ -272,11 +292,19 @@ function summarize(runs) {
     const scored = (key) => judged.filter((r) => (r.sc.scores || []).includes(key))
     const sum = (list, f) => list.reduce((acc, r) => acc + (f(r) || 0), 0)
 
+    // Recall's denominator is the scenario's planted-flaw count, so a judge that
+    // lists only the surfaced flaws can't inflate it.
     const recallRuns = scored('recall')
-    const flaws = recallRuns.flatMap((r) => r.judge.flaws || [])
-    const pushRuns = judged.filter((r) => ['D1', 'D3', 'D4', 'D6'].includes(r.sc.id))
+    const surfacedFlaws = sum(recallRuns, (r) => {
+      const ids = new Set((r.judge.flaws || []).filter((f) => f.surfaced).map((f) => f.id))
+      return Math.min(ids.size, r.sc.plantedFlaws || ids.size)
+    })
+    const plantedFlaws = sum(recallRuns, (r) => r.sc.plantedFlaws || (r.judge.flaws || []).length)
+    const pushRuns = scored('push')
     const divRuns = scored('divergence')
-    const precisionRuns = judged.filter((r) => ['D1', 'D4', 'D6'].includes(r.sc.id))
+    const precisionRuns = judged.filter((r) =>
+      (r.sc.scores || []).some((s) => s === 'divergence_precision' || s === 'go_wilder_precision'),
+    )
     const abandonRuns = rs.filter((r) => (r.sc.scores || []).includes('abandonment'))
 
     const turnsByScenario = {}
@@ -289,7 +317,7 @@ function summarize(runs) {
     byArm[arm.name] = {
       runs: rs.length,
       judged: judged.length,
-      planted_flaw_recall: ratio(flaws.filter((f) => f.surfaced).length, flaws.length),
+      planted_flaw_recall: ratio(surfacedFlaws, plantedFlaws),
       load_bearing_push_rate: ratio(
         sum(pushRuns, (r) => r.judge.pushes.load_bearing),
         sum(pushRuns, (r) => r.judge.pushes.count),

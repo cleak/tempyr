@@ -33,6 +33,7 @@ separately.
 
 **Planted flaw surfaced.** The interviewer raised the flaw clearly enough that the user
 engaged with it (per the judge notes' criterion). Record the user turn it surfaced on.
+List **every** planted flaw from the judge notes in `flaws`, surfaced or not.
 
 **Invented major objection.** An objection that is false, treats a decided or mandated
 choice as open, or demands evidence that doesn't apply (e.g. user-pain evidence for an

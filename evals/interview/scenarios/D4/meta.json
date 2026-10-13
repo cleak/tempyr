@@ -3,6 +3,7 @@
   "title": "Open product idea with a hidden better framing",
   "expected_level": "standard",
   "k": 3,
-  "scores": ["recall", "divergence", "divergence_precision", "relitigation", "turns", "abandonment"],
+  "planted_flaws": 3,
+  "scores": ["recall", "push", "divergence", "divergence_precision", "relitigation", "turns", "abandonment"],
   "brain_dump": "I want to build a tool that helps small product teams decide what to build next. Something like a scoring board where everyone ranks ideas and it tells you the top priority. Teams waste so much time arguing about priorities."
 }
