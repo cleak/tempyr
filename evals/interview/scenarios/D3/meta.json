@@ -1,0 +1,9 @@
+{
+  "id": "D3",
+  "title": "Invites self-answering (CSV export)",
+  "expected_level": "standard",
+  "k": 3,
+  "planted_flaws": 3,
+  "scores": ["recall", "push", "self_answer", "turns", "abandonment"],
+  "brain_dump": "Customers keep asking to get their data out of our analytics dashboard, so let's add a CSV export button on every report. Should be quick."
+}

@@ -1,0 +1,9 @@
+{
+  "id": "D2",
+  "title": "Well-reasoned mandate plan (SSO for an audit finding)",
+  "expected_level": "standard",
+  "expected_focus": "mandate",
+  "k": 3,
+  "scores": ["invented_objections", "relitigation", "turns", "abandonment"],
+  "brain_dump": "Our internal admin console still uses local username/password accounts. The SOC 2 audit flagged it as finding AF-7 and we must remediate by Nov 30. Plan: put the console behind Okta SSO using SAML (it's our company standard), provision and deprovision accounts with SCIM so leavers lose access within 24h, keep one vaulted break-glass local admin with alerting on use, and disable all other local passwords. About 40 ops engineers use the console. Decided; I mainly want this captured cleanly with tasks."
+}

@@ -249,10 +249,12 @@ The opener asks no gap questions. When the reply is recorded, the premise list i
 
 #### S0: Baseline (~2 d)
 
-- **Runner:** a Claude Agent SDK script.
-  - The interviewer loads the skill and the tempyr MCP server.
-  - The **simulated user** is a separate API call with a persona card, hidden facts, and a **fixed patience budget**. Giving up counts as *proxy abandonment*. It rejects irrelevant options and gives a reason.
-  - Models are pinned. Budget: ≤$15 per full run.
+- **Runner:** in-session subagents orchestrated by the Workflow tool, launched by a `/tempyr-eval` skill inside a sandbox tempyr project (`evals/interview/`). The sandbox is its own git repo with a fixture graph, so runs never touch a real graph or journal.
+  - The interviewer is a fresh subagent per turn. It reads its arm's skill file and drives the real tempyr MCP tools; session state carries across turns.
+  - The **simulated user** is a separate subagent with a persona card, hidden facts, and a **fixed patience budget**. Giving up counts as *proxy abandonment*. It rejects irrelevant options and gives a reason.
+  - The workflow script relays messages verbatim and aggregates scores deterministically.
+  - Runs never commit: the judge inspects the session via `interview_show {full: true}`.
+  - Runs on the subscription, not API billing.
 - **Dumps.** D1, D3, and D4 each carry **exactly 3** planted flaws, scored for recall. D2, D5, and D6 carry scenario-specific checks only. Skill examples must never share a domain with any dump.
 
   | Dump | Scenario | Level |
@@ -531,7 +533,7 @@ S1-skill ∥ S0 (baseline pinned by SHA) ─► S1-R (answer-only transitions, f
   - validate-then-write commits
   - versioned schema deltas
 - **Unknown skill adherence.** The "~80%" in `tempyr-interview-spec.md` is an unsourced estimate; the harness will measure actual adherence.
-- **Harness cost.** Mitigated by pinned models, a dollar budget, and small k early.
+- **Harness cost.** Runs on subscription usage as in-session subagents; small k early, full harness only at later gates.
 
 ## 7. Unverified or weak evidence
 
