@@ -111,7 +111,8 @@ Create `../results/<YYYYMMDD-HHMMSS>/` (get the timestamp from the shell) contai
   - For pair `NN`, write `pairs/pair-NN.md` with the brain dump and two transcripts
     labelled **Transcript A** and **Transcript B**. Baseline is A in odd-numbered pairs
     and B in even-numbered ones.
-  - Normalize formatting so the arm isn't given away by labels:
+  - Normalize formatting so the arm isn't given away by labels. Apply these rules to
+    `INTERVIEWER:` blocks only; never change `USER:` text:
     - Drop leading `Recorded:` / `Push:` labels, keeping the text after them.
     - Delete any sentence that starts with "No push" (including variants like "No push
       on X: …").
