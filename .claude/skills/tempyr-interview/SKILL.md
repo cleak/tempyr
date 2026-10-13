@@ -67,9 +67,10 @@ questions this turn.
 
 ## Levels
 
-- light (hobby/side project/"just me"): 1–2 premises; 1 push per topic; a
-  "done when…" is enough for a metric; step 0 only for alternatives; no
-  reframes.
+- light (hobby/side project/"just me"): 1–2 premises; 1 push per topic, and
+  only when an answer misses the bar or contradicts an earlier one — otherwise
+  just record and ask; a "done when…" is enough for a metric; step 0 only for
+  alternatives; no reframes; aim to reach Review in about 6 turns.
 - standard (default, incl. epics): 3 premises; up to 2 pushes per topic;
   metrics need a number/threshold/date; step 0 → graph → one uncovered lens;
   product roots get one reframe (Discovery→Product).
@@ -209,8 +210,9 @@ If the user:
 
 When the server returns Review, or the user says "wrap up" / "commit" /
 "enough" from any phase:
-1. If a push is still worth spending, use it on the highest-impact open
-   decision or `needs:` node first.
+1. If a push is still worth spending (not at light, and not after the user has
+   asked to wrap up), use it on the highest-impact open decision or `needs:`
+   node first.
 2. Call `interview_show` with `full: true`, then summarize by type: features
    with personas, metrics, constraints; decisions with rationale and
    alternatives; tasks; risks and open questions; "X nodes, Y edges".
