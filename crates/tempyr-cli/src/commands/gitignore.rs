@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 /// Interview session archives may contain raw user answers, so they must never
 /// be committed. `tempyr init`, `tempyr schema upgrade --apply`, and
@@ -9,23 +10,67 @@ use std::path::Path;
 pub const INTERVIEW_ARCHIVE_ENTRIES: &[&str] = &[".tempyr/sessions/", ".tempyr/spar/"];
 pub const INTERVIEW_ARCHIVE_HEADER: &str = "# Tempyr interview archives (may contain raw answers)";
 
-/// Return the entries from `entries` that the project `.gitignore` does not cover.
+/// Return the entries from `entries` that are not ignored under `root`.
+///
+/// Inside a git work tree git itself decides (`git check-ignore`), so nested
+/// `.gitignore` files, `.git/info/exclude`, global excludes, `**` patterns and
+/// `!` negations all count. Without git, falls back to a textual check of the
+/// project `.gitignore`.
 pub fn missing_entries<'a>(root: &Path, entries: &[&'a str]) -> anyhow::Result<Vec<&'a str>> {
-    let path = root.join(".gitignore");
-    let existing = if path.exists() {
-        fs::read_to_string(&path)?
-    } else {
-        String::new()
-    };
-    Ok(entries
-        .iter()
-        .copied()
-        .filter(|entry| !is_covered(&existing, entry))
-        .collect())
+    let mut gitignore_text: Option<String> = None;
+    let mut missing = Vec::new();
+    for entry in entries.iter().copied() {
+        let covered = match git_ignores(root, entry) {
+            Some(ignored) => ignored,
+            None => {
+                if gitignore_text.is_none() {
+                    let path = root.join(".gitignore");
+                    gitignore_text = Some(if path.exists() {
+                        fs::read_to_string(&path)?
+                    } else {
+                        String::new()
+                    });
+                }
+                is_covered(gitignore_text.as_deref().unwrap_or_default(), entry)
+            }
+        };
+        if !covered {
+            missing.push(entry);
+        }
+    }
+    Ok(missing)
 }
 
-/// Append any of `entries` the project `.gitignore` does not already cover,
-/// under `header`. Returns the entries that were added.
+/// Ask git whether `entry` (a `.gitignore`-style path relative to `root`) is
+/// ignored. Directory entries are probed through a file inside them. Returns
+/// `None` when git is unavailable or `root` is not inside a work tree.
+fn git_ignores(root: &Path, entry: &str) -> Option<bool> {
+    let entry = entry.strip_prefix('/').unwrap_or(entry);
+    let probe = if entry.ends_with('/') {
+        format!("{entry}probe")
+    } else {
+        entry.to_string()
+    };
+    let status = Command::new("git")
+        .args(["check-ignore", "-q", "--no-index", "--"])
+        .arg(&probe)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    // 0 = ignored, 1 = not ignored, anything else (128) = not a repo or error.
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Append any of `entries` that are not already ignored (see
+/// [`missing_entries`]) to the project `.gitignore`, under `header`. Returns
+/// the entries that were added.
 pub fn ensure_entries<'a>(
     root: &Path,
     header: &str,
@@ -138,6 +183,63 @@ mod tests {
         assert_eq!(
             fs::read_to_string(tmp.path().join(".gitignore")).unwrap(),
             "# header\n.env.local\n"
+        );
+    }
+
+    fn git_init(dir: &Path) {
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .status()
+            .expect("git is required for these tests");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn git_decides_coverage_from_nested_gitignore_and_info_exclude() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_init(tmp.path());
+        fs::create_dir_all(tmp.path().join(".tempyr")).unwrap();
+        // Neither of these is visible to a textual check of the root file.
+        fs::write(tmp.path().join(".tempyr/.gitignore"), "sessions/\n").unwrap();
+        fs::write(tmp.path().join(".git/info/exclude"), "**/spar/\n").unwrap();
+
+        let missing = missing_entries(tmp.path(), INTERVIEW_ARCHIVE_ENTRIES).unwrap();
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let added = ensure_entries(
+            tmp.path(),
+            INTERVIEW_ARCHIVE_HEADER,
+            INTERVIEW_ARCHIVE_ENTRIES,
+        )
+        .unwrap();
+        assert!(added.is_empty());
+        assert!(!tmp.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn git_honours_negations() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_init(tmp.path());
+        let body = ".tempyr/*\n!.tempyr/spar/\n";
+        fs::write(tmp.path().join(".gitignore"), body).unwrap();
+        // The textual fallback would treat `.tempyr/*` as covering both.
+        assert!(is_covered(body, ".tempyr/spar/"));
+
+        let missing = missing_entries(tmp.path(), INTERVIEW_ARCHIVE_ENTRIES).unwrap();
+        assert_eq!(missing, vec![".tempyr/spar/"]);
+
+        let added = ensure_entries(
+            tmp.path(),
+            INTERVIEW_ARCHIVE_HEADER,
+            INTERVIEW_ARCHIVE_ENTRIES,
+        )
+        .unwrap();
+        assert_eq!(added, vec![".tempyr/spar/"]);
+        assert!(
+            missing_entries(tmp.path(), INTERVIEW_ARCHIVE_ENTRIES)
+                .unwrap()
+                .is_empty()
         );
     }
 

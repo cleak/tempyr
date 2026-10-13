@@ -516,6 +516,8 @@ fn downgrade_to_pre_interview_edges(dir: &TempDir) {
 #[test]
 fn test_schema_upgrade_dry_run_then_apply() {
     let tmp = TempDir::new().unwrap();
+    // The doctor's .gitignore warning only applies inside a git repository.
+    init_git_repo(tmp.path());
     init_project(&tmp);
     downgrade_to_pre_interview_edges(&tmp);
     let schema_path = tmp.path().join(".tempyr/schema.toml");
@@ -553,7 +555,9 @@ fn test_schema_upgrade_dry_run_then_apply() {
         .args(["schema", "upgrade", "--apply"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Applied."));
+        .stdout(predicate::str::contains(
+            "Applied. Updated .tempyr/schema.toml, .tempyr/config.toml, and .gitignore.",
+        ));
     let schema_after = fs::read_to_string(&schema_path).unwrap();
     let eol = schema_eol(&schema_after);
     assert!(schema_after.starts_with(&format!("# my schema notes{eol}")));
@@ -606,6 +610,19 @@ fn test_schema_upgrade_dry_run_then_apply() {
         ))
         .stdout(predicate::str::contains("Schema is up to date."));
     assert_eq!(fs::read_to_string(&schema_path).unwrap(), trimmed);
+}
+
+#[test]
+fn test_doctor_skips_gitignore_warning_outside_git() {
+    let tmp = TempDir::new().unwrap();
+    init_project(&tmp);
+    fs::remove_file(tmp.path().join(".gitignore")).unwrap();
+    tempyr()
+        .current_dir(tmp.path())
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".gitignore does not cover").not());
 }
 
 #[test]

@@ -306,23 +306,7 @@ fn push_allowed_edge(
             entry.insert("target", target.into());
             let mut value = Value::InlineTable(entry);
 
-            let prefix = match array.iter().last() {
-                // Reuse the indentation of the last element, dropping any comment
-                // lines that precede it.
-                Some(last) => {
-                    let last_prefix = last.decor().prefix().and_then(|p| p.as_str());
-                    match last_prefix.and_then(|p| p.rfind('\n').map(|i| &p[i..])) {
-                        Some(indent) => indent.to_string(),
-                        None => " ".to_string(),
-                    }
-                }
-                None => {
-                    array.set_trailing("\n");
-                    array.set_trailing_comma(true);
-                    "\n  ".to_string()
-                }
-            };
-            value.decor_mut().set_prefix(prefix);
+            value.decor_mut().set_prefix(append_prefix(array));
             value.decor_mut().set_suffix("");
             array.push_formatted(value);
             Ok(true)
@@ -341,6 +325,55 @@ fn push_allowed_edge(
     }
 }
 
+/// Prepare `array` for one more element and return the prefix that element
+/// needs so the result matches the existing layout.
+///
+/// toml_edit keeps the whitespace (and any comment) between the last element
+/// and `]` as that element's suffix when there is no trailing comma, so a
+/// plain push would land after the newline. That text is moved to the array's
+/// trailing decor first; a multi-line array also gains a trailing comma. A
+/// same-line comment after the last element stays with that element.
+fn append_prefix(array: &mut Array) -> String {
+    fn raw(text: Option<&toml_edit::RawString>) -> String {
+        text.and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    let Some(last_prefix) = array.iter().last().map(|last| raw(last.decor().prefix())) else {
+        // Keep any comment lines that sit inside the empty array.
+        let existing = raw(Some(array.trailing()));
+        array.set_trailing("\n");
+        array.set_trailing_comma(true);
+        return format!("{}\n  ", existing.trim_end());
+    };
+
+    // Reuse the indentation of the last element, dropping any comment lines
+    // that precede it.
+    let indent = match last_prefix.rfind('\n') {
+        Some(i) => last_prefix[i..].to_string(),
+        None => " ".to_string(),
+    };
+
+    if !array.trailing_comma() {
+        let last = array.iter_mut().last().expect("non-empty array");
+        let suffix = raw(last.decor().suffix());
+        last.decor_mut().set_suffix("");
+        let trailing = format!("{suffix}{}", raw(Some(array.trailing())));
+        array.set_trailing_comma(trailing.contains('\n'));
+        array.set_trailing(trailing);
+    }
+
+    let trailing = raw(Some(array.trailing()));
+    match trailing.find('\n') {
+        Some(i) if trailing[..i].trim_start().starts_with('#') => {
+            array.set_trailing(&trailing[i..]);
+            format!("{}{indent}", &trailing[..i])
+        }
+        _ => indent,
+    }
+}
+
 /// `tempyr schema upgrade`. Dry-run unless `apply` is set.
 pub fn run_upgrade(ctx: &ProjectContext, apply: bool, json: bool) -> anyhow::Result<()> {
     let schema_path = ctx.tempyr_dir.join("schema.toml");
@@ -353,22 +386,28 @@ pub fn run_upgrade(ctx: &ProjectContext, apply: bool, json: bool) -> anyhow::Res
     let missing_ignores =
         gitignore::missing_entries(&ctx.root, gitignore::INTERVIEW_ARCHIVE_ENTRIES)?;
 
+    let mut written = Vec::new();
     if apply {
         // Schema first: if the config write fails, a re-run finds the edges
         // already present and only records the delta.
         if plan.schema_changed {
             fs::write(&schema_path, &plan.schema_text)
                 .with_context(|| format!("writing {}", schema_path.display()))?;
+            written.push(".tempyr/schema.toml");
         }
         if plan.config_changed {
             fs::write(&config_path, &plan.config_text)
                 .with_context(|| format!("writing {}", config_path.display()))?;
+            written.push(".tempyr/config.toml");
         }
-        gitignore::ensure_entries(
+        let added = gitignore::ensure_entries(
             &ctx.root,
             gitignore::INTERVIEW_ARCHIVE_HEADER,
             gitignore::INTERVIEW_ARCHIVE_ENTRIES,
         )?;
+        if !added.is_empty() {
+            written.push(".gitignore");
+        }
     }
 
     if json {
@@ -378,10 +417,12 @@ pub fn run_upgrade(ctx: &ProjectContext, apply: bool, json: bool) -> anyhow::Res
             "config_changed": plan.config_changed,
             "deltas": plan.deltas,
             "gitignore_additions": missing_ignores,
+            "files_written": written,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        print!("{}", render_text(&plan, &missing_ignores, apply));
+        let written = apply.then_some(written.as_slice());
+        print!("{}", render_text(&plan, &missing_ignores, written));
     }
     Ok(())
 }
@@ -394,7 +435,8 @@ fn read_optional(path: &Path) -> anyhow::Result<String> {
     }
 }
 
-fn render_text(plan: &UpgradePlan, missing_ignores: &[&str], apply: bool) -> String {
+/// `written` is `None` for a dry run, otherwise the files actually updated.
+fn render_text(plan: &UpgradePlan, missing_ignores: &[&str], written: Option<&[&str]>) -> String {
     let mut out = String::new();
     let pending = plan.deltas.iter().any(|d| d.status == DeltaStatus::Pending);
 
@@ -435,14 +477,28 @@ fn render_text(plan: &UpgradePlan, missing_ignores: &[&str], apply: bool) -> Str
 
     if !pending && missing_ignores.is_empty() {
         out.push_str("Schema is up to date.\n");
-    } else if apply {
-        out.push_str("Applied. Updated .tempyr/schema.toml, .tempyr/config.toml, and .gitignore as listed.\n");
+    } else if let Some(written) = written {
+        if written.is_empty() {
+            out.push_str("Applied. No files needed changes.\n");
+        } else {
+            out.push_str(&format!("Applied. Updated {}.\n", join_list(written)));
+        }
     } else {
         out.push_str(
             "Dry run: nothing written. Re-run with `tempyr schema upgrade --apply` to apply.\n",
         );
     }
     out
+}
+
+/// `a`, `a and b`, `a, b, and c`.
+fn join_list(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [a, b] => format!("{a} and {b}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
 }
 
 #[cfg(test)]
@@ -652,6 +708,110 @@ child_of = { reverse = "parent_of" }
         parsed.validate_edge("epic", "has_risk", "risk").unwrap();
         parsed.validate_edge("risk", "risk_for", "epic").unwrap();
         assert_eq!(parsed.node_types["epic"].allowed_edges.len(), 2);
+    }
+
+    /// Upgrade a minimal schema whose epic has `allowed_edges = <array>` and
+    /// return the rewritten array text.
+    fn upgraded_epic_array(array: &str) -> String {
+        let schema = format!(
+            r#"[meta]
+version = "1"
+description = "arrays"
+
+[node_types.epic]
+description = "Epic"
+directory = "epics"
+allowed_edges = {array}
+
+[node_types.risk]
+description = "Risk"
+directory = "risks"
+
+[edge_types]
+parent_of = {{ reverse = "child_of" }}
+child_of = {{ reverse = "parent_of" }}
+"#
+        );
+        let plan = plan_upgrade(&schema, "", SCHEMA_DELTAS).unwrap();
+        let parsed: Schema = plan.schema_text.parse().unwrap();
+        parsed.validate_edge("epic", "has_risk", "risk").unwrap();
+        let start = plan.schema_text.find("allowed_edges = ").unwrap();
+        let end = start + plan.schema_text[start..].find("\n\n").unwrap();
+        plan.schema_text[start..end].to_string()
+    }
+
+    const PARENT: &str = r#"{ type = "parent_of", target = "epic" }"#;
+    const CHILD: &str = r#"{ type = "child_of", target = "epic" }"#;
+    const RISK: &str = r#"{ type = "has_risk", target = "risk" }"#;
+
+    #[test]
+    fn appends_to_multiline_array_without_trailing_comma() {
+        let out = upgraded_epic_array(&format!("[\n  {PARENT},\n  {CHILD}\n]"));
+        assert_eq!(
+            out,
+            format!("allowed_edges = [\n  {PARENT},\n  {CHILD},\n  {RISK},\n]")
+        );
+    }
+
+    #[test]
+    fn appends_to_multiline_array_with_trailing_comma() {
+        let out = upgraded_epic_array(&format!("[\n  {PARENT},\n  {CHILD},\n]"));
+        assert_eq!(
+            out,
+            format!("allowed_edges = [\n  {PARENT},\n  {CHILD},\n  {RISK},\n]")
+        );
+    }
+
+    #[test]
+    fn same_line_comment_stays_with_last_element() {
+        let expected = format!("allowed_edges = [\n  {PARENT},\n  {CHILD}, # c2\n  {RISK},\n]");
+        let with_comma = upgraded_epic_array(&format!("[\n  {PARENT},\n  {CHILD}, # c2\n]"));
+        assert_eq!(with_comma, expected);
+        let without_comma = upgraded_epic_array(&format!("[\n  {PARENT},\n  {CHILD} # c2\n]"));
+        assert_eq!(without_comma, expected);
+    }
+
+    #[test]
+    fn appends_to_single_line_and_empty_arrays() {
+        assert_eq!(
+            upgraded_epic_array(&format!("[ {PARENT} ]")),
+            format!("allowed_edges = [ {PARENT}, {RISK} ]")
+        );
+        // Comment lines inside an empty array survive.
+        assert_eq!(
+            upgraded_epic_array("[\n  # none yet\n]"),
+            format!("allowed_edges = [\n  # none yet\n  {RISK},\n]")
+        );
+    }
+
+    fn pending_plan() -> UpgradePlan {
+        plan_upgrade(&legacy_schema(), "", SCHEMA_DELTAS).unwrap()
+    }
+
+    #[test]
+    fn applied_message_lists_only_written_files() {
+        let plan = pending_plan();
+        let all = render_text(
+            &plan,
+            &[".tempyr/spar/"],
+            Some(&[".tempyr/schema.toml", ".tempyr/config.toml", ".gitignore"]),
+        );
+        assert!(all.ends_with(
+            "Applied. Updated .tempyr/schema.toml, .tempyr/config.toml, and .gitignore.\n"
+        ));
+
+        let config_only = render_text(&plan, &[], Some(&[".tempyr/config.toml"]));
+        assert!(config_only.ends_with("Applied. Updated .tempyr/config.toml.\n"));
+
+        let two = render_text(
+            &plan,
+            &[],
+            Some(&[".tempyr/schema.toml", ".tempyr/config.toml"]),
+        );
+        assert!(two.ends_with("Applied. Updated .tempyr/schema.toml and .tempyr/config.toml.\n"));
+
+        let dry = render_text(&plan, &[], None);
+        assert!(dry.ends_with("Re-run with `tempyr schema upgrade --apply` to apply.\n"));
     }
 
     #[test]
