@@ -238,6 +238,9 @@ pub fn run_commit(ctx: &ProjectContext, session_id: &str, agent: &str) -> anyhow
             println!("  {}", path.display());
         }
     }
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
     super::warn_if_index_refresh_fails(ctx);
 
     // Phase 4b: emit Committed (final outcome) so the journal session

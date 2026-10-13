@@ -547,7 +547,7 @@ fn run_bm25_query(
 }
 
 /// Filter-only listing for an empty query: every entry passing the
-/// filters, newest first. `bm25_raw` is 0, so scoring reduces to the
+/// filters, pulled newest first. `bm25_raw` is 0, so the final ranking is the
 /// recency + kind boosts.
 fn run_filter_only_query(
     conn: &Connection,

@@ -957,7 +957,7 @@ pub struct JournalSearchParams {
     /// FTS5 query string. Supports `"phrase"`, `term1 OR term2`, and
     /// `prefix*`. Snake-case identifiers (e.g. `parse_and_insert`)
     /// match as regular tokens. May be empty when `tags` or `references`
-    /// is given, for a filter-only listing (newest first).
+    /// is given, for a filter-only listing ranked by recency + kind.
     #[serde(default)]
     pub query: String,
     /// Require every listed tag, e.g. `disposition:rebut`. Empty/absent =
@@ -2594,13 +2594,18 @@ impl TempyrServer {
 
     #[tool(
         name = "journal_search",
-        description = "Search journal entries by full-text query, ranked by BM25 + recency boost (14-day half-life) + kind boost (decisions/dead-ends weighted higher than plans/questions). Use this to find what past sessions know about a topic — e.g., to look up dead-ends another agent (or a past version of yourself) hit when tackling something similar. Filter by kind (e.g., `[\"dead_end\", \"decision\"]`) to focus on the high-value entries. The `explain` flag breaks the score into BM25 / recency / kind components — useful when ranking surprises you. Returns hits with full Entry JSON; detail bodies may be truncated to fit `token_budget`.",
+        description = "Search journal entries by full-text query, ranked by BM25 + recency boost (14-day half-life) + kind boost (decisions/dead-ends weighted higher than plans/questions). Use this to find what past sessions know about a topic — e.g., to look up dead-ends another agent (or a past version of yourself) hit when tackling something similar. Filter by kind (e.g., `[\"dead_end\", \"decision\"]`) to focus on the high-value entries, by `tags` (all must match, e.g. `[\"disposition:rebut\"]`), or by `references` (graph node ids, any may match). With `tags` or `references`, the query may be empty for a filter-only listing ranked by recency + kind. The `explain` flag breaks the score into BM25 / recency / kind components — useful when ranking surprises you. Returns hits with full Entry JSON; detail bodies may be truncated to fit `token_budget`.",
         annotations(read_only_hint = true, idempotent_hint = true)
     )]
     fn journal_search(
         &self,
         Parameters(p): Parameters<JournalSearchParams>,
     ) -> Result<String, String> {
+        let no_filters = p.tags.as_ref().is_none_or(|t| t.is_empty())
+            && p.references.as_ref().is_none_or(|r| r.is_empty());
+        if p.query.trim().is_empty() && no_filters {
+            return Err("provide a query, tags, or references".to_string());
+        }
         let (graph_dir, _gf_dir, _schema) = self.find_project()?;
         let project_root = graph_dir
             .parent()

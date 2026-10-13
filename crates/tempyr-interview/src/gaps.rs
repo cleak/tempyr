@@ -155,9 +155,10 @@ pub fn detect_gaps_with_graph(
             let edge_type = &allowed_edge.edge_type;
             let target_type = &allowed_edge.target;
 
-            // Check if this edge type is already covered
-            let has_edge = session.has_edge_type_from_root(edge_type);
-            let has_target_type = session.has_node_of_type(target_type)
+            // Check if this edge type is already covered. Nodes still marked
+            // `needs:` don't count, so the gap keeps pointing at them.
+            let has_edge = session.has_ready_edge_type_from_root(edge_type);
+            let has_target_type = session.has_ready_node_of_type(target_type)
                 || session
                     .graph_context
                     .iter()
