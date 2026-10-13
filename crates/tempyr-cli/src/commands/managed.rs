@@ -34,7 +34,8 @@ pub enum ManagedArtifact {
     Agent,
     /// The `/tempyr-spar` skill; installed whenever `Skill` is selected.
     SparSkill,
-    /// The `tempyr-critic` subagent; installed whenever `Agent` is selected.
+    /// The `tempyr-critic` subagent; installed whenever `Skill` is selected,
+    /// because the interview and spar skills are what launch it.
     CriticAgent,
 }
 
@@ -45,7 +46,7 @@ impl ManagedArtifact {
     fn implied_by(self) -> Option<ManagedArtifact> {
         match self {
             Self::SparSkill => Some(Self::Skill),
-            Self::CriticAgent => Some(Self::Agent),
+            Self::CriticAgent => Some(Self::Skill),
             Self::Hooks | Self::Skill | Self::Agent => None,
         }
     }
@@ -939,16 +940,12 @@ mod tests {
     }
 
     #[test]
-    fn test_skill_and_agent_imply_spar_and_critic() {
+    fn test_skill_implies_spar_skill_and_critic() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".tempyr")).unwrap();
 
-        let results = install_selected(
-            dir.path(),
-            false,
-            &[ManagedArtifact::Skill, ManagedArtifact::Agent],
-        )
-        .unwrap();
+        // The critic comes with the skills that launch it, even without `Agent`.
+        let results = install_selected(dir.path(), false, &[ManagedArtifact::Skill]).unwrap();
         let paths: Vec<&str> = results.iter().map(|r| r.path).collect();
         assert!(paths.contains(&".claude/skills/tempyr-spar/SKILL.md"));
         assert!(paths.contains(&".claude/agents/tempyr-critic.md"));
@@ -964,7 +961,7 @@ mod tests {
         let manifest = load_manifest(dir.path()).unwrap().unwrap();
         assert_eq!(
             manifest.managed_artifacts,
-            Some(vec![ManagedArtifact::Skill, ManagedArtifact::Agent])
+            Some(vec![ManagedArtifact::Skill])
         );
         assert!(
             manifest

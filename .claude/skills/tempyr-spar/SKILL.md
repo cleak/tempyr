@@ -53,6 +53,9 @@ Never include conversation transcript in the packet.
 
 Spawn `tempyr-critic` with `lens`, `focus`, `packet` (JSON), and `settled`. For
 `panel`, spawn one per lens in parallel. Never show one critic another's output.
+If the subagent isn't available (e.g. in Codex), run each critique yourself as a
+separate pass that sees only the packet and settled items, following
+`.claude/agents/tempyr-critic.md` or `.agents/skills/tempyr-spar/critic.md`.
 
 ## 3. Validate before showing anything
 
@@ -90,8 +93,10 @@ under this lens and list what's well-reasoned.
 ## 5. Apply each disposition
 
 - **accept**: preview the change, then write it on confirmation.
-  - A risk becomes a `risk` node linked with `has_risk` / `risk_for`.
-  - An assumption becomes an `open_question` linked with `has_question` /
+  - A risk becomes a `risk` node (`status: identified`) linked with `has_risk` /
+    `risk_for`.
+  - An assumption becomes an `open_question` (`status: open`) linked with
+    `has_question` /
     `question_for`.
   - An alternative goes under `## Alternatives considered` in the target's body.
   - If no valid edge exists for the target's type, append to its body under

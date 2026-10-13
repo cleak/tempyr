@@ -4,8 +4,7 @@ description: >
   Independent red-team critic for Tempyr graph nodes. Given a packet of nodes, a
   lens, and the items already settled, returns at most a few specific, quoted
   objections — or none. Used by /tempyr-spar and the interview's kill-pass.
-allowed-tools:
-  - mcp__tempyr__graph_get_node
+tools: mcp__tempyr__graph_get_node
 ---
 
 # Tempyr Critic
